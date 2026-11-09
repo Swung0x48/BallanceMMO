@@ -918,7 +918,8 @@ Linux SimTool replays them exactly.
 ## 24. Collision surfaces remembered by their inputs (physics_RT)
 
 Files: `Source/BuildingBlocks/physics_RT/CKIpionManager.cpp` / `.h` (new
-`PhysicsSurfaceMemo`, member `m_SurfaceMemo`).
+`PhysicsSurfaceMemo`, member `m_SurfaceMemo`, `RememberConvexSurface`,
+`BuildCollisionSurface`); the bridge's `trafo_set_register` for step A2.
 
 `CreatePhysicsObjectOnParameters` caches a compiled surface under the
 caller's Collision Surface name. The trafo explosion's pieces have one name
@@ -964,6 +965,26 @@ same in both modes: noise of about a millisecond). The worst tick of a room is
 that first explosion, so a room's capacity does not change; what changes is
 every later explosion and every rollback replay through one.
 
+Step A2 (2026-11-09): the first explosion copies too. `trafo_set_register`
+(bridge v21, every host: server, headless client, retail client) hands every
+piece of the set it registers to the new `RememberConvexSurface`, which
+compiles the surface a Physicalize of that piece would want (its scale as it
+stands, its current mesh) into the memo only: no name, no body. A world's
+first registered set compiles them; every later set's pieces have the same
+inputs and cost a lookup. The pieces need no extra placement: at registration
+their local matrices already give the explosion's scale bits (every
+explosion's pieces hit, the first included: 16 / 32 / 96 hits at 8 / 16 / 32
+players on x64 and x86, equal to a build byte for byte, no piece compiled in a
+tick). The sets register while the world is set up, before its first tick,
+so no tick pays for it. Timing as above (medians of 6):
+
+| Tick | step A only | with A2 |
+|---|---|---|
+| x64, 16 players, 957 (first explosion) | 6.7 | 2.0 |
+| x64, 16 players, the session's worst | 6.7 | 2.6 |
+| x86, 16 players, 957 | 6.4 | 2.0 |
+| x86, 32 players, the session's worst | 8.2 | 5.9 |
+
 On a build with the x87 model (`BMMO_PHYSICS_X87`), the key also holds the
 thread's x87 precision and rounding (AddConvexSurface rounds the scaled
 vertices at them), and a hit raises the thread's precision to 64 bits as the
@@ -972,6 +993,8 @@ never restores it; a BallanceMMO host resets it to 24 at every level load).
 The raise is one ivp entry point both call,
 `IVP_SurfaceBuilder_Pointsoup::enter_hull_precision` (x87-soft: ivp
 `e2f02da`, BuildingBlocks `37263b7`).
+
+With the x87 model `RememberConvexSurface` compiles only on a thread already at 64-bit precision (a level's first hull is behind it), so a registration never raises the precision as a build would (x87-soft: BuildingBlocks `5141bce`).
 
 ---
 
