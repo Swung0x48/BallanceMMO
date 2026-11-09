@@ -1511,9 +1511,13 @@ namespace bmmo::sim {
             uint32_t source = bmmo::session::INPUT_SOURCE_DEFAULT;
             // Before take() moves the cursor past it.
             const bool settled = buffer.settled(tick);
+            // A lead hold's ticks are never released (stall_policy.hpp): the
+            // SessionLead gave the owner their frozen frame as final, and it
+            // drops the held records of that range as already learned.
+            const bool lead_held = buffer.held(tick);
             const auto& taken = buffer.take(tick, fresh, source, cutoff);
             bool released = false;
-            const bmmo::session::input_frame frame = fresh ? taken : stall_frame(taken, tick, source, released);
+            const bmmo::session::input_frame frame = fresh ? taken : stall_frame(taken, tick, source, lead_held, released);
             // Said once a stall: the frames a resumed client sends next are for
             // its old ticks, each a new (still too old) substitute.
             if (released) {

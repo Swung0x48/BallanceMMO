@@ -34,12 +34,18 @@ namespace NSDumpFile {
             stLocalTime.wHour, stLocalTime.wMinute, stLocalTime.wSecond, suffix);
     }
 
-    void CreateDumpFile(LPCSTR lpstrDumpFilePathName, EXCEPTION_POINTERS* pException,
+    // Set once the crash filter runs: the hang watch stops for good (the
+    // crash box does not pump messages, so the window would read hung).
+    std::atomic<bool> crashing{false};
+
+    // False when the file or the dump could not be written (the file is then removed).
+    bool CreateDumpFile(LPCSTR lpstrDumpFilePathName, EXCEPTION_POINTERS* pException,
                         MINIDUMP_TYPE type = MiniDumpWithDataSegs)
     {
         // create dump file
         //
         HANDLE hDumpFile = CreateFile(lpstrDumpFilePathName, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hDumpFile == INVALID_HANDLE_VALUE) return false;
         //HANDLE hTest = CreateFileA("C:\\Users\\Swung0x48\\Desktop\\dump\\test.txt", GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         
 
@@ -55,8 +61,9 @@ namespace NSDumpFile {
 
         // write in dump file
         //
-        if (pDump && pDump(GetCurrentProcess(), GetCurrentProcessId(), hDumpFile, type,
-                           pException ? &dumpInfo : NULL, NULL, NULL)) {
+        const bool written = pDump && pDump(GetCurrentProcess(), GetCurrentProcessId(), hDumpFile, type,
+                                            pException ? &dumpInfo : NULL, NULL, NULL);
+        if (written) {
         //    //DWORD bytesWritten;
         //    //WriteFile(
         //    //    hTest,            // Handle to the file
@@ -70,6 +77,8 @@ namespace NSDumpFile {
 
         CloseHandle(hDumpFile);
         //CloseHandle(hTest);
+        if (!written) DeleteFile(lpstrDumpFilePathName);
+        return written;
     }
 
     LPTOP_LEVEL_EXCEPTION_FILTER __stdcall MyDummySetUnhandledExceptionFilter(LPTOP_LEVEL_EXCEPTION_FILTER lpTopLevelExceptionFilter)
@@ -111,6 +120,7 @@ namespace NSDumpFile {
 
     LONG WINAPI UnhandledExceptionFilterEx(struct ::_EXCEPTION_POINTERS* pException)
     {
+        crashing = true;
         /*TCHAR szMbsFile[MAX_PATH] = { 0 };
         ::GetModuleFileName(NULL, szMbsFile, MAX_PATH);
         TCHAR* pFind = _tcsrchr(szMbsFile, '\\');
@@ -172,11 +182,18 @@ namespace NSDumpFile {
         std::atomic<bool> hang_armed{false};
         std::atomic<bool> hang_dumped{false};     // a dump was written for the current stall
         std::atomic<ULONGLONG> hang_dumped_beat{0};
-        TCHAR hang_file[MAX_PATH]{};              // written by the watch before hang_dumped
+        std::atomic<DWORD> hang_dump_error{0};    // 0: written; else the error writing it
+        TCHAR hang_file[MAX_PATH]{};              // written by the watch before hang_dumped (release)
         std::mutex hang_mutex;
         std::condition_variable hang_wake;
         bool hang_stop = false;
-        std::thread hang_thread;
+        // Detached, not destroyed joinable, on an exit that skips StopHangWatch
+        // (a crash's FatalExit): the thread is gone by then, and a joinable
+        // std::thread's destructor would call std::terminate at DLL detach.
+        struct hang_thread_holder {
+            std::thread thread;
+            ~hang_thread_holder() { if (thread.joinable()) thread.detach(); }
+        } hang_thread;
 
         // Windows' own "Not Responding": a visible window of this process whose
         // thread has not pumped messages for 5 s.  False for an alt-tab, a
@@ -201,14 +218,15 @@ namespace NSDumpFile {
             std::unique_lock lk(hang_mutex);
             while (!hang_wake.wait_for(lk, std::chrono::milliseconds(500), [] { return hang_stop; })) {
                 const ULONGLONG beat = hang_beat.load();
-                if (!hang_armed.load() || hang_dumped.load() || GetTickCount64() - beat < kHangMs) continue;
+                if (crashing.load() || !hang_armed.load() || hang_dumped.load() || GetTickCount64() - beat < kHangMs)
+                    continue;
                 if (!own_window_hung()) continue;
                 _mkdir(DumpPath);
                 DumpFileName(hang_file, sizeof(hang_file), "_hang");
                 // No exception: every thread's stack, the game thread's where it stalls.
-                CreateDumpFile(hang_file, nullptr,
-                               static_cast<MINIDUMP_TYPE>(MiniDumpWithDataSegs | MiniDumpWithThreadInfo |
-                                                          MiniDumpWithHandleData));
+                const bool written = CreateDumpFile(hang_file, nullptr,
+                        static_cast<MINIDUMP_TYPE>(MiniDumpWithDataSegs | MiniDumpWithThreadInfo | MiniDumpWithHandleData));
+                hang_dump_error = written ? 0 : (GetLastError() ? GetLastError() : ERROR_GEN_FAILURE);
                 hang_dumped_beat = beat;
                 hang_dumped = true;
             }
@@ -218,11 +236,11 @@ namespace NSDumpFile {
     void StartHangWatch()
     {
         std::lock_guard lk(hang_mutex);
-        if (hang_thread.joinable()) return;
+        if (hang_thread.thread.joinable()) return;
         hang_stop = false;
         hang_beat = GetTickCount64();
         ::LoadLibrary(_T("dbghelp.dll"));   // loaded now: a hang inside the loader lock must not block the dump
-        hang_thread = std::thread(hang_watch_loop);
+        hang_thread.thread = std::thread(hang_watch_loop);
     }
 
     void StopHangWatch()
@@ -232,7 +250,7 @@ namespace NSDumpFile {
             hang_stop = true;
         }
         hang_wake.notify_all();
-        if (hang_thread.joinable()) hang_thread.join();
+        if (hang_thread.thread.joinable()) hang_thread.thread.join();
     }
 
     bool HangWatchBeat(bool armed, char* report, size_t size)
@@ -240,8 +258,13 @@ namespace NSDumpFile {
         const ULONGLONG now = GetTickCount64();
         bool reported = false;
         if (hang_dumped.load()) {
-            snprintf(report, size, "the game thread stalled for %.1f s; a hang dump was written: %s",
-                     (now - hang_dumped_beat.load()) / 1000.0, hang_file);
+            const DWORD error = hang_dump_error.load();
+            if (error == 0)
+                snprintf(report, size, "the game thread stalled for %.1f s; a hang dump was written: %s",
+                         (now - hang_dumped_beat.load()) / 1000.0, hang_file);
+            else
+                snprintf(report, size, "the game thread stalled for %.1f s; writing the hang dump %s failed (error %lu)",
+                         (now - hang_dumped_beat.load()) / 1000.0, hang_file, static_cast<unsigned long>(error));
             hang_dumped = false;
             reported = true;
         }

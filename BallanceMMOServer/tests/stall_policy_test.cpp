@@ -28,10 +28,10 @@ TEST(StallPolicy, KeysHeldUpToThreeSecondsThenReleased) {
     const input_frame last = held_keys();
     const uint32_t source = 1000;
     bool released = true;
-    const input_frame at_limit = stall_frame(last, source + kStallReleaseTicks, source, released);
+    const input_frame at_limit = stall_frame(last, source + kStallReleaseTicks, source, false, released);
     EXPECT_FALSE(released);
     EXPECT_EQ(at_limit.keys, last.keys);
-    const input_frame past = stall_frame(last, source + kStallReleaseTicks + 1, source, released);
+    const input_frame past = stall_frame(last, source + kStallReleaseTicks + 1, source, false, released);
     EXPECT_TRUE(released);
     EXPECT_EQ(past.keys, 0);
     // Only the keys: the ball keeps its type, its state flags and its camera.
@@ -43,7 +43,7 @@ TEST(StallPolicy, KeysHeldUpToThreeSecondsThenReleased) {
 TEST(StallPolicy, TheDefaultFrameIsNotARelease) {
     bool released = true;
     const input_frame none{};
-    const input_frame f = stall_frame(none, 5000, bmmo::session::INPUT_SOURCE_DEFAULT, released);
+    const input_frame f = stall_frame(none, 5000, bmmo::session::INPUT_SOURCE_DEFAULT, false, released);
     EXPECT_FALSE(released);
     EXPECT_EQ(f.keys, 0);
 }
@@ -54,8 +54,22 @@ TEST(StallPolicy, AReleasedRecordGoesInline) {
     const uint32_t source = 500;
     for (uint32_t tick = source + kStallReleaseTicks + 1; tick < source + kStallReleaseTicks + 40; ++tick) {
         bool released = false;
-        stall_frame(held_keys(), tick, source, released);
+        stall_frame(held_keys(), tick, source, false, released);
         ASSERT_TRUE(released);
         EXPECT_TRUE(bmmo::session::held_inline(tick, source, 0)) << tick;
     }
+}
+
+TEST(StallPolicy, NeverReleasedInsideALeadHold) {
+    // The SessionLead gave the owner the hold's frozen frame as final, and the
+    // owner drops the range's held records: a release there would split it.
+    const input_frame last = held_keys();
+    const uint32_t source = 2000;
+    bool released = true;
+    const input_frame f = stall_frame(last, source + kStallReleaseTicks + 50, source, true, released);
+    EXPECT_FALSE(released);
+    EXPECT_EQ(f.keys, last.keys);
+    // ... and released again from the hold's end on.
+    stall_frame(last, source + kStallReleaseTicks + 51, source, false, released);
+    EXPECT_TRUE(released);
 }

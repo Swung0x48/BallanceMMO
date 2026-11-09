@@ -190,7 +190,16 @@ namespace bmmo::sim {
             _exit(134);
         }
 
-        void on_abort(int) { die_here("[crash] abort() called"); }
+        // abort(): the default terminate's too, on a thread that never set
+        // the per-thread handler (MSVC keeps terminate handlers per thread) -
+        // raised synchronously inside the catch(...) that rethrew, so the
+        // uncaught exception is still the current one and is named here.
+        void on_abort(int) {
+            char reason[512];
+            if (std::current_exception()) describe_terminate(reason, sizeof reason);
+            else std::snprintf(reason, sizeof reason, "[crash] abort() called");
+            die_here(reason);
+        }
 
         // std::terminate (an exception nothing caught): before the default
         // handler's abort(), so the reason names the exception.  The stack

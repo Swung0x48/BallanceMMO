@@ -9,6 +9,11 @@
 // camera stay).  The relay writes such a record inline (held_inline: a source
 // kHeldInlineDistance ticks back or more), so every world - the owner's
 // included - applies the same bytes, and the server journal records them.
+// Never inside a lead hold (input_buffer::held): the SessionLead hands the
+// owner the hold's frozen frame as final and the owner's client drops the
+// range's held records as already learned, so a released record there would
+// split the owner from every other world (the batch review, 2026-11-09).  A
+// member stalled through a hold is released from the hold's end on.
 // After kStallRemoveTimeout with no input datagram the server takes the
 // member out of the session as a leave (server.cpp check_stalled_members).
 
@@ -28,12 +33,13 @@ namespace bmmo::sim {
                   "a released held record must go inline (held_inline)");
 
     // The frame a held tick applies: the substitute, with its keys released
-    // when it is older than kStallReleaseTicks.  `source` is the substitute's
+    // when it is older than kStallReleaseTicks and the tick is not in a lead
+    // hold (`lead_held`, input_buffer::held).  `source` is the substitute's
     // tick (INPUT_SOURCE_DEFAULT: the default frame, keyless already).
     inline bmmo::session::input_frame stall_frame(const bmmo::session::input_frame& substitute, uint32_t tick,
-                                                  uint32_t source, bool& released) {
+                                                  uint32_t source, bool lead_held, bool& released) {
         bmmo::session::input_frame frame = substitute;
-        released = source != bmmo::session::INPUT_SOURCE_DEFAULT
+        released = !lead_held && source != bmmo::session::INPUT_SOURCE_DEFAULT
                 && static_cast<int32_t>(tick - source) > static_cast<int32_t>(kStallReleaseTicks);
         if (released) frame.keys = 0;
         return frame;
