@@ -3558,6 +3558,15 @@ namespace bmmo::physics {
             return false;
         }
         for (const std::string& name: set.pieces) state.pieces[name] = player;
+        // Engine change #24, step A2: every piece's hull into the surface memo
+        // now, so the set's first explosion copies it instead of compiling 16
+        // hulls in its tick.  The first set of a world compiles; every later
+        // one finds them (all sets' pieces have the same inputs).
+        for (int t = 0; t < 3; ++t) {
+            auto* frame = CK3dEntity::Cast(context->GetObject(static_cast<CK_ID>(frames[t])));
+            for (CK3dEntity* child = frame->HierarchyParser(nullptr); child; child = frame->HierarchyParser(child))
+                if (CKMesh* mesh = child->GetCurrentMesh()) physics->RememberConvexSurface(child, 1, &mesh);
+        }
         out.exempt = static_cast<int32_t>(set.entities.size());
         out.pieces = static_cast<int32_t>(set.pieces.size());
         state.sets[player] = std::move(set);
