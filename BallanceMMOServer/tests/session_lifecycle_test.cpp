@@ -26,6 +26,7 @@
 #include <vector>
 
 #include <session/lifecycle.hpp>
+#include <session/start_handshake.hpp>
 #include <session/rollback.hpp>
 #include <session/timeline.hpp>
 
@@ -351,7 +352,7 @@ TEST(LateTickLead, StaysInsideTheClientResimWindow) {
     for (const uint32_t ping: {0u, 50u, 100u, 150u, 200u, 250u, 278u, 300u, 320u, 400u, 424u}) {
         const uint32_t delay = input_delay_for_ping(static_cast<int>(ping), 6);
         const uint32_t lead = late_tick_lead_ticks(delay, ping);
-        const uint32_t raw_rtt_ticks = (ping * 66 + 999) / 1000;
+        const uint32_t raw_rtt_ticks = (ping * TICK_RATE + 999) / 1000;
         EXPECT_LE(lead, kLateTickLeadCapTicks) << "ping " << ping;
         EXPECT_LE(client_lag_ticks(lead, raw_rtt_ticks), static_cast<double>(window)) << "ping " << ping;
     }
@@ -361,7 +362,7 @@ TEST(LateTickLead, StaysInsideTheClientResimWindow) {
     const uint32_t cliff_ping = 425;
     const uint32_t cliff_delay = input_delay_for_ping(static_cast<int>(cliff_ping), 6);
     const uint32_t cliff_lead = late_tick_lead_ticks(cliff_delay, cliff_ping);
-    const uint32_t cliff_raw_rtt_ticks = (cliff_ping * 66 + 999) / 1000;
+    const uint32_t cliff_raw_rtt_ticks = (cliff_ping * TICK_RATE + 999) / 1000;
     EXPECT_EQ(cliff_lead, kLateTickLeadCapTicks);
     EXPECT_GT(client_lag_ticks(cliff_lead, cliff_raw_rtt_ticks), static_cast<double>(window));
 }
@@ -372,7 +373,7 @@ TEST(LateTickLead, TheUncappedArithmeticIsTheTooFarCliff) {
     // which is the too_far -> resync loop the caps remove.
     const uint32_t ping = 320;
     const uint32_t delay = input_delay_for_ping(static_cast<int>(ping), 6);
-    const uint32_t raw_rtt_ticks = (ping * 66 + 999) / 1000;
+    const uint32_t raw_rtt_ticks = (ping * TICK_RATE + 999) / 1000;
     const uint32_t uncapped_lead = delay + raw_rtt_ticks + 2;
     EXPECT_GT(client_lag_ticks(uncapped_lead, raw_rtt_ticks),
               static_cast<double>(rollback_thresholds{}.max_resim_ticks));
@@ -498,7 +499,7 @@ namespace {
         void arm_if_idle(std::chrono::steady_clock::time_point now) {
             if (armed) return;
             armed = true;
-            deadline = now + std::chrono::seconds(20);   // sim kStartBarrierTimeout (protocol 32)
+            deadline = now + bmmo::session::kStartBarrierTimeout;   // protocol 32
         }
     };
 }

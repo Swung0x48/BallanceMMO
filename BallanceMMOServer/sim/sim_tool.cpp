@@ -145,9 +145,9 @@ namespace {
         // journal's flush points, which no mode changes (io_queue.hpp).
         bmmo::session::io_flush_config io_flush;
         int level = 0;
-        int ticks = 660;
+        int ticks = 10 * bmmo::session::TICK_RATE;
         int level_at_tick = 200;
-        int report_every = 66;
+        int report_every = bmmo::session::TICK_RATE;
         int boot_ticks = 400;          // ticks to let the composition reach the menu
         int anchor_timeout = 2000;     // ticks to wait for Gameplay_Ingame after Load Level
         bool verbose = false;
@@ -3790,7 +3790,7 @@ namespace {
         const auto step = [&](std::string& step_error) -> bool {
             if (frames) return world->tick(step_error);
             world->pre_simulate();
-            return bmmo::physics::step_physics(physics, bmmo::sim::kFixedDeltaMs, step_error);
+            return bmmo::physics::step_physics(physics, bmmo::session::TICK_DELTA_MS, step_error);
         };
         std::vector<CK_ID> scripts_replayed;
         // Step RO1: the order the straight pass's frames ran the selected
@@ -3808,7 +3808,7 @@ namespace {
         bool restore_refused = false;
         bmmo::physics::physics_direct backend(physics);
         bmmo::session::rollback_binding_options binding_options;
-        binding_options.delta_ms = bmmo::sim::kFixedDeltaMs;
+        binding_options.delta_ms = bmmo::session::TICK_DELTA_MS;
         binding_options.savestate = !legacy;
         binding_options.savestate_flags = bmmo::physics::SAVESTATE_STRICT;
         binding_options.physics_globals = true;   // C3 (step RK1): the clients' rule, as bind_session_world sets it
@@ -3877,7 +3877,7 @@ namespace {
         script_options.scripts = &scripts;
         script_options.hooks = &hooks;
         script_options.scripts_replayed = &scripts_replayed;
-        script_options.delta_ms = bmmo::sim::kFixedDeltaMs;
+        script_options.delta_ms = bmmo::session::TICK_DELTA_MS;
         if (trafo) script_options.trafo = &trafo->registry().part();
         script_options.replay_activation = passes;   // step S7: every selected script written back
         script_options.live_order = &live_order;       // step RO1
@@ -5934,7 +5934,7 @@ namespace {
             hooks = bmmo::game::force_hooks_for(bmmo::physics::physics_direct(physics));   // step HU1: one copy (game/host_backend.hpp)
             backend = std::make_unique<bmmo::physics::physics_direct>(physics);
             bmmo::session::rollback_binding_options options;
-            options.delta_ms = bmmo::sim::kFixedDeltaMs;
+            options.delta_ms = bmmo::session::TICK_DELTA_MS;
             options.savestate = false;   // the blob is restored directly, as a travelling one
             binding = bmmo::session::bind_rollback_world(*backend, options);
         }
@@ -7877,7 +7877,7 @@ namespace {
         // clients run the savestate).
         bmmo::physics::physics_direct backend(physics);
         bmmo::session::rollback_binding_options binding_options;
-        binding_options.delta_ms = bmmo::sim::kFixedDeltaMs;
+        binding_options.delta_ms = bmmo::session::TICK_DELTA_MS;
         binding_options.savestate = true;
         binding_options.savestate_flags = 0u;
         binding_options.physics_globals = true;   // C3 (step RK1): the clients' rule, as bind_session_world sets it
@@ -9060,7 +9060,7 @@ namespace {
         core_hooks.birth_moved = [&](const std::string&, uint32_t b) { return rd_active && rd.birth_moved(b); };
         bmmo::physics::physics_direct backend(physics);
         bmmo::session::session_world_options w;
-        w.binding.delta_ms = bmmo::sim::kFixedDeltaMs;
+        w.binding.delta_ms = bmmo::session::TICK_DELTA_MS;
         w.binding.savestate = true;
         w.binding.savestate_flags = 0u;   // lenient, as the clients run it
         w.binding.log = [&](const std::string& text) { std::printf("  engine: %s\n", text.c_str()); };
@@ -9080,7 +9080,7 @@ namespace {
             so.scripts = &sel;
             so.hooks = &hooks;
             so.scripts_replayed = &scripts_replayed;
-            so.delta_ms = bmmo::sim::kFixedDeltaMs;
+            so.delta_ms = bmmo::session::TICK_DELTA_MS;
             so.replay_activation = true;
             so.live_order = &late_live_order;   // step RO1
             so.resize_strings = true;

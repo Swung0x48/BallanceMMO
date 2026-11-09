@@ -3313,8 +3313,13 @@ namespace bmmo::session {
     // where we stamped it.
     void session_client_core::process_own_echo(const bmmo::session_event_msg& msg, bool stale) {
         if (msg.type == bmmo::session::event_type::AirshipRelease) {
-            if (stale || msg.origin_tick != s.own_airship_inflight_) return;
+            if (msg.origin_tick != s.own_airship_inflight_) return;
             s.own_airship_inflight_ = 0;
+            // Answered before the last SessionAssign: that resync's state is
+            // the server's world after the answer, so nothing is undone - but
+            // the release is no longer in flight (it used to stay so, and no
+            // release was proposed again for the rest of the life).
+            if (stale) return;
             if (msg.state & bmmo::session::EVENT_STATE_REJECTED) {
                 flush_life_rewinds();
                 s.airship_releases_.erase(std::remove_if(s.airship_releases_.begin(), s.airship_releases_.end(),

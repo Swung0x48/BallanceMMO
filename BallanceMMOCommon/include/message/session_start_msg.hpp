@@ -14,7 +14,7 @@ namespace bmmo {
         uint32_t session = 0;              // increments on every Start
         room::mode mode = room::mode::Physics;
         bmmo::map map{};
-        uint8_t tick_rate = 66;
+        uint8_t tick_rate = bmmo::session::TICK_RATE;
         uint8_t snapshot_interval = 0;
         uint8_t input_delay = 0;
         // Ticks ahead of its current step a member stamps the Sector event of

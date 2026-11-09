@@ -147,7 +147,7 @@ public:
     // file and how often a full body checkpoint is written.
     std::string physics_journal_dir = "journals";
     uint32_t physics_journal_max_mb = 256;
-    uint32_t physics_journal_checkpoint_ticks = 660;
+    uint32_t physics_journal_checkpoint_ticks = 10 * bmmo::session::TICK_RATE;
     // session_io.journal (step IOF): when the server's I/O strand flushes a
     // session journal - none, batch (default, one fflush per written batch)
     // or record (one per record); never on the runner thread.  The server's

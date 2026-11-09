@@ -1,6 +1,7 @@
 #include "session_runner.hpp"
 #include <net/transport.hpp>
 #include "late_tick.hpp"
+#include "crash_report.hpp"
 
 #include "CKAll.h"
 
@@ -136,7 +137,12 @@ namespace bmmo::sim {
         for (const auto& [tick, ms]: debug_stalls_)
             log("debug: BMMO_SESSION_STALL holds the step of tick " + std::to_string(tick) + " for " + std::to_string(ms)
                 + " ms (a harness stall; unset in deployments)");
-        thread_ = std::thread([this] { run(); });
+        // An exception nothing catches here ends the server: the reporter's
+        // terminate handler names it (MSVC: per thread, crash_report.hpp).
+        thread_ = std::thread([this] {
+            install_thread_crash_reporter();
+            run();
+        });
     }
 
     session_runner::~session_runner() {
@@ -300,7 +306,7 @@ namespace bmmo::sim {
         // of now (the members' frames are scheduled from the same instant).
         const auto now = s.start_scheduled ? s.start_origin : logical_;
         const auto schedule_start = now + std::chrono::duration_cast<clock::duration>(
-                std::chrono::duration<double>(static_cast<double>(s.start_base) / 66.0));
+                std::chrono::duration<double>(static_cast<double>(s.start_base) / bmmo::session::TICK_RATE));
         s.scheduler.start(schedule_start, s.world->tick_index(), s.input_delay);
         for (auto& [player, entry]: s.arrivals)
             entry.baseline.settled(entry.baseline.epoch(), now);
@@ -623,6 +629,7 @@ namespace bmmo::sim {
         s.join_orders.erase(player);
         s.last_physicalize_tick.erase(player);
         s.last_frames.erase(player);
+        s.stall_released.erase(player);
         s.leaving.erase(player);
         // Its Trafo events stay (trafo-replication design 2.4): they act on
         // the player's piece set, which outlives its slot, and every member
@@ -1504,7 +1511,25 @@ namespace bmmo::sim {
             uint32_t source = bmmo::session::INPUT_SOURCE_DEFAULT;
             // Before take() moves the cursor past it.
             const bool settled = buffer.settled(tick);
-            const auto& frame = buffer.take(tick, fresh, source, cutoff);
+            const auto& taken = buffer.take(tick, fresh, source, cutoff);
+            bool released = false;
+            const bmmo::session::input_frame frame = fresh ? taken : stall_frame(taken, tick, source, released);
+            // Said once a stall: the frames a resumed client sends next are for
+            // its old ticks, each a new (still too old) substitute.
+            if (released) {
+                if (s.stall_released.emplace(player, tick).second) {
+                    const std::string text = "stall: p" + std::to_string(player) + " has sent no frame since tick "
+                                           + std::to_string(source) + ": its keys released from tick " + std::to_string(tick);
+                    log("[session " + std::to_string(s.id) + "] " + text);
+                    if (recording) s.journal.note(tick, text);
+                }
+            } else if (const auto r = s.stall_released.find(player); r != s.stall_released.end()) {
+                const std::string text = "stall: p" + std::to_string(player) + " keys released over ticks "
+                                       + std::to_string(r->second) + ".." + std::to_string(tick - 1);
+                log("[session " + std::to_string(s.id) + "] " + text);
+                if (recording) s.journal.note(tick, text);
+                s.stall_released.erase(r);
+            }
             if (fresh) s.acked[player] = tick;
             // The streak waiver (design 2.6) starts at a substitution of a
             // frame the step had to do without.  A tick below a re-anchored
@@ -1705,7 +1730,7 @@ namespace bmmo::sim {
     //
     // Every 660 ticks one summary line per player, so a run shows the meter's
     // view of each member's arrivals without a decision having to happen.
-    static constexpr uint32_t kLatenessSummaryTicks = 660;
+    static constexpr uint32_t kLatenessSummaryTicks = 10 * bmmo::session::TICK_RATE;
 
     void session_runner::observe_relative(session_state& s, uint32_t tick, clock::time_point now) {
         const auto past = std::find_if(s.quorum_history.rbegin(), s.quorum_history.rend(),
@@ -1994,7 +2019,7 @@ namespace bmmo::sim {
             s.quorum_gap.push_back(normalized.back() - normalized[normalized.size() - 2]);
         }
         if (config_.arrival_trace) log(trace + " counted=" + std::to_string(counted));
-        if (++s.quorum_ticks % 660 != 0) return;
+        if (++s.quorum_ticks % (10 * bmmo::session::TICK_RATE) != 0) return;
         const auto quantiles = [](const std::vector<double>& values) {
             return std::to_string(bmmo::session::lateness_quantile(values, .5)) + "/"
                 + std::to_string(bmmo::session::lateness_quantile(values, .95)) + "/"
@@ -2117,7 +2142,7 @@ namespace bmmo::sim {
         if (!verdict.wait) return std::max(deadline, logical_);
         // A microsecond past the threshold, so the test there passes.
         const auto patience = logical_ + std::chrono::microseconds(
-                static_cast<int64_t>(std::ceil(verdict.wait_ticks * bmmo::session::kLatenessTickMicros)) + 1);
+                static_cast<int64_t>(std::ceil(verdict.wait_ticks * bmmo::session::TICK_MICROS)) + 1);
         return std::min(patience, std::max(deadline, logical_));
     }
 
@@ -2216,7 +2241,7 @@ namespace bmmo::sim {
                 std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - started).count()));
             // Every 10 s of ticks: the step's cost, the budget being one tick
             // (15.15 ms) per tick.
-            if (s.step_us.size() >= 660) {
+            if (s.step_us.size() >= 10 * bmmo::session::TICK_RATE) {
                 std::vector<uint32_t> v;
                 v.swap(s.step_us);
                 std::sort(v.begin(), v.end());

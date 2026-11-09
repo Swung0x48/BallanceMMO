@@ -24,9 +24,14 @@
 
 namespace bmmo::retail::journal_files {
     // The LOCAL checkpoint cadence's ceiling (every 10 s at 66 Hz) and the
-    // number of journals kept in the directory.
-    inline constexpr uint32_t kCheckpointTicks = 660;
-    inline constexpr size_t kKeepFiles = 10;
+    // number of journals kept in the directory, and of captures in theirs
+    // (retail_capture.hpp).  A file is a life, and the 2026-11-08 public
+    // test's players had 20-30 an afternoon: with 10 of each, by the time one
+    // sent theirs the lives that froze were pruned.  A journal is ~1-8 MB, a
+    // capture ~1-40 MB.
+    inline constexpr uint32_t kCheckpointTicks = 10 * bmmo::session::TICK_RATE;
+    inline constexpr size_t kKeepFiles = 40;
+    inline constexpr size_t kKeepCaptures = 20;
 
     // <game>/ModLoader/BMMOJournals: the game runs from <game>/Bin, and the
     // mods' data belongs next to the loader, not next to the executable.

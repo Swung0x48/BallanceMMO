@@ -275,6 +275,7 @@ public:
                 link_cache_ = std::move(links);
                 std::lock_guard lk(state_mutex_);
                 check_start_barriers();
+                check_stalled_members();
                 check_start_handshakes();   // FULL step SAXH
                 send_assign_repeats();
                 post_player_rtts();
@@ -1018,6 +1019,9 @@ public:
         uint8_t mechanism_slots = 0;
         std::deque<bmmo::net::connection> waiting_orders;
         std::set<bmmo::net::connection> started;
+        // A stalled member (session_runner.hpp kStallRemoveTimeout): each
+        // member's last input datagram's arrival, from its first on.
+        std::map<bmmo::net::connection, std::chrono::steady_clock::time_point> last_input;
         // --hold-member-ms (test builds): SessionMember messages waiting to
         // leave, the reliable copy and then the repeats.
         struct held_member {
@@ -1271,7 +1275,7 @@ public:
         out.worst_rtt_ms = static_cast<uint32_t>(worst);
         out.input_delay = bmmo::session::input_delay_for_ping(worst, config_.physics_input_delay);
         Printf("Room %u: input delay %u ticks (%.0f ms) for a worst round trip of %d ms (%s).",
-               r.id, out.input_delay, out.input_delay * 1000.0 / 66.0, worst, detail.c_str());
+               r.id, out.input_delay, out.input_delay * 1000.0 / bmmo::session::TICK_RATE, worst, detail.c_str());
         return out;
     }
 
@@ -1286,7 +1290,7 @@ public:
         s.input_delay = latency.input_delay;
         s.sector_lead = bmmo::session::sector_lead_for_ping(s.input_delay, static_cast<int>(latency.worst_rtt_ms));
         Printf("Room %u: sector lead %u ticks (%.0f ms): a crossing starts its sector that far ahead, on every member.",
-               r.id, s.sector_lead, s.sector_lead * 1000.0 / 66.0);
+               r.id, s.sector_lead, s.sector_lead * 1000.0 / bmmo::session::TICK_RATE);
         // Design 9.2: the members present at the start are anchored at the same
         // lead a late joiner is, measured from tick 0 (the world has not ticked
         // when their SessionAssign goes out).  Their numbering is the server's
@@ -1448,7 +1452,7 @@ public:
         msg.session = s.id;
         msg.mode = bmmo::room::mode::Physics;
         msg.map = s.map;
-        msg.tick_rate = 66;
+        msg.tick_rate = bmmo::session::TICK_RATE;
         msg.snapshot_interval = static_cast<uint8_t>(std::min<uint32_t>(255, std::max<uint32_t>(1, config_.physics_snapshot_interval)));
         msg.input_delay = static_cast<uint8_t>(std::min<uint32_t>(255, s.input_delay));
         msg.sector_lead = static_cast<uint8_t>(std::min<uint32_t>(255, s.sector_lead));
@@ -1779,7 +1783,7 @@ public:
     // against the client's subst recv + late + base.  A run longer than
     // a second is cut into lines of 66 ticks, so persistent lateness still
     // shows up while it lasts.
-    static constexpr uint32_t kHeldRunLineTicks = 66;
+    static constexpr uint32_t kHeldRunLineTicks = bmmo::session::TICK_RATE;
     static constexpr uint32_t kHeldRunLines = 20000;   // per session; past it one line says so
 
     void note_held_tick(physics_session_state& s, bmmo::net::connection m, physics_session_state::held_notice& n,
@@ -1961,13 +1965,16 @@ public:
         auto it = physics_sessions_.find(rs->second);
         if (it == physics_sessions_.end()) return;
         auto& s = it->second;
-        // FULL step SAXH: while the start handshake runs (the start members
-        // are assigned, the runner does not tick yet) a joiner is neither a
-        // start member (it would hold the runner's start for its level load
-        // and get no start instant) nor a late one (nothing ticks to anchor
-        // it on): it waits, and is admitted as a late joiner once the runner
-        // ticks (check_start_handshakes).
-        if (s.handshake.current_phase() != bmmo::session::start_handshake::phase::idle && !runner_->running(s.id)) {
+        // FULL step SAXH: until the session ticks (the world's boot, the start
+        // barrier, the start handshake) a joiner is neither a start member (it
+        // would hold the start for its level load: in the 2026-11-08 public
+        // test one that joined during the boot and never readied held its L8
+        // room's barrier 20 s, and the start failed for the other twelve) nor
+        // a late one (nothing ticks to anchor it on): it waits, and is
+        // admitted as a late joiner once the runner ticks
+        // (check_start_handshakes).  The start members are the room's, all
+        // ready, when the host started (action::Start).
+        if (!runner_->running(s.id)) {
             s.start_waiting.push_back(c);
             client_session_[c] = s.id;
             Printf("Physics session %u: %s waits for the start handshake to end (joins late once the session ticks).",
@@ -2098,6 +2105,7 @@ public:
         for (auto& h: s.held_members) h.to.erase(std::remove(h.to.begin(), h.to.end(), static_cast<uint32_t>(c)), h.to.end());
         s.last_physicalize.erase(c);
         s.last_unphysicalize.erase(c);
+        s.last_input.erase(c);
         // Its events still waiting for the runner stay: their acceptance was
         // posted before the removal, so they are relayed to the others first,
         // and the leaver's Unphysicalize after them.
@@ -2586,8 +2594,8 @@ public:
         for (const auto& [session, m]: refused) {
             Printf("Physics session %u: %s refused: it did not confirm the session start (start handshake).", session,
                    get_client_name(m));
-            send_session_end(session, m, "refused: this client did not confirm the session start in time (the start "
-                                         "handshake's messages did not get through)");
+            send_session_end(session, m, "refused: this client did not confirm the session start in time (its start "
+                                         "handshake ended: a message lost, or its anchor hold gave up first)");
             physics_session_member_left(m);
         }
     }
@@ -2753,6 +2761,34 @@ public:
                 if (--r->remaining <= 0) r = s.lead_repeats.erase(r);
                 else ++r;
             }
+        }
+    }
+
+    // A member whose input stopped while its connection lives (the
+    // 2026-11-08 public test: a client's game thread froze, its network
+    // thread kept the link for 93 s, its keys were held all that time): out
+    // of the session after kStallRemoveTimeout without an input datagram, as
+    // the start barrier drops a silent member - out of the session, not out
+    // of the room.  The runner released its keys at 3 s already.  Only a
+    // member that sent input once is timed (the start's waits before its
+    // first frame are the start handshake's), and only while the runner
+    // steps the session.
+    void check_stalled_members() {
+        if (!runner_) return;
+        const auto now = instant(bmmo::session::clock_site::server_input_stall);
+        std::vector<std::pair<uint32_t, bmmo::net::connection>> stalled;   // session, member
+        for (auto& [id, s]: physics_sessions_) {
+            if (!runner_->running(id)) continue;
+            for (const auto& [m, last]: s.last_input)
+                if (now - last >= bmmo::sim::kStallRemoveTimeout) stalled.emplace_back(id, m);
+        }
+        // Outside the loop: a removal erases from physics_sessions_.
+        for (const auto& [session, m]: stalled) {
+            Printf("Physics session %u: %s sent no input for %lld s; out of the session.", session, get_client_name(m),
+                   static_cast<long long>(bmmo::sim::kStallRemoveTimeout.count()));
+            send_session_end(session, m, "no input from this client for "
+                             + std::to_string(bmmo::sim::kStallRemoveTimeout.count()) + " s (the game stopped responding)");
+            physics_session_member_left(m);
         }
     }
 
@@ -3103,7 +3139,10 @@ public:
         bmmo::session::take_input_datagram(
                 msg, [&](bmmo::session_event_msg& event) { handle_session_event(client_it, event); },
                 [&] { if (frames) runner_->submit_input(msg.session, c, msg.first_tick, *frames, arrival); });
-        if (s != physics_sessions_.end()) s->second.relay.acknowledge(c, msg.relay_ack);
+        if (s != physics_sessions_.end()) {
+            s->second.relay.acknowledge(c, msg.relay_ack);
+            s->second.last_input[c] = arrival;
+        }
     }
 
     static void copy_name(char* out, size_t size, const std::string& text) {
@@ -3236,6 +3275,10 @@ public:
                     const float at[3] = {reset.x, reset.y, reset.z};
                     near_spawn = near_spawn || distance(pos, at) <= reach;
                 }
+                // A trafo re-makes the ball at the trafo point it took (the
+                // public test's 641 flags were 451 trafo births).
+                for (const auto& point: s.trafo_points)
+                    near_spawn = near_spawn || distance(pos, point.position) <= bmmo::session::kTrafoReach;
                 bool near_last = false;
                 if (guard.have_position) {
                     const float last[3] = {static_cast<float>(guard.last_position[0]),
@@ -3244,7 +3287,7 @@ public:
                     near_last = distance(pos, last) <= 5.0;
                 }
                 if (!near_spawn && !near_last)
-                    flag("Physicalize pose far from every resetpoint of the level and from the player's last known position");
+                    flag("Physicalize pose far from every resetpoint and trafo point of the level and from the player's last known position");
             } else if (msg.type == bmmo::session::event_type::Sector) {
                 if (msg.sector < 1 || msg.sector > guard.sector + 1)
                     flag("sector " + std::to_string(msg.sector) + " after sector " + std::to_string(guard.sector));
@@ -3587,7 +3630,16 @@ public:
                 auto* r = rooms_.find(room);
                 if (!r) { send_room_event(c, event_type::RequestDenied, error_code::NotInRoom, 0); break; }
                 if (r->host != c) { send_room_event(c, event_type::RequestDenied, error_code::NotHost, room); break; }
-                if (!r->all_ready()) { send_room_event(c, event_type::RequestDenied, error_code::NotReady, room); break; }
+                if (!r->all_ready()) {
+                    std::string waiting;
+                    for (const auto& m: r->members)
+                        if (!m.ready)
+                            if (auto mi = clients_.find(m.id); mi != clients_.end())
+                                waiting += (waiting.empty() ? "" : ", ") + mi->second.name;
+                    send_room_event(c, event_type::RequestDenied, error_code::NotReady, room, c, 0,
+                                    "not every member is ready: " + waiting);
+                    break;
+                }
                 if (!room_members_same_map(*r)) { send_room_event(c, event_type::RequestDenied, error_code::MapMismatch, room); break; }
                 if (msg.mode == bmmo::room::mode::Physics) {
 #if BMMO_BUILD_SIM
@@ -5296,6 +5348,7 @@ int main(int argc, char** argv) {
     // Step SIO: a crash writes out what the journals' writer still holds
     // (best effort, bounded).
     bmmo::sim::set_crash_drain([] { bmmo::session::io::drain_all(std::chrono::milliseconds(1000)); });
+    bmmo::sim::set_crash_log(bmmo::crash_log_line);   // the reason as the --log file's last line
 #endif
     server::init_process();
     // GNS for a server on the network; a coordinated run talks through the
@@ -5352,7 +5405,12 @@ int main(int argc, char** argv) {
     fflush(stdout);
     if (!server.setup())
         FatalError("Server failed on setup.");
-    std::thread server_thread([&server]() { server.run(); });
+    std::thread server_thread([&server]() {
+#if BMMO_BUILD_SIM
+        bmmo::sim::install_thread_crash_reporter();
+#endif
+        server.run();
+    });
     // Step K4b-ii: a replay ends with its capture; no console.  Step T1c: a
     // coordinated run ends when the coordinator stops it.
     if (server.replaying() || server.coordinated()) {

@@ -51,7 +51,7 @@ namespace bmmo::session {
         double ignore_velocity = 0.5;    // m/s
         double hard_position = 1.0;      // metres: beyond this, hard set
         uint32_t blend_ticks = 8;
-        uint32_t history_ticks = 660;    // 10 s of states
+        uint32_t history_ticks = 10 * TICK_RATE;    // 10 s of states
         double identity_guard_m = 20.0;  // metres: beyond this, the row names another instance
     };
 

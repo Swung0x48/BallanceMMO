@@ -1268,7 +1268,7 @@ namespace {
             if (!core_session_running()) return 0;
             host.core->note_pacer_behind(behind);
             if (!host.core->slewing()) return 0;
-            return host.core->slew_step(now, bs::kTickRate, behind);
+            return host.core->slew_step(now, bs::TICK_RATE, behind);
         }
         double rebase_threshold() const override {
             return core_session_running() ? host.core->rebase_threshold() : bs::fixed_tick_driver::kMaxCatchUpTicks;
@@ -1855,7 +1855,7 @@ namespace {
         }
         const auto quiesce = bmmo::game::quiesce_originals(context, trafo_host.hooks);
         logger->Info("Physics session: %s (the originals' restore follows in the session clock reset)", quiesce.text().c_str());
-        trafo_host.hold.arm(context, 1000.0f / 66.0f);
+        trafo_host.hold.arm(context, bs::TICK_DELTA_MS);
         if (!view.trafo_set_filter(true, error)) logger->Warn("Physics session: trafo: the piece filter rule: %s", error.c_str());
         trafo_host.on = true;
         logger->Info("Physics session: trafo: inputs on: the originals held (option E %s, the Delayer %u frames), the piece x "
@@ -2845,7 +2845,7 @@ void BallanceMMOClient::core_host_start_capture(const std::string& start_bytes) 
         journal_checkpoint_ticks())
         + core_host_capture_players() + core_host_capture_requests();
     std::string error;
-    auto prune = [directory] { bmmo::retail::session_capture::prune(directory, bmmo::retail::journal_files::kKeepFiles - 1); };
+    auto prune = [directory] { bmmo::retail::session_capture::prune(directory, bmmo::retail::journal_files::kKeepCaptures - 1); };
     if (bmmo::retail::session_capture::instance().start_recording(directory / name, header,
             bs::strand_poster(thread_pool_.get_executor()), std::move(prune), error))
         logger_->Info("Physics session %u: capture %s", msg.session, (directory / name).string().c_str());
@@ -3201,6 +3201,10 @@ bool BallanceMMOClient::core_host_link_up() {
 // FULL step AHN: IMod::OnRender (BML+'s post-render callback) - while the
 // anchor hold is frozen, the frame that polls it.
 void BallanceMMOClient::OnRender(CK_RENDER_FLAGS) {
+    // The hang watch's beat: every rendered frame, the frozen hold's included.
+    char hang_report[384];
+    if (NSDumpFile::HangWatchBeat(core_host_session_running(), hang_report, sizeof(hang_report)))
+        logger_->Warn("%s", hang_report);
     core_host_hold_frame();
     if (replay_stop.frozen) process_command_file();   // K7e: no OnProcess runs while a stopped replay is frozen
 }
@@ -4962,7 +4966,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         bmmo::game::trafo_set_final(trafo_host.registry, player, life, type, tick);
     };
     p.trafo_frame = [this](uint32_t) {
-        if (trafo_host.on) bmmo::game::trafo_frame(m_bml->GetCKContext(), trafo_host.registry, 1000.0f / 66.0f);
+        if (trafo_host.on) bmmo::game::trafo_frame(m_bml->GetCKContext(), trafo_host.registry, bs::TICK_DELTA_MS);
     };
     // FULL step PRX (game/depth_test.hpp): the level's fall handler for free
     // props, live and in every replayed tick, where the server's world runs it.
@@ -5009,7 +5013,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
                             [](const std::string& entity) { return host.core && host.core->is_ball(entity); });
         r.ok = bs::feed_muted_births(counted_muted_recipes{physics_view_, trafo_host.muted_remake_drains}, feed, [&]() {
             return bmmo::game::remake_type_set(context, trafo_host.registry, trafo_host.hooks, spec.player, spec.life,
-                                               spec.type, spec.position, spec.seed, 1000.0f / 66.0f, r.error);
+                                               spec.type, spec.position, spec.seed, bs::TICK_DELTA_MS, r.error);
         }, [](const std::string&) { ++trafo_host.muted_added; });
         return r;
     };
@@ -5307,7 +5311,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     p.bind_world = [this](const bs::core_world_hooks& hooks) {
         bs::session_world_options w;
         bs::rollback_binding_options& o = w.binding;
-        o.delta_ms = 1000.0f / 66.0f;
+        o.delta_ms = bs::TICK_DELTA_MS;
         o.restore_clock = false;
         o.savestate_flags = 0u;
         o.own_key_codes = host.own_replica.key_codes;
@@ -5387,7 +5391,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
             so.scripts_replayed = &host.scripts_replayed;
             so.reset_ticks = &host.script_reset_ticks;
             so.reset_skips = &host.script_reset_skips;
-            so.delta_ms = 1000.0f / 66.0f;
+            so.delta_ms = bs::TICK_DELTA_MS;
             so.diff_detail = host.core && host.core->config.trace;
             so.replay_activation = true;
             // Step T4: the sets' scripts, recorded (v3), restored and run

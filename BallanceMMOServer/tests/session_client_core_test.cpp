@@ -1203,16 +1203,16 @@ namespace {
         EXPECT_EQ(state_of(core).hold_polls_, 3) << "no poll counted once released";
     }
 
-    // Design 5.1 "The hold": the timeout at 10 s on the fake clock, with the
-    // journal note.
-    TEST(SessionClientCoreFlow, HoldTimesOutAfterTenSeconds) {
+    // Design 5.1 "The hold": the timeout at kAnchorHoldTimeout (30 s) on the
+    // fake clock, with the journal note.
+    TEST(SessionClientCoreFlow, HoldTimesOutAfterTheHoldTimeout) {
         journal_dir dir("hold");
         flow_fake fake;
         fake.path = dir.path / "client.bmjr";
         session_client_core core(fake.make_flow(true), session_capabilities{});
         run_to_anchor(core, fake);
-        fake.advance(std::chrono::milliseconds(9999));
-        EXPECT_TRUE(core.poll_hold().held);
+        fake.advance(bmmo::session::kAnchorHoldTimeout - std::chrono::milliseconds(1));
+        EXPECT_TRUE(core.poll_hold().held) << "still held past the server's start barrier";
         fake.advance(std::chrono::milliseconds(1));
         const size_t from = fake.calls.size();
         const auto state = core.poll_hold();
@@ -1222,7 +1222,7 @@ namespace {
         EXPECT_EQ(state_of(core).hold_polls_, 2);
         const std::vector<std::string> expected = {
             "now:hold_poll", "hook:numbering_restarted:hold_timeout",
-            "log:0:anchor hold: no tick base after 10.0 s; running anyway (the world will be out of phase with the server's)"};
+            "log:0:anchor hold: no tick base after 30.0 s; running anyway (the world will be out of phase with the server's)"};
         EXPECT_EQ(since(fake.calls, from), expected);
         EXPECT_FALSE(core.poll_hold().held);
         core.journal().close("done");
@@ -7153,7 +7153,7 @@ namespace {
         int moved = 0;
         for (int step = 0; step < 16 && core.slewing(); ++step) {
             fake.advance(std::chrono::milliseconds(16));
-            moved += core.slew_step(fake.clock, 66.0, 0.0);
+            moved += core.slew_step(fake.clock, bmmo::session::TICK_RATE, 0.0);
         }
         EXPECT_EQ(moved, 2);
         EXPECT_FALSE(core.slewing());
@@ -11470,7 +11470,7 @@ namespace {
                 assign.server_us = 5;
                 if (path != 1) assign.flags = bmmo::session::ASSIGN_FLAG_SCHEDULED;
                 core.on_session_assign(assign);
-                const auto late = std::chrono::microseconds((ticks * 1'000'000LL + 65) / 66);
+                const auto late = std::chrono::microseconds((ticks * 1'000'000LL + (bmmo::session::TICK_RATE - 1)) / bmmo::session::TICK_RATE);
                 bmmo::session_start_at_msg start;
                 start.session = 9;
                 start.first_tick = 120;
@@ -11620,7 +11620,7 @@ namespace {
             bmmo::session::rollback_world world;
             world.set_body = [&applied](const std::string&, const bmmo_physics_body_state& state,
                                        bmmo::session::wake_mode mode, bool restore) {
-                EXPECT_EQ(mode, bmmo::session::wake_mode::wake);
+                EXPECT_EQ(mode, bmmo::session::wake_mode::wake_moving) << "made this tick: woken before its velocity";
                 EXPECT_FALSE(restore);
                 applied.push_back(state);
                 return true;

@@ -34,8 +34,7 @@ namespace {
     using bmmo::session::rollback_tracked;
     using bmmo::session::rollback_world;
     using bmmo::session::wake_mode;
-
-    constexpr double kDt = 1.0 / 66.0;
+    using bmmo::session::TICK_SECONDS;
 
     struct fake_body {
         double position[3] = {};
@@ -81,8 +80,8 @@ namespace {
         std::vector<uint8_t> last_get_blob;               // the last blob get_savestate returned
         std::vector<std::vector<uint8_t>> got_blobs;      // every blob get_savestate returned
         // Opt-in (record-format gaps C3, step RK1): the physics globals.  A
-        // step advances the clock by kDt * factor, moves every body by
-        // linear * kDt * factor and accelerates it by gravity * kDt * factor;
+        // step advances the clock by TICK_SECONDS * factor, moves every body by
+        // linear * TICK_SECONDS * factor and accelerates it by gravity * TICK_SECONDS * factor;
         // the clock runs only while the factor is above 0 (the scripts'
         // freeze).  set_globals is logged with its factor and gravity y.
         bool globals = false;
@@ -222,7 +221,7 @@ namespace {
                 out = {};
                 out.current_time = clock;
                 out.time_of_last_psi = clock;
-                out.time_of_next_psi = clock + kDt;
+                out.time_of_next_psi = clock + TICK_SECONDS;
                 return true;
             };
             w.set_clock = [this](const bmmo_physics_clock_state& state) {
@@ -255,18 +254,18 @@ namespace {
                 ++steps;
                 if (globals) {
                     const double f = factor;
-                    clock += kDt * f;
+                    clock += TICK_SECONDS * f;
                     for (auto& [name, body]: bodies) {
                         if (!body.simulated) continue;
                         auto keys = pending_keys.find(name);
                         if (keys != pending_keys.end() && (keys->second & 1u)) body.linear[0] += 1.0f;
-                        body.linear[1] += static_cast<float>(gravity_y * kDt * f);
-                        for (int k = 0; k < 3; ++k) body.position[k] += body.linear[k] * kDt * f;
+                        body.linear[1] += static_cast<float>(gravity_y * TICK_SECONDS * f);
+                        for (int k = 0; k < 3; ++k) body.position[k] += body.linear[k] * TICK_SECONDS * f;
                     }
                     pending_keys.clear();
                     return true;
                 }
-                clock += kDt;
+                clock += TICK_SECONDS;
                 for (auto& [name, body]: bodies) {
                     if (!body.simulated) continue;
                     auto keys = pending_keys.find(name);
@@ -280,7 +279,7 @@ namespace {
                                             + static_cast<double>(body.pair_age % 5u) * 0.0625;
                         body.linear[1] = static_cast<float>(body.contact_energy * 0.5);
                     }
-                    for (int k = 0; k < 3; ++k) body.position[k] += body.linear[k] * kDt;
+                    for (int k = 0; k < 3; ++k) body.position[k] += body.linear[k] * TICK_SECONDS;
                 }
                 pending_keys.clear();
                 return true;
@@ -571,7 +570,7 @@ TEST(RollbackEngine, MatchingSnapshotIsNotARollback) {
 
     // the server agrees with what was recorded at tick 2
     fake_body own_at_2 = world.bodies["Own"];
-    own_at_2.position[0] = 2.0 * kDt;
+    own_at_2.position[0] = 2.0 * TICK_SECONDS;
     const auto snapshot = snapshot_of(2, {ball_body(1, own_at_2), ball_body(2, world.bodies["Remote"])});
     const bool rolled = engine.on_snapshot(world.adapter(), snapshot, 4, entity_of, no_input);
     EXPECT_FALSE(rolled);
@@ -634,7 +633,7 @@ TEST(RollbackEngine, MismatchRestoresAndResimulatesWithRecordedInputs) {
     EXPECT_EQ(world.count("nav_input Own keys=1"), 2);
     // own ball: restored to 0.5 m at rest, then two accelerating steps
     // (v = 1 then 2 m/s) from the recorded inputs
-    const double expected = 0.5 + 1.0 * kDt + 2.0 * kDt;
+    const double expected = 0.5 + 1.0 * TICK_SECONDS + 2.0 * TICK_SECONDS;
     EXPECT_NEAR(world.bodies["Own"].position[0], expected, 1e-9);
     EXPECT_NEAR(world.bodies["Own"].linear[0], 2.0f, 1e-6f);
     // the history now holds the re-simulated state of tick 4: a matching
@@ -690,7 +689,7 @@ TEST(RollbackEngine, AnAmendedOwnRecordDrivesTheReplay) {
     EXPECT_EQ(world.count("nav_poll Own off"), 1);
     EXPECT_EQ(world.count("nav_poll Own on"), 1);
     EXPECT_FLOAT_EQ(world.bodies["Own"].linear[0], 1.0f);
-    EXPECT_NEAR(world.bodies["Own"].position[0], 3.0 * kDt, 1e-9);
+    EXPECT_NEAR(world.bodies["Own"].position[0], 3.0 * TICK_SECONDS, 1e-9);
     ASSERT_TRUE(engine.recorded_input("Own", 4, recorded));
     EXPECT_EQ(recorded.keys, 1u);
     ASSERT_TRUE(engine.recorded_input("Own", 5, recorded));
@@ -703,7 +702,7 @@ TEST(RollbackEngine, AnAmendedOwnRecordDrivesTheReplay) {
     EXPECT_EQ(world.count("nav_input Own keys=1"), 1);
     EXPECT_EQ(world.count("nav_input Own keys=0"), 3);
     EXPECT_FLOAT_EQ(world.bodies["Own"].linear[0], 1.0f);
-    EXPECT_NEAR(world.bodies["Own"].position[0], 3.0 * kDt, 1e-9);
+    EXPECT_NEAR(world.bodies["Own"].position[0], 3.0 * TICK_SECONDS, 1e-9);
 }
 
 // The own entity a record tracked is the name to amend: a trafo renames the
@@ -770,15 +769,15 @@ TEST(RollbackEngine, RelayedRemoteInputsReplacePredictionsAndConverge) {
     EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 5, entity_of, input_at));
     EXPECT_EQ(own_queries, 0);
     EXPECT_NEAR(world.bodies["Own"].linear[0], 3.0f, 1e-6f);
-    EXPECT_NEAR(world.bodies["Own"].position[0], 6.0 * kDt, 1e-9);
+    EXPECT_NEAR(world.bodies["Own"].position[0], 6.0 * TICK_SECONDS, 1e-9);
     EXPECT_NEAR(world.bodies["Remote"].linear[0], 2.0f, 1e-6f);
-    EXPECT_NEAR(world.bodies["Remote"].position[0], 1.0 + 4.0 * kDt, 1e-9);
+    EXPECT_NEAR(world.bodies["Remote"].position[0], 1.0 + 4.0 * TICK_SECONDS, 1e-9);
 
     // The next snapshot confirms an intermediate replayed tick. The old
     // prediction must also have been replaced in history, or this rolls back
     // again even though the authoritative inputs were already available.
     server_remote.linear[0] = 1.0f;
-    server_remote.position[0] = 1.0 + 2.0 * kDt;
+    server_remote.position[0] = 1.0 + 2.0 * TICK_SECONDS;
     const auto later = snapshot_of(4, {ball_body(2, server_remote)});
     EXPECT_FALSE(engine.on_snapshot(world.adapter(), later, 5, entity_of, input_at));
     EXPECT_EQ(engine.stats().rollbacks, 1u);
@@ -791,7 +790,7 @@ TEST(RollbackEngine, RelayedRemoteInputsReplacePredictionsAndConverge) {
     const auto revised = snapshot_of(2, {ball_body(2, server_remote)});
     EXPECT_TRUE(engine.on_snapshot(world.adapter(), revised, 5, entity_of, no_input));
     EXPECT_NEAR(world.bodies["Remote"].linear[0], 2.0f, 1e-6f);
-    EXPECT_NEAR(world.bodies["Remote"].position[0], 2.0 + 4.0 * kDt, 1e-9);
+    EXPECT_NEAR(world.bodies["Remote"].position[0], 2.0 + 4.0 * TICK_SECONDS, 1e-9);
 }
 
 TEST(RollbackEngine, MissingRelayKeepsRecordedRemotePrediction) {
@@ -813,7 +812,7 @@ TEST(RollbackEngine, MissingRelayKeepsRecordedRemotePrediction) {
     const auto snapshot = snapshot_of(2, {ball_body(2, server_remote)});
     EXPECT_TRUE(engine.on_snapshot(w, snapshot, 4, entity_of, no_input));
     EXPECT_NEAR(world.bodies["Remote"].linear[0], 2.0f, 1e-6f);
-    EXPECT_NEAR(world.bodies["Remote"].position[0], 1.0 + 3.0 * kDt, 1e-9);
+    EXPECT_NEAR(world.bodies["Remote"].position[0], 1.0 + 3.0 * TICK_SECONDS, 1e-9);
 }
 
 // Step RC1 (docs/rewind-cost-design.md §2): the replay's feed over the core's
@@ -1192,7 +1191,7 @@ TEST(RollbackEngine, AmendRecordReplacesTheTickStateWithoutTouchingInputs) {
     EXPECT_EQ(engine.stats().resim_ticks, 2u);
     EXPECT_EQ(world.count("nav_input Own keys=1"), 2);
     EXPECT_NEAR(world.bodies["Own"].linear[0], 2.0f, 1e-6f);
-    EXPECT_NEAR(world.bodies["Own"].position[0], 0.5 + 1.0 * kDt + 2.0 * kDt, 1e-9);
+    EXPECT_NEAR(world.bodies["Own"].position[0], 0.5 + 1.0 * TICK_SECONDS + 2.0 * TICK_SECONDS, 1e-9);
     EXPECT_EQ(world.navs["Own"].active, 1u);
     EXPECT_EQ(world.navs["Own"].key_mask, 2u);
 }
@@ -1406,8 +1405,8 @@ TEST(RollbackEngine, TrafoBallIsHeldAtItsBirthPoseAndReposedAtItsBirthTick) {
     world.calls.clear();
     world.steps = 0;
     // the birth record of the new ball is the state after its first step
-    const double born_at = 10.0 + 3.0 * kDt;
-    ASSERT_NEAR(world.bodies["OwnNew"].position[0], born_at + 2.0 * 3.0 * kDt, 1e-9);
+    const double born_at = 10.0 + 3.0 * TICK_SECONDS;
+    ASSERT_NEAR(world.bodies["OwnNew"].position[0], born_at + 2.0 * 3.0 * TICK_SECONDS, 1e-9);
 
     // The server runs behind: its snapshot of tick 2 disagrees about the remote
     // ball and still carries the player-1 ball the trafo has since replaced.
@@ -1435,7 +1434,7 @@ TEST(RollbackEngine, TrafoBallIsHeldAtItsBirthPoseAndReposedAtItsBirthTick) {
     EXPECT_EQ(world.count("set_body OwnNew wake recheck"), 2);
     // held through ticks 3 and 4, put back on its birth record after tick 4's
     // step, then stepped at 5 and 6: exactly the state the live frames left
-    EXPECT_NEAR(world.bodies["OwnNew"].position[0], born_at + 2.0 * 3.0 * kDt, 1e-9);
+    EXPECT_NEAR(world.bodies["OwnNew"].position[0], born_at + 2.0 * 3.0 * TICK_SECONDS, 1e-9);
 }
 
 // Plan doc 9: with destroy_body / recreate_body installed and the savestate
@@ -1480,8 +1479,8 @@ TEST(RollbackEngine, ABodyBornInsideTheWindowIsReCreatedAtItsBirthTickWhenTheWor
         engine.record(w, tick, tick >= 4 ? after : before, {{"Remote", input_frame{}}});
     }
     world.calls.clear();
-    const double born_at = 10.0 + 3.0 * kDt;
-    ASSERT_NEAR(world.bodies["Prop"].position[0], born_at + 2.0 * 3.0 * kDt, 1e-9);
+    const double born_at = 10.0 + 3.0 * TICK_SECONDS;
+    ASSERT_NEAR(world.bodies["Prop"].position[0], born_at + 2.0 * 3.0 * TICK_SECONDS, 1e-9);
 
     // A snapshot of tick 2 that disagrees about the remote ball: a rewind
     // across the prop's birth at 4.
@@ -1503,7 +1502,7 @@ TEST(RollbackEngine, ABodyBornInsideTheWindowIsReCreatedAtItsBirthTickWhenTheWor
     EXPECT_EQ(engine.stats().birth_recreate_mismatches, 0u);
     EXPECT_EQ(engine.stats().birth_recreate_failures, 0u);
     EXPECT_TRUE(world.bodies.contains("Prop"));
-    EXPECT_NEAR(world.bodies["Prop"].position[0], born_at + 2.0 * 3.0 * kDt, 1e-9);
+    EXPECT_NEAR(world.bodies["Prop"].position[0], born_at + 2.0 * 3.0 * TICK_SECONDS, 1e-9);
 }
 
 // Step G3 (world-agreement-gaps-design.md 2.5, U3): the proximity union's
@@ -2022,7 +2021,7 @@ TEST(RollbackEngine, ABodyBornInsideTheWindowIsInsertedBeforeItsBirthTicksStepWh
         engine.record(w, tick, tick >= 4 ? after : before, {{"Remote", input_frame{}}});
     }
     world.calls.clear();
-    const double born_at = 10.0 + 3.0 * kDt;
+    const double born_at = 10.0 + 3.0 * TICK_SECONDS;
     fake_body server_remote = world.bodies["Remote"];
     server_remote.position[0] += 1.0;
     const auto snapshot = snapshot_of(2, {ball_body(2, server_remote)});
@@ -2037,7 +2036,7 @@ TEST(RollbackEngine, ABodyBornInsideTheWindowIsInsertedBeforeItsBirthTicksStepWh
     EXPECT_EQ(engine.stats().births_inserted, 1u);
     EXPECT_EQ(engine.stats().births_inserted_exact, 1u);
     EXPECT_EQ(engine.stats().birth_insert_mismatches, 0u);
-    EXPECT_NEAR(world.bodies["Prop"].position[0], born_at + 2.0 * 3.0 * kDt, 1e-9);
+    EXPECT_NEAR(world.bodies["Prop"].position[0], born_at + 2.0 * 3.0 * TICK_SECONDS, 1e-9);
 }
 
 // Plan doc 10: with destroy_body alone, the replayed scripts are expected to
@@ -2071,7 +2070,7 @@ TEST(RollbackEngine, ABodyDestroyedAtTheRestoreIsMadeAgainByTheReplayedStepOrCou
             engine.record(w, tick, tick >= 4 ? after : before, {{"Remote", input_frame{}}});
         }
         world.calls.clear();
-        const double born_at = 10.0 + 3.0 * kDt;
+        const double born_at = 10.0 + 3.0 * TICK_SECONDS;
         fake_body server_remote = world.bodies["Remote"];
         server_remote.position[0] += 1.0;
         const auto snapshot = snapshot_of(2, {ball_body(2, server_remote)});
@@ -2085,7 +2084,7 @@ TEST(RollbackEngine, ABodyDestroyedAtTheRestoreIsMadeAgainByTheReplayedStepOrCou
             EXPECT_EQ(engine.stats().births_recreated_exact, 1u);
             EXPECT_EQ(engine.stats().births_missing, 0u);
             EXPECT_EQ(world.count("set_body Prop"), 0);
-            EXPECT_NEAR(world.bodies["Prop"].position[0], born_at + 2.0 * 3.0 * kDt, 1e-9);
+            EXPECT_NEAR(world.bodies["Prop"].position[0], born_at + 2.0 * 3.0 * TICK_SECONDS, 1e-9);
         } else {
             EXPECT_EQ(engine.stats().births_missing, 1u);
             EXPECT_FALSE(world.bodies.contains("Prop"));
@@ -2530,7 +2529,7 @@ TEST(RollbackEngine, SubTolerancePartnerOfABreachingBodyIsRestoredFromItsOwnRow)
     record_ticks(world, engine, tracked, 1, 4);
     world.calls.clear();
     world.steps = 0;
-    const double sack_at_2 = 20.0 + 2.0 * 0.5 * kDt;
+    const double sack_at_2 = 20.0 + 2.0 * 0.5 * TICK_SECONDS;
 
     // the own ball breaches; the sack row is 20 mm off, well inside its pair
     fake_body server_own;
@@ -2545,7 +2544,7 @@ TEST(RollbackEngine, SubTolerancePartnerOfABreachingBodyIsRestoredFromItsOwnRow)
     EXPECT_TRUE(world.bodies["Sack"].simulated);
     // from the row, not from the record: the 20 mm are still there after the
     // two replayed steps (the record would have left it at sack_at_2 + 2 steps)
-    EXPECT_NEAR(world.bodies["Sack"].position[0], sack_at_2 + 0.02 + 2.0 * 0.5 * kDt, 1e-9);
+    EXPECT_NEAR(world.bodies["Sack"].position[0], sack_at_2 + 0.02 + 2.0 * 0.5 * TICK_SECONDS, 1e-9);
 }
 
 // Step T3's fix-up: a body every world simulates from the same inputs (a
@@ -2566,7 +2565,7 @@ TEST(RollbackEngine, AnInputDrivenBodyTakesItsAwakeRowOnlyOnABreach) {
         record_ticks(world, engine, tracked, 1, 4);
         world.calls.clear();
         world.steps = 0;
-        const double piece_at_2 = 20.0 + 2.0 * 0.5 * kDt;
+        const double piece_at_2 = 20.0 + 2.0 * 0.5 * TICK_SECONDS;
 
         fake_body server_own;
         server_own.position[0] = 0.5;   // the own ball breaches: a rollback runs
@@ -2579,11 +2578,11 @@ TEST(RollbackEngine, AnInputDrivenBodyTakesItsAwakeRowOnlyOnABreach) {
         if (breaching) {
             // from the row, as any breaching row
             EXPECT_EQ(world.count("set_body Piece wake recheck"), 1);
-            EXPECT_NEAR(world.bodies["Piece"].position[0], piece_at_2 + off + 2.0 * 0.5 * kDt, 1e-9);
+            EXPECT_NEAR(world.bodies["Piece"].position[0], piece_at_2 + off + 2.0 * 0.5 * TICK_SECONDS, 1e-9);
         } else {
             // from its own record: the 20 mm are not taken, the record's pose
             // plus the two replayed steps
-            EXPECT_NEAR(world.bodies["Piece"].position[0], piece_at_2 + 2.0 * 0.5 * kDt, 1e-9);
+            EXPECT_NEAR(world.bodies["Piece"].position[0], piece_at_2 + 2.0 * 0.5 * TICK_SECONDS, 1e-9);
         }
     }
 }
@@ -2893,7 +2892,7 @@ TEST(RollbackEngine, ARewindPutsTheClockBackBeforeTheBodiesAndTheReplayCatchesUp
         adapter.step();
         engine.record(adapter, tick, tracked, {});
     }
-    const double live_clock = world.clock;        // 4 * kDt
+    const double live_clock = world.clock;        // 4 * TICK_SECONDS
     world.calls.clear();
 
     EXPECT_TRUE(engine.rewind_to(adapter, 2, 4, no_input, "test"));
@@ -3242,7 +3241,7 @@ TEST(RollbackEngine, PreStepBeamOfTheOwnBallIsReappliedByEveryReplayThatCrossesI
             engine.record(w, tick, tracked, {});
         }
         const fake_body live = world.bodies["Own"];
-        ASSERT_NEAR(live.position[0], 100.0 + 5 * 2.0 * kDt, 1e-9);
+        ASSERT_NEAR(live.position[0], 100.0 + 5 * 2.0 * TICK_SECONDS, 1e-9);
 
         w.pre_step = beam;
         ASSERT_TRUE(engine.rewind_to(w, 3, kNow, no_input, "test"));
@@ -3428,7 +3427,7 @@ TEST(RollbackEngine, AnImportedMirrorBornAfterSIsRecordedAtSSoARewindToSRestores
             EXPECT_EQ(world.count("set_body Remote"), 1) << "restored from the record of S: one write, no re-pose";
             EXPECT_EQ(world.count("nav_input Remote keys=1"), 4) << "driven on S + 1 .. now";
             EXPECT_FLOAT_EQ(world.bodies["Remote"].linear[0], 4.0f);
-            EXPECT_DOUBLE_EQ(world.bodies["Remote"].position[0], 30.0 + (1.0 + 2.0 + 3.0 + 4.0) * kDt);
+            EXPECT_DOUBLE_EQ(world.bodies["Remote"].position[0], 30.0 + (1.0 + 2.0 + 3.0 + 4.0) * TICK_SECONDS);
         } else {
             EXPECT_EQ(world.count("set_body Remote"), 2) << "parked at the record of S + 1 and re-posed after its step";
             EXPECT_FLOAT_EQ(world.bodies["Remote"].linear[0], 3.0f) << "S + 1's key never acts";
@@ -3756,7 +3755,7 @@ TEST(RollbackEngine, AMirrorMadeAgainFromTheInputsIsFedAtItsBirthTickAndKeptAsSt
         if (from_inputs) {
             EXPECT_EQ(world.count("nav_input Mirror keys=1"), 3) << "fed at its birth tick, after it was made";
             EXPECT_FLOAT_EQ(world.bodies["Mirror"].linear[0], 3.0f) << "driven at 4, 5 and 6";
-            EXPECT_NEAR(world.bodies["Mirror"].position[0], 10.0 + 6.0 * kDt, 1e-6);
+            EXPECT_NEAR(world.bodies["Mirror"].position[0], 10.0 + 6.0 * TICK_SECONDS, 1e-6);
             EXPECT_EQ(engine.stats().births_recreated_exact, 0u) << "not on the record of the earlier inputs";
             EXPECT_EQ(engine.stats().birth_recreate_mismatches, 0u) << "a difference that is the inputs, not a gap";
             EXPECT_EQ(world.count("log birth: Mirror made again at tick 4 from the inputs it has now"), 1);
@@ -5773,7 +5772,7 @@ TEST(RollbackEngineGlobals, WithoutTheWritesTheFrozenWindowRunsAhead) {
     step_globals(control, straight, nullptr, 1, 25, freeze_10_to_19);
     step_globals(arm, rewound, &engine, 1, 25, freeze_10_to_19);
     ASSERT_TRUE(engine.rewind_to(rewound, 15, 25, no_input, "U1 control"));
-    EXPECT_NEAR(arm.clock - control.clock, 8.0 * kDt, 1e-12);
+    EXPECT_NEAR(arm.clock - control.clock, 8.0 * TICK_SECONDS, 1e-12);
     EXPECT_NE(bit_difference(control, arm), "");
 }
 
@@ -6009,8 +6008,8 @@ TEST(RollbackEngineGlobals, AResyncReStepRunsAtTheServerBlobsGlobals) {
         EXPECT_EQ(arm.gravity_y, -20.0);
         clocks[server ? 0 : 1] = arm.clock - clock_at_1;
     }
-    EXPECT_NEAR(clocks[0], 9.0 * 2.0 * kDt, 1e-12) << "nine server steps (the clock advanced by the re-step alone)";
-    EXPECT_NEAR(clocks[0] - clocks[1], kDt, 1e-12) << "the control steps tick 2 at half the server's step";
+    EXPECT_NEAR(clocks[0], 9.0 * 2.0 * TICK_SECONDS, 1e-12) << "nine server steps (the clock advanced by the re-step alone)";
+    EXPECT_NEAR(clocks[0] - clocks[1], TICK_SECONDS, 1e-12) << "the control steps tick 2 at half the server's step";
 }
 
 // FULL step WFA (world-agreement-gaps-design.md §4.3, "As built (step WFA)";
@@ -6208,7 +6207,7 @@ TEST(RollbackEngine, CaptureCacheReadsFreshAfterARestoreThatShiftedTheCalmRefere
         EXPECT_EQ(engine.stats().capture_cache_hits, 3u);
         EXPECT_TRUE(engine.rewind_to(w, 2, 4, no_input, "test"));
         EXPECT_EQ(world.count("set_clock"), 0);
-        const double shifted = 0.5 + 2 * kDt;   // the live clock is two ticks past the anchor's
+        const double shifted = 0.5 + 2 * TICK_SECONDS;   // the live clock is two ticks past the anchor's
         EXPECT_NEAR(calm["Plate"], shifted, 1e-12) << "the restore shifted the plate's calm reference";
         for (const uint32_t tick: {3u, 4u}) {
             bmmo_physics_core_extra extra{};

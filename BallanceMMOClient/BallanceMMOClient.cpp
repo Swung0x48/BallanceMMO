@@ -243,6 +243,7 @@ void BallanceMMOClient::OnLoad()
     load_wave_sound(&sound_knock_, "MMO_Sound_Knock", "..\\Sounds\\Pieces_Stone.wav", 0.88f, 0.88f);
 
     utils::cleanup_old_crash_dumps();
+    NSDumpFile::StartHangWatch();
     start_command_pipe_from_environment();
     install_input_hook();
 
@@ -846,6 +847,7 @@ void BallanceMMOClient::OnModifyConfig(BMMO_CKSTRING category, BMMO_CKSTRING key
 void BallanceMMOClient::OnExitGame()
 {
     command_pipe_.stop();
+    NSDumpFile::StopHangWatch();
     UnhookWinEvent(move_size_hook_);
     config_manager_.check_and_save_name_change_time();
     cleanup(true);

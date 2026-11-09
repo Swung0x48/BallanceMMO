@@ -54,6 +54,8 @@
 #include <chrono>
 #include <cstdint>
 
+#include <entity/session.hpp>
+
 namespace bmmo::sim {
     inline constexpr int kAssignRepeats = 16;   // unreliable copies after the reliable one, one per main-loop pass
     // Step STR (the user's decision after CBF1 F2): a SessionStartAt's copies
@@ -64,7 +66,7 @@ namespace bmmo::sim {
     // inside the first kAssignRepeats changes nothing (their echoes are clock
     // samples); the bound is the start barrier's 20 s of passes, for a member
     // that never answers.
-    inline constexpr int kStartCopiesUntilAnswered = 20 * 66;
+    inline constexpr int kStartCopiesUntilAnswered = 20 * bmmo::session::TICK_RATE;
     inline constexpr std::chrono::milliseconds kAssignCopyMinGap{5};
 
     // One assignment's copies still due.  `pass` is the server's main-loop

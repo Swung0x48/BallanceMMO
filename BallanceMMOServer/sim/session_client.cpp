@@ -134,7 +134,7 @@ namespace {
         // show where a session ended up.  To find WHICH body first disagreed
         // with the server, it has to be dense enough to bisect - pass 2, the
         // same as the server's journal_checkpoint_ticks.
-        uint32_t checkpoint_ticks = 660;
+        uint32_t checkpoint_ticks = 10 * bmmo::session::TICK_RATE;
         // Also journal each checkpoint tick's FINAL state, as its rollback
         // record leaves the history (step D0; on by default since journal
         // version 10, --no-final-checkpoints turns it off; --final-checkpoints
@@ -1814,7 +1814,7 @@ namespace {
             const auto quiesce = bmmo::game::quiesce_originals(engine_->context(), trafo_hooks_);
             logf("%s%s", quiesce.text().c_str(),
                  quiesce.bodies || quiesce.controllers || quiesce.scripts ? " - NOT EXPECTED in a headless world (a bug)" : "");
-            trafo_hold_.arm(engine_->context(), 1000.0f / 66.0f);
+            trafo_hold_.arm(engine_->context(), bmmo::session::TICK_DELTA_MS);
             std::string error;
             if (!bmmo::physics::trafo_set_filter(physics, true, error)) logf("trafo: the piece filter rule: %s", error.c_str());
             trafo_on_ = true;
@@ -1894,7 +1894,7 @@ namespace {
                 bmmo::game::trafo_set_final(trafo_registry_, player, life, type, tick);
             };
             p.trafo_frame = [this](uint32_t) {
-                if (trafo_on_) bmmo::game::trafo_frame(engine_->context(), trafo_registry_, 1000.0f / 66.0f);
+                if (trafo_on_) bmmo::game::trafo_frame(engine_->context(), trafo_registry_, bmmo::session::TICK_DELTA_MS);
             };
             // FULL step PRX (game/depth_test.hpp): the level's fall handler
             // for free props, live and in every replayed tick, where the
@@ -1941,7 +1941,7 @@ namespace {
                                                [this](const std::string& entity) { return core_.is_ball(entity); });
                 r.ok = bmmo::session::feed_muted_births(bmmo::physics::physics_direct(engine_->physics()), feed, [&]() {
                     return bmmo::game::remake_type_set(context, trafo_registry_, trafo_hooks_, spec.player, spec.life,
-                                                       spec.type, spec.position, spec.seed, 1000.0f / 66.0f, r.error);
+                                                       spec.type, spec.position, spec.seed, bmmo::session::TICK_DELTA_MS, r.error);
                 });
                 return r;
             };
@@ -2255,14 +2255,14 @@ namespace {
             // pacer catches up (under its rebase threshold).
             p.hooks.catch_up = [this](int ticks) {
                 origin_ -= std::chrono::duration_cast<clock_type::duration>(
-                        std::chrono::duration<double>(static_cast<double>(ticks) / bmmo::sim::kTickRate));
+                        std::chrono::duration<double>(static_cast<double>(ticks) / bmmo::session::TICK_RATE));
             };
             // Step A3: the frames a resync hold did not run are owed, up to
             // kHoldCatchUpFrames (the retail driver's release_hold_owing):
             // the pacing catches them up; the rest of a long hold is dropped.
             p.hooks.resync_hold_ended = [this](std::chrono::steady_clock::duration held) {
                 const auto owed = std::chrono::duration_cast<clock_type::duration>(
-                        std::chrono::duration<double>(bmmo::session::kHoldCatchUpFrames / bmmo::sim::kTickRate));
+                        std::chrono::duration<double>(bmmo::session::kHoldCatchUpFrames / bmmo::session::TICK_RATE));
                 if (held > owed) origin_ += held - owed;
             };
             // FULL step R6H: the hold is session/event_hold.hpp's, shared with
@@ -3667,16 +3667,16 @@ namespace {
             // for a raise (two frames per slot), one later per ten for a
             // lower.
             core_.note_pacer_behind(std::chrono::duration<double>(wall_now(bmmo::sim::wall_site::pace_expected) - origin_).count()
-                                    * bmmo::sim::kTickRate - static_cast<double>(next_frame));
+                                    * bmmo::session::TICK_RATE - static_cast<double>(next_frame));
             if (core_.slewing()) advance_lead_slew(next_frame);
-            const double expected = std::chrono::duration<double>(wall_now(bmmo::sim::wall_site::pace_expected) - origin_).count() * bmmo::sim::kTickRate;
+            const double expected = std::chrono::duration<double>(wall_now(bmmo::sim::wall_site::pace_expected) - origin_).count() * bmmo::session::TICK_RATE;
             // 33 frames behind is a stall, plus whatever a slew still has to
             // gain: the slew never runs the pacer more than a frame behind
             // (lead_slew::kRaiseMaxBehind), so a real stall still rebases.
             if (static_cast<double>(next_frame) + core_.rebase_threshold() < expected) {
                 // far behind (a long pause): restart the schedule instead of fast-forwarding
                 origin_ = wall_now(bmmo::sim::wall_site::pace_rebase) - std::chrono::duration_cast<clock_type::duration>(
-                    std::chrono::duration<double>(static_cast<double>(next_frame) / bmmo::sim::kTickRate));
+                    std::chrono::duration<double>(static_cast<double>(next_frame) / bmmo::session::TICK_RATE));
                 ++rebases_;
                 // A slew in flight is not ended here: the ticks it moved are
                 // stepped already, and it goes on moving the new schedule.
@@ -3687,7 +3687,7 @@ namespace {
                 core_.schedule_rebased("tick schedule rebased");
             } else if (static_cast<double>(next_frame) > expected) {
                 const auto due = origin_ + std::chrono::duration_cast<clock_type::duration>(
-                    std::chrono::duration<double>(static_cast<double>(next_frame) / bmmo::sim::kTickRate));
+                    std::chrono::duration<double>(static_cast<double>(next_frame) / bmmo::session::TICK_RATE));
                 const auto now = wall_now(bmmo::sim::wall_site::pace_due);
                 if (due > now) {
                     wall_sleep(bmmo::session::clock_site::wait_pace, std::min(due - now, clock_type::duration(std::chrono::milliseconds(2))));
@@ -3723,10 +3723,10 @@ namespace {
                 // they are not owed (A3's rule): the origin moves by whole
                 // periods only, and frame 1 falls on the first slot of the
                 // kept grid after now - as retail's fixed tick would run it.
-                const double due = std::chrono::duration<double>(now - origin_).count() * bmmo::sim::kTickRate;
+                const double due = std::chrono::duration<double>(now - origin_).count() * bmmo::session::TICK_RATE;
                 const int64_t unrun = due > 0.0 ? static_cast<int64_t>(std::floor(due)) : 0;
                 origin_ += std::chrono::duration_cast<clock_type::duration>(
-                    std::chrono::duration<double>(static_cast<double>(unrun) / bmmo::sim::kTickRate));
+                    std::chrono::duration<double>(static_cast<double>(unrun) / bmmo::session::TICK_RATE));
                 ++pacer_phases_kept_;
                 logf("pacer: a newer resync assignment before any frame on the kept origin keeps that phase "
                      "(%lld held slots not owed)", static_cast<long long>(unrun));
@@ -3738,8 +3738,8 @@ namespace {
                 return;
             }
             const auto kept = origin_ + std::chrono::duration_cast<clock_type::duration>(
-                std::chrono::duration<double>(static_cast<double>(paced_frames_) / bmmo::sim::kTickRate));
-            const double slip = std::chrono::duration<double>(now - kept).count() * bmmo::sim::kTickRate;
+                std::chrono::duration<double>(static_cast<double>(paced_frames_) / bmmo::session::TICK_RATE));
+            const double slip = std::chrono::duration<double>(now - kept).count() * bmmo::session::TICK_RATE;
             origin_ = kept;
             phase_kept_unrun_ = true;
             ++pacer_phases_kept_;
@@ -3780,12 +3780,12 @@ namespace {
         // clock runs ahead).
         void advance_lead_slew(uint64_t next_frame) {
             const auto now = wall_now(bmmo::sim::wall_site::slew_step);
-            const double behind = std::chrono::duration<double>(now - origin_).count() * bmmo::sim::kTickRate
+            const double behind = std::chrono::duration<double>(now - origin_).count() * bmmo::session::TICK_RATE
                                 - static_cast<double>(next_frame);
-            const int moved = core_.slew_step(now, bmmo::sim::kTickRate, behind);
+            const int moved = core_.slew_step(now, bmmo::session::TICK_RATE, behind);
             if (moved != 0)
                 origin_ -= std::chrono::duration_cast<clock_type::duration>(
-                    std::chrono::duration<double>(static_cast<double>(moved) / bmmo::sim::kTickRate));
+                    std::chrono::duration<double>(static_cast<double>(moved) / bmmo::session::TICK_RATE));
         }
 
         // --keep-lane: the record's keys of this frame with LEFT or RIGHT added
@@ -3978,7 +3978,7 @@ namespace {
                     if (auto* levels = engine_->data_array("AllLevel"))
                         levels->GetElementValue(args_.level - 1, 6, &finish.content.levelBonus);
                     finish.content.timeElapsed = static_cast<float>(core_.frames_since_anchor())
-                            * bmmo::sim::kFixedDeltaMs / 1000.0f;
+                            * bmmo::session::TICK_DELTA_MS / 1000.0f;
                     send_bytes(std::string(reinterpret_cast<const char*>(&finish), sizeof(finish)),
                                bmmo::net::kSendReliableNoNagle);
                     level_finished_ = true;
@@ -4760,7 +4760,7 @@ namespace {
             CKIpionManager* physics = physics_direct_.manager;
             bmmo::session::session_world_options w;
             bmmo::session::rollback_binding_options& o = w.binding;
-            o.delta_ms = 1000.0f / 66.0f;
+            o.delta_ms = bmmo::session::TICK_DELTA_MS;
             // The clock is always read (a restore shifts the calm references it
             // puts back by the live clock's offset); rewound only on
             // --restore-clock.
@@ -4899,7 +4899,7 @@ namespace {
                 so.scripts_replayed = &scripts_replayed_;
                 so.reset_ticks = &script_reset_ticks_;
                 so.reset_skips = &script_reset_skips_;
-                so.delta_ms = 1000.0f / 66.0f;
+                so.delta_ms = bmmo::session::TICK_DELTA_MS;
                 so.diff_detail = args_.trace;
                 so.replay_activation = !args_.park_births;
                 // Step T3: the sets' scripts, recorded (v3), restored and run

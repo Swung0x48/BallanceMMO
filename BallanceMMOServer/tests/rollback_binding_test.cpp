@@ -36,7 +36,7 @@ namespace {
         bool refuse_writes = false;
         bool refuse_savestate = false;
         bool clock_readable = true;
-        float time_factor = 1.0f, physics_delta = 1000.0f / 66.0f;
+        float time_factor = 1.0f, physics_delta = bmmo::session::TICK_DELTA_MS;
         int contact_count = 0;
         std::vector<std::string> dropped, unknown;
         std::vector<uint8_t> blob = {1, 2, 3};

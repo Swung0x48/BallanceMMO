@@ -10,21 +10,19 @@
 #include <utility>
 #include <vector>
 
-namespace bmmo::session {
-    // One tick in microseconds, exactly.  The scheduler's kTickDuration is
-    // truncated to 15151 us; dividing by it instead would only scale every
-    // slack by 3.3e-5 (no drift: the deadlines are spaced by the same
-    // truncated period either way), so this is the design's tick and nothing
-    // more.
-    inline constexpr double kLatenessTickMicros = 1000000.0 / 66.0;
+#include "../entity/session.hpp"
 
+namespace bmmo::session {
     // A sample's slack in ticks: how long before `deadline` the datagram
     // `arrival`d.  Any clock (the server passes steady_clock time points);
     // computed in double microseconds, so the same expression builds on MSVC
-    // and GCC whatever the clock's period is.
+    // and GCC whatever the clock's period is.  Divided by the exact tick
+    // (TICK_MICROS), not the schedulers' truncated TICK_DURATION: that would
+    // only scale every slack by 3.3e-5 (no drift: the deadlines are spaced by
+    // the same truncated period either way).
     template <class TimePoint>
     double lateness_slack_ticks(TimePoint deadline, TimePoint arrival) {
-        return std::chrono::duration<double, std::micro>(deadline - arrival).count() / kLatenessTickMicros;
+        return std::chrono::duration<double, std::micro>(deadline - arrival).count() / TICK_MICROS;
     }
 
     // The q-quantile of `values` (copied, sorted): the element at floor(q * n),
@@ -82,7 +80,7 @@ namespace bmmo::session {
         }
         bool timeout(uint32_t tick, time_point now) {
             if (!assigned_ || startup_ || started_
-                    || static_cast<int32_t>(tick - assigned_tick_) < 660) return false;
+                    || static_cast<int32_t>(tick - assigned_tick_) < 10 * TICK_RATE) return false;
             settled(epoch_, now);
             return true;
         }
@@ -260,17 +258,17 @@ namespace bmmo::session {
 
     class relative_meter {
     public:
-        static constexpr size_t kWindow = 66;
+        static constexpr size_t kWindow = TICK_RATE;   // samples, one a tick: a second
         static constexpr uint32_t kFreshTicks = 8;
         static constexpr int kMinRaise = 2;
-        static constexpr uint32_t kCooldownTicks = 132;
+        static constexpr uint32_t kCooldownTicks = 2 * TICK_RATE;
         static constexpr int kMaxUnrestoredRaises = 2;
         static constexpr double kAbsoluteMissTicks = 3.0;
         static constexpr double kLowerMarginTicks = 4.0;
-        static constexpr uint32_t kRaiseTicks = 132;
-        static constexpr uint32_t kMinorityPersistTicks = 660;
-        static constexpr uint32_t kSharedPersistTicks = 660;
-        static constexpr uint32_t kLowerTicks = 660;
+        static constexpr uint32_t kRaiseTicks = 2 * TICK_RATE;
+        static constexpr uint32_t kMinorityPersistTicks = 10 * TICK_RATE;
+        static constexpr uint32_t kSharedPersistTicks = 10 * TICK_RATE;
+        static constexpr uint32_t kLowerTicks = 10 * TICK_RATE;
 
         void reset(uint32_t base, bool keep_absolute = false) {
             const auto previous = *this;

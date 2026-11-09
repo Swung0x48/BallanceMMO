@@ -35,6 +35,8 @@
 #include <utility>
 #include <vector>
 
+#include "../entity/session.hpp"
+
 namespace bmmo::session {
 
     // ---- the event's flags (design 2.2)
@@ -51,19 +53,19 @@ namespace bmmo::session {
     }
 
     // A reset applied at R removes its bodies in R+132 and restores the IC in
-    // R+133 (Bezier Progression, 2000 ms at 1000/66 ms per frame, design
-    // 1.5); 140 leaves 7 ticks of margin.
-    constexpr uint32_t kTrafoResetSpan = 140;
-    constexpr uint32_t kTrafoResetDephysicalize = 132;   // R + 132: the De Physicalize's frame
-    constexpr uint32_t kTrafoResetRestoreIC = 133;       // R + 133: Restore IC
+    // R+133 (Bezier Progression, 2000 ms at one frame a tick, design 1.5);
+    // 140 leaves 7 ticks of margin.
+    constexpr uint32_t kTrafoResetDephysicalize = 2 * TICK_RATE;   // R + 132: the De Physicalize's frame
+    constexpr uint32_t kTrafoResetRestoreIC = kTrafoResetDephysicalize + 1;   // R + 133: Restore IC
+    constexpr uint32_t kTrafoResetSpan = kTrafoResetRestoreIC + 7;
     // 20 s at 66 ticks/s: the piece life (decision 9.6).
-    constexpr uint32_t kTrafoLife = 1320;
+    constexpr uint32_t kTrafoLife = 20 * TICK_RATE;
     // Decision 9.5, option E (step T3): the owner stamps its explosion at the
     // frame the Trafo Manager's 1000 ms Delayer predicts, 67 frames after it
     // starts, when the session's lead lets every world have it in time:
     // stamp >= poll tick + 1 + lead, i.e. lead <= 66.  A session whose lead
     // exceeds it stamps the cancelled activation (tick + 1 + lead).
-    constexpr uint32_t kTrafoOptionEMaxLead = 66;
+    constexpr uint32_t kTrafoOptionEMaxLead = TICK_RATE;
 
     inline bool trafo_is_reset(uint8_t flags) { return (flags & TRAFO_RESET) != 0; }
 

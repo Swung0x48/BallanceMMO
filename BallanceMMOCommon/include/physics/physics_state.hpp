@@ -253,6 +253,15 @@ namespace bmmo::physics {
                      // freeze counters, which the bool overload does and a
                      // per-tick correction must not
         freeze = 2,  // disable_simulation() when the body is simulated
+        // A body made this tick that must leave with the velocity written to
+        // it (the airship release, protocol 35): woken BEFORE the write, at
+        // once (ensure_in_simulation_now, IVP's own attach pattern).  `wake`
+        // only queues a revive, and the revive at the next PSI starts the
+        // core from rest (calc_next_PSI_matrix_zero_speed): every release
+        // used to leave the ball at ~18% of its speed - on Level 13's end
+        // spiral, which the zone column crosses once a lap, the ball could
+        // never cling (2026-11-08 public test, stomach110).
+        wake_moving = 3,
     };
     // The same write with the sleep state under the caller's control, and the
     // one a rollback restore wants: a beam through this overload also carries

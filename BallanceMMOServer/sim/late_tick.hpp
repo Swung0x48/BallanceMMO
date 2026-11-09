@@ -67,7 +67,7 @@ namespace bmmo::sim {
     // so the joiner's frames arrive on time from its first tick instead of
     // being substituted until the meter raises it.
     inline uint32_t late_join_lead_ticks(uint32_t input_delay, uint32_t rtt_ms) {
-        const uint64_t rtt_ticks = (static_cast<uint64_t>(rtt_ms) * 66 + 999) / 1000;
+        const uint64_t rtt_ticks = (static_cast<uint64_t>(rtt_ms) * bmmo::session::TICK_RATE + 999) / 1000;
         const uint64_t lead = std::max<uint64_t>(1, input_delay) + rtt_ticks + 2;
         return static_cast<uint32_t>(std::min<uint64_t>(lead, kLeadSanityCapTicks));
     }
@@ -93,7 +93,7 @@ namespace bmmo::sim {
     }
 
     inline uint32_t late_tick_lead_ticks(uint32_t input_delay, uint32_t rtt_ms) {
-        const uint32_t rtt_ticks = std::min<uint32_t>((rtt_ms * 66 + 999) / 1000, kLateTickRttCapTicks);
+        const uint32_t rtt_ticks = std::min<uint32_t>((rtt_ms * bmmo::session::TICK_RATE + 999) / 1000, kLateTickRttCapTicks);
         const uint32_t lead = std::max<uint32_t>(1, input_delay) + rtt_ticks + 2;
         return std::min<uint32_t>(lead, kLateTickLeadCapTicks);
     }
@@ -219,7 +219,7 @@ namespace bmmo::sim {
     // that much early until a resync).
     // From the start on it equals tick_at.
     inline uint32_t schedule_tick_at(int64_t elapsed_us, uint32_t first_tick, uint32_t margin) {
-        const int64_t scaled = elapsed_us * 66;
+        const int64_t scaled = elapsed_us * bmmo::session::TICK_RATE;
         int64_t ticks = scaled / 1000000;
         if (scaled % 1000000 < 0) --ticks;   // floor below zero too
         return first_tick + static_cast<uint32_t>(ticks) + margin;

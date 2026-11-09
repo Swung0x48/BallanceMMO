@@ -48,7 +48,16 @@ public:
             bmmo::flush_log_on_exit();
             std::_Exit(0);
         };
-        std::signal(SIGABRT, close_log_and_exit);
+        // SIGABRT is a fault (std::terminate, an assertion): a host that
+        // installed a crash reporter before constructing its role
+        // (sim/crash_report.cpp: the server, the headless client) keeps it.
+        // Taking it here ended the server's uncaught exception with exit
+        // code 0 and no line (2026-11-08 public test).  A host without one
+        // (the retail mod, the mock client, the record parser) keeps the
+        // old flush-and-exit.
+        if (const auto previous = std::signal(SIGABRT, close_log_and_exit);
+            previous != SIG_DFL && previous != SIG_ERR && previous != SIG_IGN)
+            std::signal(SIGABRT, previous);
         std::signal(SIGTERM, close_log_and_exit);
         std::signal(SIGINT, close_log_and_exit);
     }

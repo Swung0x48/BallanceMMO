@@ -50,7 +50,7 @@ namespace {
 
     arrival_ring::time_point instant(double ticks) {
         return arrival_ring::time_point{} + std::chrono::duration_cast<arrival_ring::time_point::duration>(
-            std::chrono::duration<double, std::micro>(ticks * kLatenessTickMicros));
+            std::chrono::duration<double, std::micro>(ticks * TICK_MICROS));
     }
 
     struct sim_result {

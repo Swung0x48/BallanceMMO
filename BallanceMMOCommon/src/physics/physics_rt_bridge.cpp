@@ -497,6 +497,8 @@ namespace {
             mode = bmmo::physics::wake_mode::wake;
         else if (wake_mode == static_cast<int32_t>(bmmo::physics::wake_mode::freeze))
             mode = bmmo::physics::wake_mode::freeze;
+        else if (wake_mode == static_cast<int32_t>(bmmo::physics::wake_mode::wake_moving))
+            mode = bmmo::physics::wake_mode::wake_moving;
         std::string text;
         if (!bmmo::physics::set_body_state(static_cast<CKIpionManager*>(manager), entity_name,
                                            position, rotation, linear, angular, mode, recheck != 0, text)) {

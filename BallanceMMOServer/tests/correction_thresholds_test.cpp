@@ -20,11 +20,11 @@ namespace {
     using bmmo::session::correction_step;
     using bmmo::session::correction_thresholds;
     using bmmo::session::rollback_thresholds;
+    using bmmo::session::TICK_SECONDS;
 
     // Measured maximum legal mechanism speed: 0.81 m in one 66 Hz tick
     // (build/online-symptoms-20260909/mech-jitter).
     constexpr double kMechanismMetresPerTick = 0.81;
-    constexpr double kTick = 1.0 / 66.0;
 
     ball_pose pose_at(uint32_t tick, double x, double y, double z, float vx, float vy, float vz) {
         ball_pose pose;
@@ -150,7 +150,7 @@ TEST(CorrectionThresholds, FiftyMillimetreHalfMetrePerSecondDivergenceIsABreach)
 // (rollback_thresholds.mechanism_*) is exercised in
 // MechanismRowsUseTheMechanismPair below.
 TEST(CorrectionThresholds, LegalMechanismSpeedStaysInsideTheBallPair) {
-    const double speed = kMechanismMetresPerTick / kTick;
+    const double speed = kMechanismMetresPerTick / TICK_SECONDS;
     body_corrector corrector;
     const ball_pose local = pose_at(4000, 1.0, 2.0, 3.0,
                                     static_cast<float>(speed), 0.0f, 0.0f);

@@ -59,7 +59,8 @@ namespace bmmo::session {
     // adapters forward to the bridge: `keep` never touches the sleep state,
     // `wake` revives a body that is not simulated (and leaves an awake body's
     // freeze timers alone), `freeze` disables simulation for a simulated body.
-    enum class wake_mode : uint8_t { keep = 0, wake = 1, freeze = 2 };
+    // wake_moving: physics_state.hpp's (a body made this tick that leaves with its velocity).
+    enum class wake_mode : uint8_t { keep = 0, wake = 1, freeze = 2, wake_moving = 3 };
 
     // A restore that barely moves a body cannot create a new contact, and the
     // mindist recheck it would trigger is not free; past these two the write
@@ -711,7 +712,7 @@ namespace bmmo::session {
     // the newest sample is 1/16.  Before the first sample the cap is the
     // floor: no measurement, no deeper claim than every client made before
     // step 12 (and a client that never rewinds needs no deeper reach).
-    constexpr double kReachHitchBudgetMs = 3.0 * 1000.0 / 66.0;   // B: 3 ticks, 45.45 ms
+    constexpr double kReachHitchBudgetMs = 3.0 * 1000.0 / TICK_RATE;   // B: 3 ticks, 45.45 ms
     // The user's decision after LBM4: the first sample is not left to the
     // first rewind the session happens to need - that can be minutes in,
     // the reach held at the floor all the while (lbm4_a4_swing_seed1: no

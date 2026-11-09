@@ -323,4 +323,12 @@ namespace bmmo {
     void flush_log_on_exit() {
         if (log_file) fflush(log_file);
     }
+
+    void crash_log_line(const char* line) {
+        if (!log_file) return;
+        char timeStr[15];
+        format_local_time(timeStr, sizeof(timeStr), std::time(nullptr));
+        fprintf(log_file, "[%s] %s\n", timeStr, line);
+        fflush(log_file);
+    }
 }

@@ -34,7 +34,7 @@ namespace bmmo::session {
         // count of scripts kept live for that reason.
         const std::map<CK_ID, uint32_t>* reset_ticks = nullptr;
         uint64_t* reset_skips = nullptr;
-        float delta_ms = 1000.0f / 66.0f;
+        float delta_ms = TICK_DELTA_MS;
         bool diff_detail = false;                           // diff_scripts appends every logical difference
         // The caller re-issues every sector activation inside the replayed
         // window (plan doc 10): every selected script is then written back,

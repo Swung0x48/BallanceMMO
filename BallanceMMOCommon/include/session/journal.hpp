@@ -657,7 +657,7 @@ namespace bmmo::session {
     constexpr uint64_t kJournalMaxQueued = 32ull << 20;
     // A compressed journal's segment (the user's decision of 2026-11-05): the
     // records of 66 ticks (about a second) per compressed flush.
-    constexpr uint32_t kJournalSegmentTicks = 66;
+    constexpr uint32_t kJournalSegmentTicks = TICK_RATE;
 
     // Writes a journal.  Step SIO: the records go to an io_queue
     // (session/io_queue.hpp).  With an io_poster (the host's I/O strand) the

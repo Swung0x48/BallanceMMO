@@ -13,6 +13,7 @@
 #include <memory>
 #include <string>
 
+#include <entity/session.hpp>
 #include <game/menu_driver.hpp>
 
 class CKContext;
@@ -23,9 +24,6 @@ class CKBeObject;
 class CKDataArray;
 
 namespace bmmo::sim {
-    inline constexpr double kTickRate = 66.0;
-    inline constexpr float kFixedDeltaMs = 1000.0f / 66.0f;
-
     struct engine_options {
         std::filesystem::path game_root;      // directory containing base.cmo
         std::string composition = "base.cmo";

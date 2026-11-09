@@ -22,12 +22,9 @@
 #include "test_clock.hpp"
 
 namespace bmmo::session {
-    inline constexpr double kTickSeconds = 1.0 / 66.0;
-    inline constexpr std::chrono::microseconds kTickDuration{15151};  // 1e6 / 66, truncated
-
     // Wall-clock time of tick T measured from the session start.
     inline std::chrono::microseconds tick_offset(uint32_t tick) {
-        return std::chrono::microseconds(static_cast<int64_t>(tick) * 1000000 / 66);
+        return std::chrono::microseconds(static_cast<int64_t>(tick) * 1000000 / TICK_RATE);
     }
 
     // How long a session may make the server wait for a tick's inputs, in
@@ -54,7 +51,7 @@ namespace bmmo::session {
         if (ping_ms < 0) ping_ms = 0;
         const int64_t budget_ms = static_cast<int64_t>(ping_ms) * kInputDelayJitterPercent / (2 * 100)
                                 + kInputDelayMarginMs;
-        const int64_t ticks = (budget_ms * 66 + 999) / 1000;   // round up to whole ticks
+        const int64_t ticks = (budget_ms * TICK_RATE + 999) / 1000;   // round up to whole ticks
         uint32_t delay = static_cast<uint32_t>(ticks < 0 ? 0 : ticks);
         if (delay < floor_ticks) delay = floor_ticks;
         if (delay > kInputDelayMaxTicks) delay = kInputDelayMaxTicks;
@@ -436,7 +433,7 @@ namespace bmmo::session {
         uint32_t tick_at(clock::time_point now, uint32_t margin) const {
             if (!started_ || now <= start_) return first_tick_ + margin;
             const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - start_).count();
-            return first_tick_ + static_cast<uint32_t>(elapsed * 66 / 1000000) + margin;
+            return first_tick_ + static_cast<uint32_t>(elapsed * TICK_RATE / 1000000) + margin;
         }
 
     private:
@@ -452,7 +449,7 @@ namespace bmmo::session {
     // `full_interval` ticks or when the body set changed.
     struct snapshot_cadence {
         uint32_t interval = 2;
-        uint32_t full_interval = 66;
+        uint32_t full_interval = TICK_RATE;
         uint32_t last_full = 0;
         bool have_full = false;
 

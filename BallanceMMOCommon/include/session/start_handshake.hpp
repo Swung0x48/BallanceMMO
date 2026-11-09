@@ -60,13 +60,25 @@
 // (server.cpp), the client core the client half (client_core.cpp).
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <map>
 #include <set>
 #include <vector>
 
+#include "../entity/session.hpp"
+
 namespace bmmo::session {
+
+    // Start barrier (design 8.3): how long a session waits for its members to
+    // report SessionReady after SessionStart went out, before the ones that
+    // stayed silent are dropped and the rest start without them.  Protocol 32
+    // (step SPL): 20 s, not 8 - a client now restarts its level, places the
+    // mechanisms over rendered frames and counts down 3-2-1 before its
+    // SessionReady.  Here, not in the server's sim, because the client's
+    // anchor hold must outlast it (client_core.hpp kAnchorHoldTimeout).
+    inline constexpr std::chrono::seconds kStartBarrierTimeout{20};
 
     // One clock sample: t1 = the copy's send instant (server clock), tc = the
     // client's clock when it handled the copy, t4 = the server's receive
@@ -112,9 +124,6 @@ namespace bmmo::session {
         // `server_us` reaches it on a lossless link.
         int64_t arrival_local(int64_t server_us) const { return server_us + best.offset_us + best.rtt_us / 2; }
     };
-
-    // The session's tick rate (every host steps 66 Hz).
-    inline constexpr double kStartTickRate = 66.0;
 
     // Phase 1: once every member has a sample, wait for this many each, or
     // this long after the assignment went out (the copies span ~242 ms).
@@ -201,7 +210,7 @@ namespace bmmo::session {
     // A start catch-up is at most this many ticks (half a second): a member
     // needing more reports it and is refused alone (protocol 27). A resync
     // still caps its catch-up here and leaves the rest to the lead machinery.
-    inline constexpr int kStartMaxCatchUpTicks = 33;
+    inline constexpr int kStartMaxCatchUpTicks = TICK_RATE / 2;
 
     // The server's half: one session's start, from the start members'
     // assignment to the instant its schedule starts.  The server feeds it the

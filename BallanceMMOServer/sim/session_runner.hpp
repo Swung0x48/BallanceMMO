@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <session/resync_state_codec.hpp>
+#include <session/start_handshake.hpp>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -39,6 +40,7 @@
 #include <session/trafo_input.hpp>
 
 #include "physics_world.hpp"
+#include "stall_policy.hpp"
 
 namespace bmmo::sim {
     struct runner_config {
@@ -46,7 +48,7 @@ namespace bmmo::sim {
         std::filesystem::path game_root;
         uint32_t input_delay = 6;           // floor; each session sizes its own from ping
         uint32_t snapshot_interval = 2;
-        uint32_t full_snapshot_interval = 66;
+        uint32_t full_snapshot_interval = bmmo::session::TICK_RATE;
         int seed = 1;
         // Every clock read of the runner that decides something (step K1); null:
         // the real clock.  The step-cost timers read the real clock themselves.
@@ -65,7 +67,7 @@ namespace bmmo::sim {
         // written on the runner thread with its old flush points.
         std::function<bmmo::session::io_poster()> io_strand;
         bmmo::session::io_flush journal_flush = bmmo::session::io_flush::batch;
-        uint32_t journal_checkpoint_ticks = 660;     // full body checkpoint cadence; 0 = none
+        uint32_t journal_checkpoint_ticks = 10 * bmmo::session::TICK_RATE;     // full body checkpoint cadence; 0 = none
         // Late-player design 2.6: the session stops waiting for one player at
         // that player's patience instead of the deadline, with the streak
         // waiver.  Off, the step test and the sleep are exactly what they were
@@ -225,15 +227,13 @@ namespace bmmo::sim {
         std::string error;
     };
 
-    // Start barrier (design 8.3): how long a session waits for its members to
-    // report SessionReady after SessionStart went out, before the ones that
-    // stayed silent are dropped and the rest start without them.  The server
-    // checks the deadline from its own main loop rather than from a tick: a
-    // session whose members never answered has no ticks at all.  Protocol 32
-    // (step SPL): 20 s, not 8 - a client now restarts its level, places the
-    // mechanisms over rendered frames and counts down 3-2-1 before its
-    // SessionReady (a level reload no longer overlaps the countdown).
-    inline constexpr std::chrono::seconds kStartBarrierTimeout{20};
+    // Start barrier (design 8.3; the value is session/start_handshake.hpp's,
+    // which the client's anchor hold is checked against).  The server checks
+    // the deadline from its own main loop rather than from a tick: a session
+    // whose members never answered has no ticks at all.
+    inline constexpr std::chrono::seconds kStartBarrierTimeout = bmmo::session::kStartBarrierTimeout;
+
+    // A stalled member: sim/stall_policy.hpp (3 s keys released, 20 s out).
 
     struct session_callbacks {
         std::function<void(const world_ready_info&)> on_world_ready;
@@ -583,6 +583,9 @@ namespace bmmo::sim {
             // last frame of it), so what the server drives a leaver with
             // until it takes it out.
             std::map<uint32_t, bmmo::session::input_frame> last_frames;
+            // Each member's stall whose keys are released (kStallReleaseTicks):
+            // the first released tick, so the log says it once a stall.
+            std::map<uint32_t, uint32_t> stall_released;
             // Late-player design 3.2 (review of step 16): a player who left
             // with events accepted and relayed but not applied yet stays in
             // the world - out of every member structure, so nothing waits for

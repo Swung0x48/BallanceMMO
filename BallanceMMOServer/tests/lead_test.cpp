@@ -36,11 +36,10 @@
 using namespace bmmo::session;
 
 namespace {
-    constexpr double kTickMs = 1000.0 / 66.0;
     constexpr uint32_t kInputDelay = 16;
     constexpr uint32_t kRedundancy = 8;   // frames per uplink datagram
 
-    double deadline_ms(uint32_t t) { return (t + kInputDelay) * kTickMs; }
+    double deadline_ms(uint32_t t) { return (t + kInputDelay) * TICK_MS; }
 
     // Player p's frame for tick t: distinct per player and tick, so a test can
     // tell which tick's frame was applied.
@@ -96,7 +95,7 @@ namespace {
         for (size_t p = 0; p < n; ++p)
             for (uint32_t t = 0; t < ticks + 40; ++t) {
                 const double slack = links[p](t);
-                if (!std::isnan(slack)) datagrams.push_back({deadline_ms(t) - slack * kTickMs, p, t});
+                if (!std::isnan(slack)) datagrams.push_back({deadline_ms(t) - slack * TICK_MS, p, t});
             }
         std::stable_sort(datagrams.begin(), datagrams.end(),
                          [](const datagram& a, const datagram& b) { return a.at < b.at; });
@@ -167,10 +166,10 @@ namespace {
             while (tick < ticks) {
                 const auto members = members_at(tick);
                 const auto v = patience_step_test(members, now >= deadline_ms(tick) - 1e-9,
-                                                  (deadline_ms(tick) - now) / kTickMs, o.patience);
+                                                  (deadline_ms(tick) - now) / TICK_MS, o.patience);
                 if (!v.step) {
                     wake = deadline_ms(tick);
-                    if (v.wait) wake = std::min(wake, now + v.wait_ticks * kTickMs);
+                    if (v.wait) wake = std::min(wake, now + v.wait_ticks * TICK_MS);
                     break;
                 }
                 r.step_ms[tick] = now;
@@ -206,7 +205,7 @@ namespace {
                 std::vector<input_frame> frames;
                 for (uint32_t t = first; t <= d.newest; ++t) frames.push_back(frame_of(d.player, t));
                 buffers[d.player].submit(first, frames);
-                const double slack = (deadline_ms(d.newest) - d.at) / kTickMs;
+                const double slack = (deadline_ms(d.newest) - d.at) / TICK_MS;
                 const auto arrival = arrival_ring::time_point{} + std::chrono::duration_cast<arrival_ring::time_point::duration>(
                     std::chrono::duration<double, std::milli>(d.at));
                 baselines[d.player].sample(d.newest, slack, arrival);
@@ -337,8 +336,8 @@ namespace {
             // No deadline wait: stepped as soon as player 0's frame was in -
             // at the decision for the frames already queued then, at their
             // arrival after that.
-            EXPECT_NEAR(r.step_ms[t], std::max(r.step_ms[n - 1], deadline_ms(t) - 6.5 * kTickMs), 1e-6) << t;
-            EXPECT_LE(r.step_ms[t], deadline_ms(t) - kTickMs) << t;
+            EXPECT_NEAR(r.step_ms[t], std::max(r.step_ms[n - 1], deadline_ms(t) - 6.5 * TICK_MS), 1e-6) << t;
+            EXPECT_LE(r.step_ms[t], deadline_ms(t) - TICK_MS) << t;
         }
         // Before N the late player kept the session on deadlines.
         for (uint32_t t = n - 20; t < n; ++t) EXPECT_NEAR(r.step_ms[t], deadline_ms(t), 1e-6) << t;
@@ -535,9 +534,9 @@ namespace {
             int decisions = 0;
             for (uint32_t i = 0; i < ticks; ++i, ++tick) {
                 const auto deadline = arrival_ring::time_point{} + std::chrono::microseconds(
-                    static_cast<int64_t>(tick * kLatenessTickMicros));
+                    static_cast<int64_t>(tick * TICK_MICROS));
                 const auto at = deadline - std::chrono::microseconds(
-                    static_cast<int64_t>((6.0 - delay) * kLatenessTickMicros));
+                    static_cast<int64_t>((6.0 - delay) * TICK_MICROS));
                 arrivals.record(tick, at, at, true);
                 const double slack = lateness_slack_ticks(deadline, arrivals.find(tick)->at);
                 baseline.sample(tick, slack, at);
@@ -830,7 +829,7 @@ namespace {
     // The start base as plan step 9 computed it (late_tick.hpp at 53d8ecc),
     // copied here so a change to the production function shows up.
     uint32_t step9_start_base(uint32_t input_delay, uint32_t rtt_ms) {
-        const uint32_t rtt_ticks = std::min<uint32_t>((rtt_ms * 66 + 999) / 1000, 12);
+        const uint32_t rtt_ticks = std::min<uint32_t>((rtt_ms * TICK_RATE + 999) / 1000, 12);
         const uint32_t lead = std::min<uint32_t>(std::max<uint32_t>(1, input_delay) + rtt_ticks + 2, 34);
         const uint32_t room = 44 > input_delay ? 44 - input_delay : 0;
         return std::max<uint32_t>(1, std::min(lead, room));
@@ -1133,7 +1132,7 @@ TEST(LateTickLead, ThePerPlayerPathNeedsTheFlagAndCapLead) {
 namespace {
     // deadline(base) - now in ticks.
     double reanchor_budget_ticks(const tick_scheduler& sched, uint32_t base, tick_scheduler::clock::time_point now) {
-        return std::chrono::duration<double>(sched.deadline(base) - now).count() * 66.0;
+        return std::chrono::duration<double>(sched.deadline(base) - now).count() * TICK_RATE;
     }
     // The runner's next tick when it steps `e` ticks before the deadlines
     // (e = deadline(C) - step(C); e = 0: it waits on a member's deadlines).
@@ -1149,7 +1148,7 @@ TEST(ReanchorBase, AServerWaitingOnTheMemberGivesTheStartsBudget) {
     tick_scheduler sched;
     const auto t0 = tick_scheduler::clock::time_point(seconds(100));
     // design 9.26: the first step is due start_base periods after the start
-    sched.start(t0 + duration_cast<tick_scheduler::clock::duration>(duration<double>(lead / 66.0)), first, D);
+    sched.start(t0 + duration_cast<tick_scheduler::clock::duration>(duration<double>(lead / static_cast<double>(TICK_RATE))), first, D);
     // the start's budget: deadline(start base) - t0 = lead + D periods
     EXPECT_NEAR(reanchor_budget_ticks(sched, first, t0), lead + D, 1e-3);
     const auto now = t0 + seconds(23) + microseconds(4321);
@@ -1170,7 +1169,7 @@ TEST(ReanchorBase, AnEarlyServerGivesTheSameBudget) {
     constexpr uint32_t D = 17, lead = 27, first = 27;
     tick_scheduler sched;
     const auto t0 = tick_scheduler::clock::time_point(seconds(100));
-    sched.start(t0 + duration_cast<tick_scheduler::clock::duration>(duration<double>(lead / 66.0)), first, D);
+    sched.start(t0 + duration_cast<tick_scheduler::clock::duration>(duration<double>(lead / static_cast<double>(TICK_RATE))), first, D);
     const auto now = t0 + seconds(13) + microseconds(777);
     // arrival-paced, e = 22: the server steps about 5 ticks ahead of the schedule
     const uint32_t C = runner_tick_at(sched, now, D, 22);
@@ -1189,7 +1188,7 @@ TEST(ReanchorBase, NeverInTheRunnersPast) {
         for (const uint32_t lead: {1u, 9u, 27u}) {
             tick_scheduler sched;
             const auto t0 = tick_scheduler::clock::time_point(seconds(100));
-            sched.start(t0 + duration_cast<tick_scheduler::clock::duration>(duration<double>(lead / 66.0)), lead, D);
+            sched.start(t0 + duration_cast<tick_scheduler::clock::duration>(duration<double>(lead / static_cast<double>(TICK_RATE))), lead, D);
             for (int e = -40; e <= 80; ++e)
                 for (const auto now: {t0, t0 + milliseconds(100), t0 + seconds(7) + microseconds(123)}) {
                     const uint32_t C = runner_tick_at(sched, now, D, e);
@@ -1228,7 +1227,7 @@ TEST(ReanchorOnSchedule, IsTheRl1RuleFromTheScheduleStartOn) {
         for (const uint32_t lead: {3u, 27u})
             for (const bool state: {true, false}) {
                 tick_scheduler sched;
-                const auto start = t0 + duration_cast<tick_scheduler::clock::duration>(duration<double>(27 / 66.0));
+                const auto start = t0 + duration_cast<tick_scheduler::clock::duration>(duration<double>(27 / static_cast<double>(TICK_RATE)));
                 sched.start(start, 27, D);
                 for (int64_t us = 0; us < 5000000; us += 7919)
                     for (const auto extra: {nanoseconds(0), nanoseconds(1), nanoseconds(999)})
@@ -1250,7 +1249,7 @@ TEST(ReanchorOnSchedule, BeforeTheScheduleStartTheBudgetIsStillTheStarts) {
     constexpr uint32_t D = 17, start_base = 27, first = 27;
     const auto t0 = tick_scheduler::clock::time_point(seconds(100));   // the last SessionReady
     tick_scheduler sched;
-    const auto start = t0 + duration_cast<tick_scheduler::clock::duration>(duration<double>(start_base / 66.0));
+    const auto start = t0 + duration_cast<tick_scheduler::clock::duration>(duration<double>(start_base / static_cast<double>(TICK_RATE)));
     sched.start(start, first, D);
     for (const uint32_t lead: {9u, 27u, 31u})
         for (auto now = t0; now < start; now += microseconds(997)) {
@@ -1320,7 +1319,7 @@ TEST(ReanchorOnSchedule, TheLogLinesPartsAreTheRules) {
             for (const uint32_t margin: {2u, 3u})
                 for (const int e: {-40, 0, 40}) {
                     const auto now = start + microseconds(us);
-                    const uint32_t C = static_cast<uint32_t>(27 + us * 66 / 1000000 + e);
+                    const uint32_t C = static_cast<uint32_t>(27 + us * TICK_RATE / 1000000 + e);
                     const auto p = reanchor_on_schedule_parts(start, 27, now, lead, C, margin);
                     ASSERT_EQ(p.base, reanchor_tick_on_schedule(start, 27, now, lead, C, margin)) << us;
                     ASSERT_EQ(p.elapsed_us, us);
@@ -1501,11 +1500,11 @@ TEST(StartHandshake, ScheduleCoversTheWorstRoundTrip) {
     EXPECT_EQ(s.deadline_us, 1'000'000 + 300'000 + kStartWindowSlackUs);
     EXPECT_EQ(s.x_us, s.deadline_us + 600'000 + kStartGuardSlackUs);
     EXPECT_GE(s.x_us - s.deadline_us, 600'000) << "two worst RTTs remain after the confirmation deadline";
-    EXPECT_EQ(start_lateness_ticks(0, 0, 66.0), 0);
-    EXPECT_EQ(start_lateness_ticks(15'000, 0, 66.0), 0) << "under one tick";
-    EXPECT_EQ(start_lateness_ticks(16'000, 0, 66.0), 1);
-    EXPECT_EQ(start_lateness_ticks(122'000, 0, 66.0), 8);
-    EXPECT_EQ(start_lateness_ticks(0, 50'000, 66.0), 0) << "early: nothing";
+    EXPECT_EQ(start_lateness_ticks(0, 0, TICK_RATE), 0);
+    EXPECT_EQ(start_lateness_ticks(15'000, 0, TICK_RATE), 0) << "under one tick";
+    EXPECT_EQ(start_lateness_ticks(16'000, 0, TICK_RATE), 1);
+    EXPECT_EQ(start_lateness_ticks(122'000, 0, TICK_RATE), 8);
+    EXPECT_EQ(start_lateness_ticks(0, 50'000, TICK_RATE), 0) << "early: nothing";
 }
 
 TEST(StartHandshake, ConfirmationAndPostponementWindowsBackOffTogether) {

@@ -50,7 +50,7 @@ namespace bmmo::session {
 
     // How long a round trip of `rtt_ms` is in whole ticks, rounded up.
     inline uint32_t lead_rtt_ticks(uint32_t rtt_ms) {
-        return static_cast<uint32_t>((static_cast<uint64_t>(rtt_ms) * 66 + 999) / 1000);
+        return static_cast<uint32_t>((static_cast<uint64_t>(rtt_ms) * TICK_RATE + 999) / 1000);
     }
 
     // p's tick when something the server sends now reaches it (design 2.3's
@@ -76,7 +76,7 @@ namespace bmmo::session {
     class lead_sector_margin {
     public:
         void push(int64_t margin, uint32_t tick, bool event = false) {
-            const uint32_t index = tick / 66;
+            const uint32_t index = tick / TICK_RATE;
             while (!buckets_.empty() && index - buckets_.front().index >= 10) buckets_.pop_front();
             if (buckets_.empty() || buckets_.back().index != index) buckets_.push_back({index, {}, {}});
             auto& value = event ? buckets_.back().event : buckets_.back().path;
@@ -85,7 +85,7 @@ namespace bmmo::session {
         std::optional<int64_t> worst(uint32_t tick, bool path = true, bool event = true) const {
             std::optional<int64_t> out;
             for (const auto& bucket: buckets_) {
-                if (tick / 66 - bucket.index >= 10) continue;
+                if (tick / TICK_RATE - bucket.index >= 10) continue;
                 if (path && bucket.path && (!out || *bucket.path < *out)) out = bucket.path;
                 if (event && bucket.event && (!out || *bucket.event < *out)) out = bucket.event;
             }
@@ -103,7 +103,7 @@ namespace bmmo::session {
     // meter may decide again (lateness_meter::defer): ten seconds.  Sector
     // crossings are tens of seconds apart, so the margin rarely changes
     // faster, and a retry every streak would only repeat the same log line.
-    inline constexpr uint32_t kSectorRetryTicks = 660;
+    inline constexpr uint32_t kSectorRetryTicks = 10 * TICK_RATE;
 
     // The depth to which a session-core client rewinds for a late remote
     // Sector stamp (late-player design 2.9 and plan step 14, resync design

@@ -367,7 +367,11 @@ namespace bmmo::retail {
                             start_mode_ = room_mode::Physics;
                         ImGui::EndTable();
                     }
-                    ImGui::BeginDisabled(is_pending(room_action::Start));
+                    // Every member ready, or no start: the server refuses it too
+                    // (action::Start), and a member that is not ready must not be
+                    // able to hold the start.
+                    const bool all_ready = ready_count == state.members.size();
+                    ImGui::BeginDisabled(is_pending(room_action::Start) || !all_ready);
                     if (ImGui::Button("Start")) {
                         action a;
                         a.valid = true;
@@ -377,6 +381,11 @@ namespace bmmo::retail {
                         submit(std::move(a));
                     }
                     ImGui::EndDisabled();
+                    if (!all_ready) {
+                        ImGui::SameLine();
+                        ImGui::TextColored(grey, "waiting for %zu member(s) to be ready",
+                                           state.members.size() - ready_count);
+                    }
                 }
             }
 
