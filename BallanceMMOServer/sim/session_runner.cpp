@@ -1333,7 +1333,8 @@ namespace bmmo::sim {
                                      + std::to_string(tick) + " base " + std::to_string(out.base) + ", "
                                      + std::to_string(out.state.rows.size()) + " rows, "
                                      + std::to_string(out.state.scripts.size()) + " script bytes, "
-                                     + std::to_string(out.state.savestate.size()) + " savestate bytes (packed)"
+                                     + std::to_string(out.state.savestate.size()) + " savestate bytes, captured in "
+                                     + std::to_string(out.emit_us) + " us, coded in " + std::to_string(out.encode_us) + " us"
                                      + (out.state.error.empty() ? std::string() : " (" + out.state.error + ")"));
             r = s.resync_requests.erase(r);
             if (callbacks_.on_resync_state) callbacks_.on_resync_state(out);

@@ -897,6 +897,14 @@ not step: D would leave the history.
   the zlib size, against the previous state 0.343x (mean 109 KB -> about
   39 KB), 1 ms to code on the sim thread. `CKPackData`, the two unpacked
   sizes and `client_platform::unpack_bytes` are gone.
+  **Since protocol 35** the portable script record in it carries every
+  per-player slot copy, bound or not (portable section bit 3 with the slot
+  bit 2; either without the other is refused), so an imported world's
+  never-bound copies are the server's and not the copy-step image (R1,
+  world-agreement-gaps-design.md 4.5); the mask still names only the bound
+  slots, so the client's later local records keep SLOT's savings. Measured:
+  the raw record +50-80 %, the zstd frame +0.3-0.9 %; the server's capture
+  +2.5-5.5 ms per state (L6, L11 at 20 slots).
   `SessionAssign` carries `u8 flags` on every copy.
 - **Capability.** `SessionReady.caps` gains `CAP_RESYNC_STATE`, set by a
   core with rollback on (the apply is a re-step). A resync of a member without it - the

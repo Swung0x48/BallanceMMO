@@ -1479,7 +1479,20 @@ Nothing else changes.
 ### 4.5 Per-player units (revision 3)
 
 - The slot copies are blocks of recorded scripts, so their state rolls back
-  with the record (§2.10). No new section.
+  with the record (§2.10). *As built since R1 (02e6298a, e428a0d7; the
+  2026-11-08 public test's non-owner fork):* a local record omits the blocks
+  of the slots not bound at its tick (step SLOT), but an unbound copy is not
+  at rest - its module's script runs it with the original (its proximity
+  check's countdown, its activation words) - so each record carries the
+  omitted copies' images as deltas against the copy-step base (section bit 5,
+  `kSectionSlotImages`, with the base's hash), and a restore writes base or
+  base + delta into every omitted copy unconditionally. Writing the
+  copy-step image back instead (SLOT's first rule) left a joiner's copies
+  inactive in every client that rewound across its join: its fan never
+  pushed it there. The portable record (a resync's or a late join's state)
+  carries every copy (portable section bit 3 with bit 2; either alone is
+  refused), its mask still naming only the bound slots, and localize turns
+  the omitted ones into this world's deltas.
 - The binding is re-derived at every replayed tick from that tick's bodies
   and the lives. Lives change only outside replays (§4.4), so a replay
   across a life's J or R binds the slot as the live ticks did.
