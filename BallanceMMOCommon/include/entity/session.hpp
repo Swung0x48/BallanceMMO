@@ -269,7 +269,14 @@ namespace bmmo::session {
     //      late-join state travels as one zstd frame, against a reference
     //      both sides hold when there is one (docs: the 2026-11-08 public
     //      test's bandwidth notes).  No journal version.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 34;
+    //  35  The portable script record's copies of unbound mechanism slots
+    //      (R1, game/script_replay.hpp portable section bit 3): a resync /
+    //      late-join state carries every slot's unit copies, the unbound
+    //      ones included, and the client writes the server's images of the
+    //      copies its record leaves out instead of its copy-step bases; a
+    //      record without the bit is refused.  No journal version (a client
+    //      journal's resync record holds the portable record as received).
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 35;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
     // The protocol whose SessionStart carries `mechanism_slots` (step Q7).

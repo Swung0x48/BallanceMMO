@@ -2276,6 +2276,14 @@ namespace bmmo::game {
         //   Written only when the hold capture is passed (the server's world
         //   under WORLD_PROXIMITY_UNION), so every other record stays version
         //   1 / 2 byte for byte.  An unknown bit is refused.
+        //   Bit 2 (step SLOT): the mechanism slots, u64 bound mask (two u32)
+        //   after the sections word.  Bit 3 (R1) always with it: every
+        //   block lists all its sub-behaviours, the copies of unbound slots
+        //   included.  An unbound copy is not held at its copy-step image
+        //   (its module runs it), and that image is each host's own, so a
+        //   localize writes the server's image of every copy this world's
+        //   record leaves out (its slot image section, against this world's
+        //   base); a record with bit 2 and not bit 3 is refused.
         static constexpr uint32_t kPortableMagic = 0x50534d42u;   // "BMSP"
         static constexpr uint32_t kPortableVersion = 1;
         static constexpr uint32_t kPortableVersionTrafo = 2;
@@ -2283,6 +2291,7 @@ namespace bmmo::game {
         static constexpr uint32_t kPortableSectionTrafo = 1u << 0;
         static constexpr uint32_t kPortableSectionHold = 1u << 1;
         static constexpr uint32_t kPortableSectionSlots = 1u << 2;
+        static constexpr uint32_t kPortableSectionSlotCopies = 1u << 3;
         // The hold section's halves (step G3): the server's world writes it by
         // name, a client's localizes it to its own record's hold section
         // (game/proximity_union.hpp localize_hold).
@@ -2386,7 +2395,7 @@ namespace bmmo::game {
             if (with_hold || with_slots) {
                 put_u32(out, kPortableVersionSections);
                 put_u32(out, (v2 ? kPortableSectionTrafo : 0u) | (with_hold ? kPortableSectionHold : 0u)
-                                 | (with_slots ? kPortableSectionSlots : 0u));
+                                 | (with_slots ? kPortableSectionSlots | kPortableSectionSlotCopies : 0u));
                 if (with_slots) {
                     put_u32(out, static_cast<uint32_t>(hooks.slots->mask()));
                     put_u32(out, static_cast<uint32_t>(hooks.slots->mask() >> 32));
@@ -2394,6 +2403,10 @@ namespace bmmo::game {
             } else {
                 put_u32(out, v2 ? kPortableVersionTrafo : kPortableVersion);
             }
+            // R1 (bit 3): every copy, the unbound slots' included; the mask
+            // above still names only the bound slots.
+            script_replay_hooks every = hooks;
+            every.slots = nullptr;
             std::vector<std::pair<std::string, std::string>> keys;
             const auto put_scripts = [&](const std::vector<CK_ID>& ids) {
                 put_u32(out, static_cast<uint32_t>(ids.size()));
@@ -2411,7 +2424,7 @@ namespace bmmo::game {
                     }
                     keys.emplace_back(owner, name);
                     ++r.scripts;
-                    capture_portable_behavior(context, beh, hooks, out, r, name, owner + "/" + name);
+                    capture_portable_behavior(context, beh, every, out, r, name, owner + "/" + name);
                 }
                 return true;
             };
@@ -2471,8 +2484,12 @@ namespace bmmo::game {
                 return fail(error, "portable record version");
             if (version == kPortableVersionSections) {
                 if (!get_u32(portable, pos, sections)) return fail(error, "truncated portable record");
-                if (sections & ~(kPortableSectionTrafo | kPortableSectionHold | kPortableSectionSlots))
+                if (sections & ~(kPortableSectionTrafo | kPortableSectionHold | kPortableSectionSlots | kPortableSectionSlotCopies))
                     return fail(error, "portable record sections");
+                if ((sections & kPortableSectionSlots) && !(sections & kPortableSectionSlotCopies))
+                    return fail(error, "a portable slot record without the unbound slots' copies (an older format)");
+                if ((sections & kPortableSectionSlotCopies) && !(sections & kPortableSectionSlots))
+                    return fail(error, "portable slot copies without a slot mask");
             } else if (version == kPortableVersionTrafo) {
                 sections = kPortableSectionTrafo;
             }
@@ -3447,23 +3464,41 @@ namespace bmmo::game {
             if (!get_u8(in, pos, has_joint)) return failed("truncated joint");
             put_u8(out, has_joint);
             if (has_joint && !copy_bytes(in, pos, 1, out)) return failed("truncated joint");
-            // R1: the portable record carries no unbound copy images: an
-            // empty section, so the restore writes those copies' bases.
-            if (images) put_u16(out, 0);
-            const auto live_children = recorded_children(beh, slots);
-            if (!get_u16(in, pos, children) || children != live_children.size())
-                return failed("sub-behaviour count");
-            put_u16(out, children);
+            // R1 (portable bit 3, `images`): the portable block lists every
+            // sub-behaviour; a copy this world's record leaves out becomes an
+            // entry of the slot image section - the server's image against
+            // this world's base - and the rest the children.
+            const auto listed = recorded_children(beh, images ? nullptr : slots);
+            if (!get_u16(in, pos, children) || children != listed.size()) return failed("sub-behaviour count");
+            std::vector<uint8_t> section, kept, image;
+            uint16_t entries = 0, kept_count = 0;
             for (int i = 0; i < children; ++i) {
                 uint8_t present = 0;
-                CKBehavior* child = live_children[static_cast<size_t>(i)];
-                if (!get_u8(in, pos, present) || present != (child ? 1 : 0))
-                    return failed("sub-behaviour presence");
-                put_u8(out, present);
-                if (present && child && !localize_behavior(context, child, in, pos, out, error, r, script,
-                                                          child_place(r, block, i, child), slots, images))
+                CKBehavior* child = listed[static_cast<size_t>(i)];
+                if (!get_u8(in, pos, present) || present != (child ? 1 : 0)) return failed("sub-behaviour presence");
+                if (!(images && child && slots->omit(child->GetID()))) {
+                    ++kept_count;
+                    put_u8(kept, present);
+                    if (present && child && !localize_behavior(context, child, in, pos, kept, error, r, script,
+                                                              child_place(r, block, i, child), slots, images))
+                        return false;
+                    continue;
+                }
+                image.clear();
+                if (!localize_behavior(context, child, in, pos, image, error, r, script, child_place(r, block, i, child)))
                     return false;
+                const size_t at = section.size();
+                put_u32(section, static_cast<uint32_t>(child->GetID()));
+                put_u32(section, slots->base_hash(child->GetID()));
+                if (script_slots::put_delta(*slots->base(child->GetID()), image, section)) ++entries;
+                else section.resize(at);
             }
+            if (images) {
+                put_u16(out, entries);
+                out.insert(out.end(), section.begin(), section.end());
+            }
+            put_u16(out, kept_count);
+            out.insert(out.end(), kept.begin(), kept.end());
             if (!get_u16(in, pos, delayed) || delayed != delayed_link_count(beh)) return failed("delayed link count");
             put_u16(out, delayed);
             if (!copy_bytes(in, pos, 2u * delayed, out)) return failed("truncated links");
