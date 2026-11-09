@@ -66,6 +66,7 @@
 #include <cstring>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -214,7 +215,15 @@ namespace bmmo::game {
         static constexpr uint32_t kSectionHold = 1u << 2;
         static constexpr uint32_t kSectionCells = 1u << 3;
         static constexpr uint32_t kSectionSlots = 1u << 4;
-        static constexpr uint32_t kSectionsKnown = kSectionTrafo | kSectionQueue | kSectionHold | kSectionCells | kSectionSlots;
+        // R1: with kSectionSlots always - every block of the selection's
+        // scripts carries, after its force and joint tails, the images of
+        // the slot copies among its sub-behaviours the record leaves out
+        // (put_omitted_images: u16 count, then per copy whose image is not
+        // its base u32 id, u32 base hash, the delta of script_slots).  A
+        // record with kSectionSlots and without it is refused.
+        static constexpr uint32_t kSectionSlotImages = 1u << 5;
+        static constexpr uint32_t kSectionsKnown =
+            kSectionTrafo | kSectionQueue | kSectionHold | kSectionCells | kSectionSlots | kSectionSlotImages;
         static bool known_version(uint32_t v) { return v >= kVersion && v <= kVersionSections; }
         static bool has_trafo(uint32_t v) { return v == kVersionTrafo || v == kVersionTrafoQueue; }
         static bool has_queue(uint32_t v) { return v == kVersionQueue || v == kVersionTrafoQueue; }
@@ -1313,7 +1322,7 @@ namespace bmmo::game {
             if (with_hold || with_cells || with_slots) {
                 put_u32(out, kVersionSections);
                 put_u32(out, (v3 ? kSectionTrafo : 0u) | (with_queue ? kSectionQueue : 0u) | (with_hold ? kSectionHold : 0u)
-                                 | (with_cells ? kSectionCells : 0u) | (with_slots ? kSectionSlots : 0u));
+                                 | (with_cells ? kSectionCells : 0u) | (with_slots ? kSectionSlots | kSectionSlotImages : 0u));
                 if (with_slots) {
                     put_u32(out, static_cast<uint32_t>(hooks.slots->mask()));
                     put_u32(out, static_cast<uint32_t>(hooks.slots->mask() >> 32));
@@ -1331,7 +1340,7 @@ namespace bmmo::game {
                     put_u8(out, beh ? 1 : 0);
                     if (!beh) continue;
                     if (!reusing || !roots) {
-                        capture_behavior(beh, hooks, out);
+                        capture_behavior(beh, hooks, out, with_slots);
                         continue;
                     }
                     // Step OPC: an inactive root whose activation words equal
@@ -1342,12 +1351,12 @@ namespace bmmo::game {
                     script_root_words recorded;
                     if (!block || !read_script_root_words(block, size, recorded)) {
                         ++reuse_stats.walked_unrecorded;
-                        capture_behavior(beh, hooks, out);
+                        capture_behavior(beh, hooks, out, with_slots);
                         continue;
                     }
                     if (!reusable_root(recorded, root_words_of(beh), static_cast<uint32_t>(kFrameFlags))) {
                         ++reuse_stats.walked;
-                        capture_behavior(beh, hooks, out);
+                        capture_behavior(beh, hooks, out, with_slots);
                         continue;
                     }
                     // Step OPC2: record t - 1's block walked in step with the
@@ -1359,11 +1368,11 @@ namespace bmmo::game {
                     size_t pos = static_cast<size_t>(block - reuse->previous->data());
                     const size_t end = pos + size;
                     uint64_t tails = 0;
-                    if (!copy_with_fresh_tails(beh, hooks, *reuse->previous, pos, out, tails) || pos != end) {
+                    if (!copy_with_fresh_tails(beh, hooks, *reuse->previous, pos, out, tails, with_slots) || pos != end) {
                         out.resize(at);
                         joint_stats().imaged = imaged_before;   // the walk below images them again
                         ++reuse_stats.walked_structure;
-                        capture_behavior(beh, hooks, out);
+                        capture_behavior(beh, hooks, out, with_slots);
                         continue;
                     }
                     ++reuse_stats.reused;
@@ -1377,7 +1386,7 @@ namespace bmmo::game {
                         ++reuse_stats.verified;
                         const uint64_t imaged_copy = joint_stats().imaged;
                         const size_t mid = out.size();
-                        capture_behavior(beh, hooks, out);
+                        capture_behavior(beh, hooks, out, with_slots);
                         joint_stats().imaged = imaged_copy;
                         const size_t copied = mid - at, fresh = out.size() - mid;
                         if (fresh != copied || !std::equal(out.begin() + static_cast<std::ptrdiff_t>(at),
@@ -1533,7 +1542,7 @@ namespace bmmo::game {
         // skip_v2_block: a change to one must be made in all three, or every
         // copy falls back to the walk (structure= rises; output stays exact).
         static bool copy_with_fresh_tails(CKBehavior* beh, const script_replay_hooks& hooks, const std::vector<uint8_t>& in,
-                                          size_t& pos, std::vector<uint8_t>& out, uint64_t& tails) {
+                                          size_t& pos, std::vector<uint8_t>& out, uint64_t& tails, bool images = false) {
             const auto copy_from = [&](size_t from) {
                 out.insert(out.end(), in.begin() + static_cast<std::ptrdiff_t>(from), in.begin() + static_cast<std::ptrdiff_t>(pos));
             };
@@ -1561,6 +1570,12 @@ namespace bmmo::game {
                 put_u8(out, 0);
                 put_u8(out, 0);
             }
+            // R1: the slot image section, emitted from the live children
+            // (exact by construction; OPC's verify compares it too).
+            if (images) {
+                if (!skip_slot_images(in, pos)) return false;
+                put_omitted_images(beh, hooks, out);
+            }
             uint16_t children = 0, delayed = 0;
             if (!get_u16(in, pos, children)) return false;
             if (beh->IsUsingFunction()) {
@@ -1579,7 +1594,7 @@ namespace bmmo::game {
                 uint8_t present = 0;
                 if (!get_u8(in, pos, present) || present != (child ? 1 : 0)) return false;
                 put_u8(out, present);
-                if (child && !copy_with_fresh_tails(child, hooks, in, pos, out, tails)) return false;
+                if (child && !copy_with_fresh_tails(child, hooks, in, pos, out, tails, images)) return false;
             }
             const size_t links = pos;
             if (!get_u16(in, pos, delayed) || delayed != delayed_link_count(beh) || !skip(in, pos, 2u * delayed)) return false;
@@ -1677,8 +1692,12 @@ namespace bmmo::game {
                 return fail(error, "snapshot version");
             if (sections & kSectionSlots) {
                 if (!hooks.slots) return fail(error, "no mechanism slot map");
+                if (!(sections & kSectionSlotImages)) return fail(error, "a slot record without its copies' images (an older format)");
                 hooks.slots->select_record(bound_slots);
+            } else if (sections & kSectionSlotImages) {
+                return fail(error, "slot images without a slot mask");
             }
+            const bool images = (sections & kSectionSlotImages) != 0;
             std::vector<CKBehavior*> written;   // the root scripts written back (G1, live_membership)
             // Gap Q (design 2.2.3): a selected script the record has no
             // state for that exists now runs in the replay too; it has no
@@ -1706,7 +1725,7 @@ namespace bmmo::game {
                     const bool was_active = (flags & (CKBEHAVIOR_ACTIVE | CKBEHAVIOR_ACTIVATENEXTFRAME)) != 0;
                     const bool reset_since = kept_live && std::find(kept_live->begin(), kept_live->end(), id) != kept_live->end();
                     const bool write = !scripts || replay_activation || (was_active && !reset_since);
-                    if (!restore_behavior(beh, hooks, in, pos, error, write)) return false;
+                    if (!restore_behavior(beh, hooks, in, pos, error, write, images)) return false;
                     if (write && scripts && replayed) replayed->push_back(id);
                     if (write && scripts) written.push_back(beh);
                 }
@@ -2059,6 +2078,7 @@ namespace bmmo::game {
             d.body_a = pa;
             d.body_b = pb;
             const bool v3 = (sa & kSectionTrafo) != 0;
+            const bool images = (sa & kSectionSlotImages) != 0;
             for (const auto* list: {&sel.scripts, &sel.satellites}) {
                 uint32_t ca = 0, cb = 0;
                 if (!get_u32(a, pa, ca) || !get_u32(b, pb, cb) || ca != cb) {
@@ -2076,7 +2096,7 @@ namespace bmmo::game {
                     if (!qa) continue;
                     auto* beh = context ? CKBehavior::Cast(context->GetObject(id)) : nullptr;
                     const std::string script_name = beh && beh->GetName() ? beh->GetName() : std::to_string(id);
-                    if (!diff_behavior(beh, script_name, a, pa, b, pb, d, masks)) return d;
+                    if (!diff_behavior(beh, script_name, a, pa, b, pb, d, masks, images)) return d;
                 }
             }
             for (int c = 0; c < kCellCount; ++c) {
@@ -2318,6 +2338,7 @@ namespace bmmo::game {
             struct script { CK_ID id = 0; size_t begin = 0, end = 0; };
             std::vector<script> scripts;
             size_t tail = 0;
+            uint32_t sections = 0;
         };
         static bool index_record(const std::vector<uint8_t>& record, record_index& index) {
             index = {};
@@ -2326,13 +2347,14 @@ namespace bmmo::game {
             if (!get_u32(record, a, magic) || magic != kMagic || !get_u32(record, a, version)
                     || !read_sections(record, a, version, sections) || !get_u32(record, a, count))
                 return false;
+            index.sections = sections;
             for (uint32_t i = 0; i < count; ++i) {
                 record_index::script s;
                 s.begin = a;
                 uint32_t id = 0;
                 uint8_t present = 0;
                 if (!get_u32(record, a, id) || !get_u8(record, a, present)) return false;
-                if (present && !skip_v2_block(record, a)) return false;
+                if (present && !skip_v2_block(record, a, (sections & kSectionSlotImages) != 0)) return false;
                 s.id = static_cast<CK_ID>(id);
                 s.end = a;
                 index.scripts.push_back(s);
@@ -2540,7 +2562,8 @@ namespace bmmo::game {
             put_u32(out, kMagic);
             if (with_hold || with_slots) {
                 put_u32(out, kVersionSections);
-                put_u32(out, (v3 ? kSectionTrafo : 0u) | (with_hold ? kSectionHold : 0u) | (with_slots ? kSectionSlots : 0u));
+                put_u32(out, (v3 ? kSectionTrafo : 0u) | (with_hold ? kSectionHold : 0u)
+                                 | (with_slots ? kSectionSlots | kSectionSlotImages : 0u));
                 if (with_slots) {
                     put_u32(out, static_cast<uint32_t>(bound_slots));
                     put_u32(out, static_cast<uint32_t>(bound_slots >> 32));
@@ -2566,6 +2589,12 @@ namespace bmmo::game {
                 }
                 e->used = true;
                 if (keep_local && keep_local(owner, name)) {
+                    // R1: the anchor's block bytes must have this record's layout.
+                    if (local_anchor && !local_anchor->empty() && ((anchored.sections & kSectionSlotImages) != 0) != with_slots) {
+                        out.clear();
+                        if (error) *error = "keep-local script " + owner + "/" + name + ": the local anchor's slot image section";
+                        return false;
+                    }
                     const auto k = std::find_if(anchored.scripts.begin(), anchored.scripts.end(),
                                                 [id](const record_index::script& x) { return x.id == id; });
                     if (k == anchored.scripts.end()) {
@@ -2583,7 +2612,7 @@ namespace bmmo::game {
                 ++r.scripts;
                 size_t at = e->at;
                 const std::string place = owner + "/" + name;
-                if (!localize_behavior(context, beh, portable, at, out, error, r, name, place, slots)) {
+                if (!localize_behavior(context, beh, portable, at, out, error, r, name, place, slots, with_slots)) {
                     out.clear();
                     if (error) *error = place + ": " + *error;
                     return false;
@@ -2685,7 +2714,7 @@ namespace bmmo::game {
 
         static bool diff_behavior(CKBehavior* beh, const std::string& script, const std::vector<uint8_t>& a, size_t& pa,
                                   const std::vector<uint8_t>& b, size_t& pb, difference& d,
-                                  const std::map<CK_ID, uint32_t>* masks = nullptr) {
+                                  const std::map<CK_ID, uint32_t>* masks = nullptr, bool images = false) {
             const std::string block = script + " / " + (beh && beh->GetName() ? beh->GetName() : "?");
             uint32_t xa = 0, xb = 0;
             // id, flags, inputs, outputs
@@ -2776,6 +2805,19 @@ namespace bmmo::game {
                     d.note(what);
                 }
             }
+            if (images) {
+                // R1: the unbound slot copies' images - logical (activation
+                // words and sensor counters) whenever they differ.
+                const size_t ia = pa, ib = pb;
+                if (!skip_slot_images(a, pa) || !skip_slot_images(b, pb)) { d.logical = true; ++d.logical_count; if (d.where.empty()) d.where = block + ": slot image section"; return false; }
+                if (pa - ia != pb - ib || !std::equal(a.begin() + static_cast<std::ptrdiff_t>(ia), a.begin() + static_cast<std::ptrdiff_t>(pa),
+                                                      b.begin() + static_cast<std::ptrdiff_t>(ib))) {
+                    d.logical = true; ++d.logical_count;
+                    const std::string what = block + ": unbound slot copy images differ";
+                    if (d.where.empty()) d.where = what;
+                    d.note(what);
+                }
+            }
             uint16_t ca = 0, cb = 0;
             if (!get_u16(a, pa, ca) || !get_u16(b, pb, cb) || ca != cb) { d.logical = true; ++d.logical_count; if (d.where.empty()) d.where = block + ": children"; return false; }
             for (int i = 0; i < ca; ++i) {
@@ -2786,7 +2828,7 @@ namespace bmmo::game {
                 size_t child_at = pa;
                 uint32_t child_id = 0;
                 if (beh && get_u32(a, child_at, child_id)) child = CKBehavior::Cast(beh->GetCKContext()->GetObject(child_id));
-                if (!diff_behavior(child, script, a, pa, b, pb, d, masks)) return false;
+                if (!diff_behavior(child, script, a, pa, b, pb, d, masks, images)) return false;
             }
             uint16_t la = 0, lb = 0;
             if (!get_u16(a, pa, la) || !get_u16(b, pb, lb) || la != lb) { d.logical = true; ++d.logical_count; if (d.where.empty()) d.where = block + ": delayed link count"; return false; }
@@ -2924,7 +2966,12 @@ namespace bmmo::game {
             return children;
         }
 
-        static void capture_behavior(CKBehavior* beh, const script_replay_hooks& hooks, std::vector<uint8_t>& out) {
+        // `images` (kSectionSlotImages): the record's blocks carry their
+        // slot image sections - the selection's scripts of a record with a
+        // slot map; never a trafo block or a standalone block image (a
+        // copy's base, a trafo set's built state).
+        static void capture_behavior(CKBehavior* beh, const script_replay_hooks& hooks, std::vector<uint8_t>& out,
+                                     bool images = false) {
             put_u32(out, static_cast<uint32_t>(beh->GetID()));
             put_activation(beh, out);
             const int locals = beh->GetLocalParameterCount();
@@ -2934,25 +2981,52 @@ namespace bmmo::game {
             put_u16(out, static_cast<uint16_t>(outs));
             for (int i = 0; i < outs; ++i) capture_parameter(beh->GetOutputParameter(i), out);
             put_force_and_joint(beh, hooks, out, true);
+            if (images) put_omitted_images(beh, hooks, out);
             if (beh->IsUsingFunction()) { put_u16(out, 0); put_u16(out, 0); return; }
             const auto children = recorded_children(beh, hooks.slots);
             put_u16(out, static_cast<uint16_t>(children.size()));
             for (CKBehavior* child: children) {
                 put_u8(out, child ? 1 : 0);
-                if (child) capture_behavior(child, hooks, out);
+                if (child) capture_behavior(child, hooks, out, images);
             }
             put_delayed_links(beh, out);
-            // The slot copies this record leaves out keep their live image
-            // (script_slots::refresh).  The reusing capture (step OPC2) skips
-            // this: it takes an inactive root's block, whose copies have not
-            // run since the capture that refreshed them.
-            if (hooks.slots)
-                for (int index = 0; index < beh->GetSubBehaviorCount(); ++index)
-                    if (CKBehavior* child = beh->GetSubBehavior(index); child && hooks.slots->unbound(child->GetID())) {
-                        std::vector<uint8_t> image;
-                        capture_behavior(child, hooks, image);
-                        hooks.slots->refresh(child->GetID(), std::move(image));
-                    }
+        }
+
+        // R1: the slot image section of one block - u16 count (every block
+        // of an images record has one, a function block's always 0, so the
+        // skip walkers need no graph), then for each sub-behaviour the
+        // record leaves out, in index order, whose live image is not its
+        // base: u32 id, u32 base hash, script_slots' delta.  A copy's image
+        // is walked as its base was (no slot map, no section).
+        static void put_omitted_images(CKBehavior* beh, const script_replay_hooks& hooks, std::vector<uint8_t>& out) {
+            const size_t count_at = out.size();
+            put_u16(out, 0);
+            if (!hooks.slots || beh->IsUsingFunction()) return;
+            uint16_t count = 0;
+            std::unique_ptr<script_replay_hooks> plain;
+            std::vector<uint8_t> image;
+            for (int index = 0; index < beh->GetSubBehaviorCount(); ++index) {
+                CKBehavior* child = beh->GetSubBehavior(index);
+                if (!child || !hooks.slots->omit(child->GetID())) continue;
+                const std::vector<uint8_t>* base = hooks.slots->base(child->GetID());
+                if (!base) continue;
+                if (!plain) {
+                    plain = std::make_unique<script_replay_hooks>(hooks);
+                    plain->slots = nullptr;
+                }
+                image.clear();
+                capture_behavior(child, *plain, image);
+                const size_t at = out.size();
+                put_u32(out, static_cast<uint32_t>(child->GetID()));
+                put_u32(out, hooks.slots->base_hash(child->GetID()));
+                if (!script_slots::put_delta(*base, image, out)) {
+                    out.resize(at);
+                    continue;
+                }
+                ++count;
+            }
+            out[count_at] = static_cast<uint8_t>(count & 0xff);
+            out[count_at + 1] = static_cast<uint8_t>(count >> 8);
         }
 
         // The runtime flags and the active inputs and outputs (v2 and the
@@ -3349,7 +3423,8 @@ namespace bmmo::game {
         // every count checked against the local graph.
         static bool localize_behavior(CKContext* context, CKBehavior* beh, const std::vector<uint8_t>& in, size_t& pos,
                                       std::vector<uint8_t>& out, std::string* error, portable_report& r,
-                                      const std::string& script, const std::string& block, script_slots* slots = nullptr) {
+                                      const std::string& script, const std::string& block, script_slots* slots = nullptr,
+                                      bool images = false) {
             const auto failed = [&](const char* why) {
                 if (error) *error = std::string(why) + (r.lists ? " at " + block : std::string(" in block ") + (beh->GetName() ? beh->GetName() : "?"));
                 return false;
@@ -3372,6 +3447,9 @@ namespace bmmo::game {
             if (!get_u8(in, pos, has_joint)) return failed("truncated joint");
             put_u8(out, has_joint);
             if (has_joint && !copy_bytes(in, pos, 1, out)) return failed("truncated joint");
+            // R1: the portable record carries no unbound copy images: an
+            // empty section, so the restore writes those copies' bases.
+            if (images) put_u16(out, 0);
             const auto live_children = recorded_children(beh, slots);
             if (!get_u16(in, pos, children) || children != live_children.size())
                 return failed("sub-behaviour count");
@@ -3383,7 +3461,7 @@ namespace bmmo::game {
                     return failed("sub-behaviour presence");
                 put_u8(out, present);
                 if (present && child && !localize_behavior(context, child, in, pos, out, error, r, script,
-                                                          child_place(r, block, i, child), slots))
+                                                          child_place(r, block, i, child), slots, images))
                     return false;
             }
             if (!get_u16(in, pos, delayed) || delayed != delayed_link_count(beh)) return failed("delayed link count");
@@ -3407,7 +3485,7 @@ namespace bmmo::game {
             }
             return true;
         }
-        static bool skip_tail(const std::vector<uint8_t>& in, size_t& pos, bool portable) {
+        static bool skip_tail(const std::vector<uint8_t>& in, size_t& pos, bool portable, bool images = false) {
             uint8_t has = 0;
             if (!get_u8(in, pos, has) || (has && !skip(in, pos, 49))) return false;
             if (!get_u8(in, pos, has)) return false;
@@ -3415,17 +3493,26 @@ namespace bmmo::game {
                 uint8_t handle = 0;
                 if (!get_u8(in, pos, handle) || (handle == kJointImaged && !skip(in, pos, 8))) return false;
             }
+            if (images && !skip_slot_images(in, pos)) return false;
             uint16_t children = 0, delayed = 0;
             if (!get_u16(in, pos, children)) return false;
             for (int i = 0; i < children; ++i) {
                 uint8_t present = 0;
                 if (!get_u8(in, pos, present)) return false;
-                if (present && !(portable ? skip_portable_block(in, pos) : skip_v2_block(in, pos))) return false;
+                if (present && !(portable ? skip_portable_block(in, pos) : skip_v2_block(in, pos, images))) return false;
             }
             return get_u16(in, pos, delayed) && skip(in, pos, 2u * delayed);
         }
-        static bool skip_v2_block(const std::vector<uint8_t>& in, size_t& pos) {
-            return skip(in, pos, 16) && skip_parameters_v2(in, pos) && skip_parameters_v2(in, pos) && skip_tail(in, pos, false);
+        static bool skip_v2_block(const std::vector<uint8_t>& in, size_t& pos, bool images = false) {
+            return skip(in, pos, 16) && skip_parameters_v2(in, pos) && skip_parameters_v2(in, pos) && skip_tail(in, pos, false, images);
+        }
+        // R1: past a block's slot image section (kSectionSlotImages).
+        static bool skip_slot_images(const std::vector<uint8_t>& in, size_t& pos) {
+            uint16_t n = 0;
+            if (!get_u16(in, pos, n)) return false;
+            for (uint16_t i = 0; i < n; ++i)
+                if (!skip(in, pos, 8) || !script_slots::skip_delta(in, pos)) return false;
+            return true;
         }
         static bool skip_parameters_portable(const std::vector<uint8_t>& in, size_t& pos) {
             uint16_t n = 0;
@@ -3527,7 +3614,7 @@ namespace bmmo::game {
         }
 
         static bool restore_behavior(CKBehavior* beh, const script_replay_hooks& hooks, const std::vector<uint8_t>& in,
-                                     size_t& pos, std::string* error, bool write = true) {
+                                     size_t& pos, std::string* error, bool write = true, bool images = false) {
             uint32_t id = 0, flags = 0, in_mask = 0, out_mask = 0;
             if (!get_u32(in, pos, id) || id != static_cast<uint32_t>(beh->GetID())) return fail(error, "block id");
             if (!get_u32(in, pos, flags) || !get_u32(in, pos, in_mask) || !get_u32(in, pos, out_mask))
@@ -3570,24 +3657,55 @@ namespace bmmo::game {
                     restore_joint(beh, hooks, had_handle != 0, image_hash,
                                   {static_cast<int16_t>(places[0]), static_cast<int16_t>(places[1])});
             }
+            // R1: the unbound slot copies among the sub-behaviours, each
+            // written with its base or base + the record's delta,
+            // unconditionally (an unbound copy runs with its module: its
+            // image is the record's tick's, whatever was restored before).
+            struct slot_image { uint32_t id; std::vector<uint8_t> image; };
+            std::vector<slot_image> slot_images;
+            if (images) {
+                uint16_t n = 0;
+                if (!get_u16(in, pos, n)) return fail(error, "truncated slot image section");
+                for (uint16_t i = 0; i < n; ++i) {
+                    uint32_t child_id = 0, base_hash = 0;
+                    if (!get_u32(in, pos, child_id) || !get_u32(in, pos, base_hash)) return fail(error, "truncated slot image section");
+                    const std::vector<uint8_t>* base = hooks.slots ? hooks.slots->base(child_id) : nullptr;
+                    if (!base) return fail(error, "slot image section");
+                    if (base_hash != hooks.slots->base_hash(child_id)) return fail(error, "slot copy base changed");
+                    slot_image entry{child_id, {}};
+                    if (!script_slots::get_delta(*base, in, pos, entry.image)) return fail(error, "truncated slot image section");
+                    slot_images.push_back(std::move(entry));
+                }
+            }
             if (!get_u16(in, pos, children)) return fail(error, "truncated children");
             const auto live_children = recorded_children(beh, hooks.slots);
             if (children != live_children.size()) return fail(error, "sub-behaviour count");
-            if (write && hooks.slots && !beh->IsUsingFunction())
+            if (hooks.slots && !beh->IsUsingFunction()) {
+                size_t next = 0;
+                std::unique_ptr<script_replay_hooks> plain;
                 for (int index = 0; index < beh->GetSubBehaviorCount(); ++index) {
                     CKBehavior* child = beh->GetSubBehavior(index);
-                    if (child && hooks.slots->omit(child->GetID())
-                            && !hooks.slots->restore_anchor(child->GetID(), [&](const std::vector<uint8_t>& anchor) {
-                                return restore_script_block(child, hooks, anchor, error);
-                            })) return false;
+                    if (!child || !hooks.slots->omit(child->GetID())) continue;
+                    const std::vector<uint8_t>* image = hooks.slots->base(child->GetID());
+                    if (next < slot_images.size() && slot_images[next].id == static_cast<uint32_t>(child->GetID()))
+                        image = &slot_images[next++].image;
+                    if (!write || !image) continue;
+                    if (!plain) {
+                        plain = std::make_unique<script_replay_hooks>(hooks);
+                        plain->slots = nullptr;
+                    }
+                    if (!restore_script_block(child, *plain, *image, error)) return false;
                 }
+                if (next != slot_images.size()) return fail(error, "slot image section");
+            } else if (!slot_images.empty()) {
+                return fail(error, "slot image section");
+            }
             for (int i = 0; i < children; ++i) {
                 uint8_t present = 0;
                 if (!get_u8(in, pos, present)) return fail(error, "truncated child");
                 CKBehavior* child = live_children[static_cast<size_t>(i)];
                 if (present != (child ? 1 : 0)) return fail(error, "sub-behaviour presence");
-                if (write && child && hooks.slots) hooks.slots->recorded(child->GetID());
-                if (child && !restore_behavior(child, hooks, in, pos, error, write)) return false;
+                if (child && !restore_behavior(child, hooks, in, pos, error, write, images)) return false;
             }
             uint16_t delayed = 0;
             if (!get_u16(in, pos, delayed)) return fail(error, "truncated links");
