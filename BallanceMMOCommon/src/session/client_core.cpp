@@ -530,6 +530,8 @@ namespace bmmo::session {
         s.state_anchored_ = false;   // step RLT
         s.have_resync_state_ = false;
         s.resync_state_ = bmmo::session_resync_state_msg{};
+        s.resync_ref_ = {};   // protocol 34: a new session's server holds no state of ours
+        s.resync_ref_body_.clear();
         s.resync_held_ = false;
         s.resync_lost_bodies_.clear();
         s.resync_join_ = false;   // step A5
@@ -1450,6 +1452,7 @@ namespace bmmo::session {
         bmmo::session_resync_msg msg;
         msg.session = s.session_;
         msg.last_full_tick = s.last_snapshot_tick_;
+        msg.held = s.resync_ref_;   // protocol 34: the answer may be coded against it
         msg.serialize();
         platform_.send(msg.raw.str(), send_mode::reliable);
         ++s.resyncs_sent_;

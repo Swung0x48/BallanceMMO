@@ -2227,14 +2227,6 @@ namespace {
                 return manager_activations_.forget_pending(from, to);
             };
             p.birth_tick_of = [this](const std::string& entity) { return local_births_.birth_tick_of(entity); };
-            p.unpack_bytes = [](const std::vector<uint8_t>& packed, uint32_t size, std::vector<uint8_t>& out) {
-                char* bytes = CKUnPackData(static_cast<int>(size), reinterpret_cast<const char*>(packed.data()),
-                                           static_cast<int>(packed.size()));
-                if (!bytes) return false;
-                out.assign(reinterpret_cast<const uint8_t*>(bytes), reinterpret_cast<const uint8_t*>(bytes) + size);
-                CKDeletePointer(bytes);
-                return true;
-            };
             // Step T3: with the trafo as an input every world has every
             // set's pieces (and no original has a body): none is this
             // world's alone.  Without it, step P's owner-only pieces.

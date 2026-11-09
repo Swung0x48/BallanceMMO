@@ -7,6 +7,7 @@
 #include <physics/physics_state.hpp>
 #include <session/lifecycle.hpp>
 #include <session/member_lives.hpp>
+#include <message/session_resync_state_msg.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -662,6 +663,8 @@ namespace bmmo::sim {
                 }
                 s.ready.erase(player);
                 s.inputs.erase(player);
+                s.resync_requests.erase(player);   // protocol 34: its state slot goes with it
+                s.resync_sent.erase(player);
                 s.arrivals.erase(player);
                 return;
             }
@@ -752,6 +755,8 @@ namespace bmmo::sim {
             s.players.erase(player);
             s.ready.erase(player);
             s.inputs.erase(player);
+            s.resync_requests.erase(player);   // protocol 34: its state slot goes with it
+            s.resync_sent.erase(player);
             s.arrivals.erase(player);
             s.lateness.erase(player);
             s.patience.erase(player);
@@ -1232,8 +1237,9 @@ namespace bmmo::sim {
         });
     }
 
-    void session_runner::request_resync_state(uint32_t session, uint32_t player, uint32_t base) {
-        post([this, session, player, base] {
+    void session_runner::request_resync_state(uint32_t session, uint32_t player, uint32_t base,
+                                              bmmo::session::resync_ref_id claim) {
+        post([this, session, player, base, claim] {
             auto it = sessions_.find(session);
             if (it == sessions_.end() || !it->second->world) return;
             auto& s = *it->second;
@@ -1255,13 +1261,60 @@ namespace bmmo::sim {
                 if (callbacks_.on_resync_base_missed) callbacks_.on_resync_base_missed(s.id, player, base);
                 return;
             }
-            s.resync_requests[player] = base;
+            s.resync_requests[player] = {base, claim};
         });
+    }
+
+    // Protocol 34: `out`'s sections as one zstd frame - against the body this
+    // runner sent the player last when the member claims exactly that one
+    // (resync_state_codec.hpp), else plain - and that slot replaced by this
+    // body.  Here, on the sim thread, where the state is captured and handed
+    // to the server: nothing else reaches the member in between, so the
+    // message order to it is what it was.
+    void session_runner::encode_resync_state(session_state& s, const bmmo::session::resync_ref_id& claim,
+                                             resync_state_out& out) {
+        const auto started = clock::now();
+        // The sections lent to the message for its body, and given back (the
+        // server's log line reads their sizes): no copy of ~430 KB here.
+        bmmo::session_resync_state_msg body;
+        body.rows.swap(out.state.rows);
+        body.clones.swap(out.state.clones);
+        body.navs.swap(out.state.navs);
+        body.union_state.swap(out.state.union_state);
+        body.scripts.swap(out.state.scripts);
+        body.savestate.swap(out.state.savestate);
+        body.trafo_ledger.swap(out.state.trafo_ledger);
+        std::string raw = body.body_bytes();
+        body.rows.swap(out.state.rows);
+        body.clones.swap(out.state.clones);
+        body.navs.swap(out.state.navs);
+        body.union_state.swap(out.state.union_state);
+        body.scripts.swap(out.state.scripts);
+        body.savestate.swap(out.state.savestate);
+        body.trafo_ledger.swap(out.state.trafo_ledger);
+        const auto slot = s.resync_sent.find(out.player);
+        const bool against = claim.held && slot != s.resync_sent.end() && slot->second.id == claim;
+        bool coded = against && resync_codec_.encode(raw, &slot->second.body, out.frame);
+        if (coded) {
+            out.ref_kind = bmmo::session::RESYNC_REF_PREVIOUS;
+            out.ref_tick = slot->second.id.tick;
+            out.ref_check = slot->second.id.check;
+        } else {
+            coded = resync_codec_.encode(raw, nullptr, out.frame);
+        }
+        if (!coded) {
+            out.frame.clear();
+            if (out.state.error.empty()) out.state.error = "the state does not compress";
+        }
+        out.raw_size = static_cast<uint32_t>(raw.size());
+        if (coded) s.resync_sent[out.player] = {{out.tick, bmmo::session::resync_frame_check(out.frame), true}, std::move(raw)};
+        out.encode_us = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - started).count());
     }
 
     void session_runner::emit_resync_states(session_state& s, uint32_t tick, bool recording) {
         for (auto r = s.resync_requests.begin(); r != s.resync_requests.end();) {
-            if (r->second - 1 != tick) {
+            if (r->second.base - 1 != tick) {
                 ++r;
                 continue;
             }
@@ -1270,10 +1323,11 @@ namespace bmmo::sim {
             out.session = s.id;
             out.player = r->first;
             out.tick = tick;
-            out.base = r->second;
+            out.base = r->second.base;
             s.world->capture_resync_state(out.player, out.state);
             out.emit_us = static_cast<uint64_t>(
                     std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - started).count());
+            encode_resync_state(s, r->second.claim, out);
             if (recording)
                 s.journal.note(tick, "resync state for player " + std::to_string(out.player) + ": tick "
                                      + std::to_string(tick) + " base " + std::to_string(out.base) + ", "

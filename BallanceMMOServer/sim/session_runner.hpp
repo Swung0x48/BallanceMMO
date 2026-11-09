@@ -12,6 +12,7 @@
 // physics room at a time.
 
 #include <atomic>
+#include <session/resync_state_codec.hpp>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -185,8 +186,14 @@ namespace bmmo::sim {
     // alone.  `emit_us`: what capturing it cost the step.
     struct resync_state_out {
         uint32_t session = 0, player = 0, tick = 0, base = 0;
-        physics_world::resync_state state;
+        physics_world::resync_state state;   // the sections, raw (the log line's sizes)
         uint64_t emit_us = 0;
+        // Protocol 34: the body as one zstd frame (session_resync_state_msg),
+        // plain or against the body last sent this player (ref_kind 1).
+        uint8_t ref_kind = 0;
+        uint32_t ref_tick = 0, ref_check = 0, raw_size = 0;
+        std::vector<uint8_t> frame;
+        uint64_t encode_us = 0;
     };
 
     // Outcome of a world boot.  On success anchor_hash/surfaces are what
@@ -424,7 +431,11 @@ namespace bmmo::sim {
         // stepped base - 1 already by the time the command runs (the base is
         // computed on the network thread from the published tick), nothing is
         // emitted and on_resync_base_missed says so.
-        void request_resync_state(uint32_t session, uint32_t player, uint32_t base);
+        // `claim`: the state the member's SessionResync says it decoded last
+        // (protocol 34); the state is coded against it when it is the one
+        // this runner sent that member last, plain otherwise.
+        void request_resync_state(uint32_t session, uint32_t player, uint32_t base,
+                                  bmmo::session::resync_ref_id claim = {});
         // Diagnostics through the log callback.
         void describe(uint32_t session);
         // A NOTE record in the session's journal at the tick it will simulate
@@ -665,9 +676,21 @@ namespace bmmo::sim {
             std::vector<double> step_waits;
             std::map<uint32_t, bmmo::session::server_wait_meter> waits;
             std::map<uint32_t, uint8_t> waits_journalled;
-            // Step A3: the resync states owed, player -> base (emitted after
-            // the step of base - 1).
-            std::map<uint32_t, uint32_t> resync_requests;
+            // Step A3: the resync states owed, player -> base and the
+            // member's claim (emitted after the step of base - 1).
+            struct resync_request {
+                uint32_t base = 0;
+                bmmo::session::resync_ref_id claim;
+            };
+            std::map<uint32_t, resync_request> resync_requests;
+            // Protocol 34: the body of the last state sent to each player and
+            // its id - what a later state is coded against when the member
+            // claims it (dropped with the player).
+            struct sent_state {
+                bmmo::session::resync_ref_id id;
+                std::string body;
+            };
+            std::map<uint32_t, sent_state> resync_sent;
             bool running = false;
             bool failed = false;
             // S4 (late-player design 3.2): the runs of ticks a member's frame
@@ -758,6 +781,7 @@ namespace bmmo::sim {
         void emit_snapshot(session_state& s, bool full, bool body_set = false);
         void emit_resync_states(session_state& s, uint32_t tick, bool recording);
         void log(const std::string& text);
+        void encode_resync_state(session_state& s, const bmmo::session::resync_ref_id& claim, resync_state_out& out);
         void publish_state(const session_state& s);
         // Starts the session's deadline schedule and publishes it to the
         // cross-thread view (step RL1b: one place for both start paths).
@@ -767,6 +791,7 @@ namespace bmmo::sim {
         session_callbacks callbacks_;
         bmmo::session::session_clock* clock_;   // config_.clock, or the real clock
         std::thread thread_;
+        bmmo::session::resync_codec resync_codec_;   // the sim thread's (emit_resync_states)
         std::mutex mutex_;
         std::condition_variable wake_;
         struct stamped_command {

@@ -648,10 +648,6 @@ namespace bmmo::session {
         // anchor body the server has no row for (resync design 2.6.3).
         // Empty: every such body counts as unexplained.
         std::function<uint32_t(const std::string& entity)> birth_tick_of;
-        // Optional: the resync state's packed sections back to `size` bytes
-        // (the server packs them with CKPackData: zlib; the host unpacks with
-        // its CK's CKUnPackData).  Empty: a packed state is refused.
-        std::function<bool(const std::vector<uint8_t>& packed, uint32_t size, std::vector<uint8_t>& out)> unpack_bytes;
         // Optional: a body only this client's world has (the trafo explosion
         // pieces until the trafo replication): the reconcile keeps it from
         // the anchor.  Empty: none.
@@ -1036,7 +1032,6 @@ namespace bmmo::session {
         if (!platform.forget_activations_from) return "forget_activations_from";
         if (!platform.forget_births_after) return "forget_births_after";
         if (!platform.forget_pending_activations) return "forget_pending_activations";   // step A5
-        if (!platform.unpack_bytes) return "unpack_bytes";   // the state's packed sections
         if (caps.own_lifecycle == own_lifecycle_source::event_log && !platform.own_birth_capture)
             return "own_birth_capture";
         if (caps.own_body_control || caps.own_body_in_replay) {

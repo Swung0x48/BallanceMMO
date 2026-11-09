@@ -346,10 +346,7 @@ namespace bmmo::sim {
             std::vector<bmmo::session::body_state> rows;
             std::vector<std::pair<uint32_t, std::string>> clones;   // every physicalized player's ball entity
             std::vector<std::pair<uint32_t, bmmo_physics_nav_state>> navs;   // every player's ball navigation
-            std::vector<uint8_t> union_state, scripts, savestate;
-            // The scripts and the savestate are packed (CKPackData, zlib):
-            // their unpacked sizes (0 when a section is carried as it is).
-            uint32_t scripts_size = 0, savestate_size = 0;
+            std::vector<uint8_t> union_state, scripts, savestate;   // raw (protocol 34: the whole body is one zstd frame)
             // Trafo-replication design 4.7 (step T2): every type set that has
             // bodies at this tick, a live explosion, or a reset not yet past
             // its Restore IC (empty without trafo_inputs).

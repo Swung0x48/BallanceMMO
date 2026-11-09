@@ -1015,6 +1015,12 @@ namespace bmmo::session {
         std::set<std::string> resync_lost_bodies_;
         uint64_t resync_waits_given_up_ = 0;
         uint64_t resync_states_ = 0, resync_states_stale_ = 0, resync_states_refused_ = 0;
+        // Protocol 34: the body of the last resync state decoded and its id -
+        // what the next state may be coded against (our SessionResync names
+        // it); the states that came against it, and those that did not decode.
+        bmmo::session::resync_ref_id resync_ref_;
+        std::string resync_ref_body_;
+        uint64_t resync_states_coded_ = 0, resync_decode_failed_ = 0;
         uint64_t resyncs_restepped_ = 0, resync_restep_depth_ = 0;
         uint64_t resync_deferred_ = 0, resync_deferred_ticks_ = 0;   // applies put off for the body set, and their frames
         uint64_t snapshots_while_resync_ = 0;
@@ -1463,6 +1469,7 @@ namespace bmmo::session {
         // The core's state (design 1.2).  Public from E1 to E10, while the
         // flow still lived in the host (core_.s.<member>); private since E11.
         client_core_state s;
+        bmmo::session::resync_codec resync_codec_;   // protocol 34: the resync state's frames
         // The journal reads the state and the configuration (E2).
         friend class core::client_journal;
         friend struct core_test_access;

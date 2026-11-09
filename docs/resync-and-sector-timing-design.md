@@ -889,10 +889,17 @@ not step: D would leave the history.
   send rate delivered in 40-65 ticks: D reached 72 and every relayed frame
   of the window left the reach. Packed it is 29-50 KB on the arena
   (blob 108-145 KB -> 20-38 KB, record 40 KB -> 5 KB) and D is 12-53.
+  **Since protocol 34** those sections are the state's body, sent as one
+  zstd frame (level 3, content checksum; `session/resync_state_codec.hpp`)
+  decoded by the core itself: plain, or against the body of the last state
+  this member decoded, which its `SessionResync` names (tick, frame check)
+  and the runner holds per member. 586 public-test states: plain 0.886x of
+  the zlib size, against the previous state 0.343x (mean 109 KB -> about
+  39 KB), 1 ms to code on the sim thread. `CKPackData`, the two unpacked
+  sizes and `client_platform::unpack_bytes` are gone.
   `SessionAssign` carries `u8 flags` on every copy.
 - **Capability.** `SessionReady.caps` gains `CAP_RESYNC_STATE`, set by a
-  core with rollback on (the apply is a re-step; `unpack_bytes` is a
-  required platform operation). A resync of a member without it - the
+  core with rollback on (the apply is a re-step). A resync of a member without it - the
   legacy retail path, a core with rollback off - is answered as before
   protocol 10: no flag, `request_full_snapshot` to everyone (server.cpp
   `resync_member`). The server's "resynced at tick"

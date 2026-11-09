@@ -120,6 +120,8 @@ namespace bmmo {
         // A gated automation verb asked of the server, and its answer (automation_request_msg.hpp).
         AutomationRequest,
         AutomationVerdict,
+        // Protocol 34: the players whose legacy ball stream a session member does not need (ball_state_mute_msg.hpp).
+        BallStateMute,
     };
 
     template<typename T, opcode C = None>

@@ -263,7 +263,13 @@ namespace bmmo::session {
     //      copies over twelve ticks; a client's own piggybacked events ride
     //      until the server's header acknowledges them, not only to stamp + 7.
     //      No journal version.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 33;
+    //  34  BallStateMute: a session member names the players whose legacy
+    //      ball stream it does not need (its live mirrors) and the server
+    //      leaves them out of its OwnedCompressedBallState; and the resync /
+    //      late-join state travels as one zstd frame, against a reference
+    //      both sides hold when there is one (docs: the 2026-11-08 public
+    //      test's bandwidth notes).  No journal version.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 34;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
     // The protocol whose SessionStart carries `mechanism_slots` (step Q7).

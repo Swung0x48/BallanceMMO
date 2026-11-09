@@ -579,6 +579,7 @@ void BallanceMMOClient::OnProcess() {
             frame_timestamps_in_last_45s_.pop();
     }
 
+    core_host_legacy_mute();
     const bool flush = db_.flush();
     if (!objects_.update(current_timestamp, flush) && flush)
         db_.set_pending_flush(true);
@@ -2140,6 +2141,7 @@ void BallanceMMOClient::handle_message(const bmmo::net::message& received) {
             msg = bmmo::message_utils::deserialize<bmmo::login_accepted_v3_msg>(network_msg);
         }
         std::lock_guard lk(bml_mtx_);
+        core_host_legacy_mute_reset();   // protocol 34: this server holds no mute set of ours
 
         if (logged_in_) {
             logger_->Info("New LoginAccepted message received. Resetting current data.");

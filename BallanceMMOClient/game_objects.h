@@ -160,7 +160,10 @@ public:
 			auto& player = objects_[item.first];
 			const auto& state_it = item.second.ball_state.begin();
 
-			const uint32_t current_ball_type = state_it->type;
+			// A physicalized ball shows the session's type (show_mirror): the
+			// legacy stream may be muted for it (protocol 34), so db_'s type
+			// can be old.
+			const uint32_t current_ball_type = player.physicalized ? player.visible_ball_type : state_it->type;
 			// a peer (or a forged packet) can claim any ball type; skip this
 			// player rather than indexing past the end of its ball list
 			if (!is_valid_ball_type(player, current_ball_type))
@@ -233,7 +236,7 @@ public:
 					if (item2.first == db_.get_client_id() || item2.first == item.first
 							|| bmmo::name_validator::is_spectator(item2.second.name))
 						return true;
-					const auto square_distance = (state_it->position - item2.second.ball_state.front().position).SquareMagnitude();
+					const auto square_distance = (state_it->position - shown_position(item2.first, item2.second.ball_state.front().position)).SquareMagnitude();
 					if (square_distance < DILATION_MAX_SQUARE_DISTANCE)
 						dilation_factor += 1.0f - square_distance / DILATION_MAX_SQUARE_DISTANCE;
 					return true;
@@ -309,6 +312,50 @@ public:
 		if (objects_.contains(id)) return;
 		if (auto state = db_.get(id)) init_player(id, state->name, state->cheated);
 	}
+	// A session mirror of `type` is shown: that type's ball (the previous
+	// one hidden), solid, left where its body puts it.  Its type is the
+	// session's from here on, not the legacy stream's (update()).
+	void show_mirror(bmmo::net::connection id, uint32_t type) {
+		std::lock_guard lk(mutex_);
+		auto it = objects_.find(id);
+		if (it == objects_.end()) return;
+		auto& player = it->second;
+		if (player.visible_ball_type != type) {
+			on_trafo(id, player.visible_ball_type, type);
+			player.visible_ball_type = type;
+		}
+		if (player.physicalized) return;
+		player.physicalized = true;
+		set_ball_solid(id, player, true);
+	}
+
+	// The shown ball of every player: whether it is physicalized, and its
+	// entity and pose (protocol 34's mute set and the seed of a ball that
+	// turns back into a legacy one).
+	struct shown_ball {
+		bmmo::net::connection id;
+		bool physicalized;
+		CK_ID entity;
+		uint32_t type;
+		VxVector position;
+		VxQuaternion rotation;
+	};
+	std::vector<shown_ball> shown_balls() {
+		std::lock_guard lk(mutex_);
+		std::vector<shown_ball> out;
+		out.reserve(objects_.size());
+		for (const auto& [id, player]: objects_) {
+			if (!is_valid_ball_type(player, player.visible_ball_type)) continue;
+			auto* ball = static_cast<CK3dEntity*>(bml_->GetCKContext()->GetObject(player.balls[player.visible_ball_type]));
+			if (!ball) continue;
+			shown_ball b{id, player.physicalized, player.balls[player.visible_ball_type], player.visible_ball_type, {}, {}};
+			ball->GetPosition(&b.position);
+			ball->GetQuaternion(&b.rotation);
+			out.push_back(b);
+		}
+		return out;
+	}
+
 	// While set, update() leaves the ball where the physics body put it.
 	void set_physicalized(bmmo::net::connection id, bool physicalized) {
 		std::lock_guard lk(mutex_);
@@ -466,7 +513,8 @@ public:
 		auto player_it = objects_.find(id);
 		if (player_it == objects_.end())
 			return {};
-		const uint32_t ball_type = state->ball_state.front().type;
+		const uint32_t ball_type = player_it->second.physicalized ? player_it->second.visible_ball_type
+		                                                          : state->ball_state.front().type;
 		if (!is_valid_ball_type(player_it->second, ball_type))
 			return {};
 		auto* player_ball = static_cast<CK3dObject*>(bml_->GetCKContext()->GetObject(
@@ -532,6 +580,20 @@ public:
 		destroy_templates();
 	}
 private:
+	// Where `id`'s ball is shown: a physicalized one's entity (its legacy
+	// stream may be muted), else `legacy`, its stream's newest position.
+	// Caller holds mutex_.
+	VxVector shown_position(bmmo::net::connection id, const VxVector& legacy) {
+		const auto it = objects_.find(id);
+		if (it == objects_.end() || !it->second.physicalized || !is_valid_ball_type(it->second, it->second.visible_ball_type))
+			return legacy;
+		auto* ball = static_cast<CK3dEntity*>(bml_->GetCKContext()->GetObject(it->second.balls[it->second.visible_ball_type]));
+		if (!ball) return legacy;
+		VxVector position;
+		ball->GetPosition(&position);
+		return position;
+	}
+
 	// Solid balls (physics sessions) drop alpha blending altogether; shadow
 	// mode balls go back to the translucent default, with the dynamic opacity
 	// timer reset so update() picks a distance-based value right away.

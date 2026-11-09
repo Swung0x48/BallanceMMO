@@ -960,6 +960,9 @@ public:
             int offset = 0;
             uint32_t outstanding = 0;   // seq of the SessionLead not yet acknowledged; 0 = none
             int outstanding_k = 0;      // its delta: what an ack may apply at most (lateness_bound_applied)
+            // Protocol 34: the resync state its last SessionResync says it
+            // decoded (the runner codes the answer against it when it can).
+            bmmo::session::resync_ref_id resync_claim;
         };
         std::map<bmmo::net::connection, member_lead> leads;
         // A SessionLead's unreliable copies, one every kLeadRepeatSpacing
@@ -1879,37 +1882,42 @@ public:
         auto& s = it->second;
         const auto c = static_cast<bmmo::net::connection>(out.player);
         if (std::find(s.members.begin(), s.members.end(), c) == s.members.end()) return;
+        // Protocol 34: the body is one zstd frame the runner coded
+        // (session_runner::encode_resync_state); the sections ride inside it.
         bmmo::session_resync_state_msg msg;
         msg.session = out.session;
         msg.tick = out.tick;
         msg.base = out.base;
-        msg.rows = out.state.rows;
-        msg.clones = out.state.clones;
-        msg.navs = out.state.navs;
-        msg.union_state = out.state.union_state;
-        msg.scripts = out.state.scripts;
-        msg.savestate = out.state.savestate;
-        msg.scripts_size = out.state.scripts_size;
-        msg.savestate_size = out.state.savestate_size;
-        msg.trafo_ledger = out.state.trafo_ledger;
-        // serialize() caps the rows at MAX_BODIES_PER_SNAPSHOT and each byte
+        msg.ref_kind = out.ref_kind;
+        msg.ref_tick = out.ref_tick;
+        msg.ref_check = out.ref_check;
+        msg.raw_size = out.raw_size;
+        msg.frame = out.frame;
+        // The body caps the rows at MAX_BODIES_PER_SNAPSHOT and each byte
         // section at kMaxBytesField: a state that large is sent cut, and the
         // client's restore of a cut blob refuses it - said here, not silently.
         std::string cut;
-        if (msg.rows.size() > bmmo::session::MAX_BODIES_PER_SNAPSHOT)
-            cut += " rows " + std::to_string(msg.rows.size()) + " > " + std::to_string(bmmo::session::MAX_BODIES_PER_SNAPSHOT);
-        for (const auto& [bytes, what]: {std::pair<const std::vector<uint8_t>*, const char*>{&msg.union_state, "union"},
-                                         {&msg.scripts, "scripts"}, {&msg.savestate, "savestate"}})
+        if (out.state.rows.size() > bmmo::session::MAX_BODIES_PER_SNAPSHOT)
+            cut += " rows " + std::to_string(out.state.rows.size()) + " > " + std::to_string(bmmo::session::MAX_BODIES_PER_SNAPSHOT);
+        for (const auto& [bytes, what]: {std::pair<const std::vector<uint8_t>*, const char*>{&out.state.union_state, "union"},
+                                         {&out.state.scripts, "scripts"}, {&out.state.savestate, "savestate"}})
             if (bytes->size() > bmmo::session_resync_state_msg::kMaxBytesField)
                 cut += std::string(" ") + what + " " + std::to_string(bytes->size()) + " bytes";
-        if (msg.trafo_ledger.size() > bmmo::session_resync_state_msg::kMaxTrafoLedger)
-            cut += " trafo ledger " + std::to_string(msg.trafo_ledger.size()) + " > "
+        if (out.state.trafo_ledger.size() > bmmo::session_resync_state_msg::kMaxTrafoLedger)
+            cut += " trafo ledger " + std::to_string(out.state.trafo_ledger.size()) + " > "
                  + std::to_string(bmmo::session_resync_state_msg::kMaxTrafoLedger) + " entries";
+        if (msg.frame.size() > bmmo::session_resync_state_msg::kMaxBytesField)
+            cut += " frame " + std::to_string(msg.frame.size()) + " bytes";
         if (!cut.empty())
             Printf("Physics session %u: the resync state for %s is cut on the wire (%s): the client will refuse what is cut.",
                    s.id, get_client_name(c), cut.c_str());
-        msg.serialize();
-        const bool sent = send(c, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
+        // A state that did not compress is not sent: the member's hold
+        // times out and asks again, as for a state that never came.
+        bool sent = false;
+        if (!msg.frame.empty()) {
+            msg.serialize();
+            sent = send(c, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
+        }
         bmmo::session::sector_union::state_type u;
         std::string active;
         if (bmmo::session::sector_union::deserialize(out.state.union_state.data(), out.state.union_state.size(), u))
@@ -1917,13 +1925,14 @@ public:
         std::string own_clone = "-";
         for (const auto& [player, name]: out.state.clones)
             if (player == out.player) own_clone = name;
-        Printf("Physics session %u: resync state for %s: tick %u (base %u), %zu bodies, %u script bytes (%zu packed), %u "
-               "savestate bytes (%zu packed), own clone %s, union {%s}, %zu bytes on the wire (result %d), emitted in %llu us%s%s.",
-               s.id, get_client_name(c), out.tick, out.base, out.state.rows.size(),
-               out.state.scripts_size ? out.state.scripts_size : static_cast<uint32_t>(out.state.scripts.size()),
-               out.state.scripts.size(),
-               out.state.savestate_size ? out.state.savestate_size : static_cast<uint32_t>(out.state.savestate.size()),
-               out.state.savestate.size(), own_clone.c_str(), active.c_str(),
+        const std::string reference = out.ref_kind == bmmo::session::RESYNC_REF_PREVIOUS
+            ? "against the state of tick " + std::to_string(out.ref_tick) : std::string("plain");
+        Printf("Physics session %u: resync state for %s: tick %u (base %u), %zu bodies, %zu script bytes, %zu savestate "
+               "bytes, own clone %s, union {%s}, body %u bytes as a %zu-byte zstd frame %s (coded in %llu us), "
+               "%zu bytes on the wire (result %d), emitted in %llu us%s%s.",
+               s.id, get_client_name(c), out.tick, out.base, out.state.rows.size(), out.state.scripts.size(),
+               out.state.savestate.size(), own_clone.c_str(), active.c_str(), out.raw_size, out.frame.size(),
+               reference.c_str(), static_cast<unsigned long long>(out.encode_us),
                static_cast<size_t>(msg.size()), static_cast<int>(sent), static_cast<unsigned long long>(out.emit_us),
                out.state.error.empty() ? "" : ": ", out.state.error.c_str());
     }
@@ -2989,6 +2998,7 @@ public:
         if (it == physics_sessions_.end()) return;
         auto& s = it->second;
         if (!runner_->running(s.id)) return;
+        if (auto lead = s.leads.find(c); lead != s.leads.end()) lead->second.resync_claim = msg.held;
         resync_member(s, c, msg.last_full_tick);
     }
 
@@ -3035,7 +3045,11 @@ public:
         resend_trafo_relayed(s, c, assigned);
         // The state of base - 1, after the runner steps it (posted after
         // player_ready, on the same queue).
-        if (state) runner_->request_resync_state(s.id, c, assigned);
+        if (state) {
+            const auto lead = s.leads.find(c);
+            runner_->request_resync_state(s.id, c, assigned,
+                                          lead != s.leads.end() ? lead->second.resync_claim : bmmo::session::resync_ref_id{});
+        }
         else runner_->request_full_snapshot(s.id);
         Printf("Physics session %u: %s resynced at tick %u (last full snapshot it had: %u; held counted through tick %u).",
                s.id, get_client_name(c), assigned, last_full_tick, counted_through);
@@ -4295,6 +4309,13 @@ protected:
                 client_it->second.state_updated = false;
                 break;
             }
+            case bmmo::BallStateMute: {
+                bmmo::ball_state_mute_msg msg{};
+                msg.raw.write(static_cast<const char*>(networking_msg->data), networking_msg->size);
+                if (!msg.deserialize()) break;
+                on_ball_state_mute(networking_msg->conn, client_it->second, std::move(msg.players));
+                break;
+            }
             case bmmo::TimedBallState: {
                 auto* state_msg = bmmo::message_utils::view_as<bmmo::timed_ball_state_msg>(networking_msg);
                 if (!state_msg) break;
@@ -4967,6 +4988,45 @@ protected:
         return total;
     }
 
+    // One tick's legacy ball states (serialized) to `conn`, without the
+    // players it muted (BallStateMute): nothing at all when none is left.
+    void send_ball_states(bmmo::net::connection conn, const client_data& client,
+                          bmmo::owned_compressed_ball_state_msg& msg) {
+        if (client.legacy_muted.empty()) {
+            send(conn, msg.raw.str().data(), msg.size(), bmmo::net::kSendUnreliableNoDelay);
+            return;
+        }
+        bmmo::owned_compressed_ball_state_msg kept;
+        if (!bmmo::without_muted(msg, client.legacy_muted, kept)) return;
+        kept.serialize();
+        send(conn, kept.raw.str().data(), kept.size(), bmmo::net::kSendUnreliableNoDelay);
+    }
+
+    // Protocol 34: `conn`'s new mute set.  A player that left it turns back
+    // into a legacy ball there (a death, the airship zone, the session's
+    // end), so its current state goes to `conn` at once, reliably - chosen
+    // as tick() chooses: nothing in ghost mode for a client that is not a
+    // ghost spectator (tick sends it nothing), every room for one that is,
+    // else `conn`'s room only.  Under state_mutex_ (on_message).
+    void on_ball_state_mute(bmmo::net::connection conn, client_data& client, std::vector<uint32_t> players) {
+        std::vector<uint32_t> removed;
+        std::set_difference(client.legacy_muted.begin(), client.legacy_muted.end(), players.begin(), players.end(),
+                            std::back_inserter(removed));
+        client.legacy_muted = std::move(players);
+        const bool spectator = ghost_spectator_clients_.contains(conn);
+        if (removed.empty() || (config_.ghost_mode && !spectator)) return;
+        bmmo::owned_compressed_ball_state_msg catch_up;
+        for (const uint32_t id: removed) {
+            const auto other = clients_.find(static_cast<bmmo::net::connection>(id));
+            if (other == clients_.end() || other->second.state.timestamp.is_zero()) continue;
+            if (!config_.ghost_mode && rooms_.room_of(other->first) != rooms_.room_of(conn)) continue;
+            catch_up.balls.push_back({other->second.state, other->first});
+        }
+        if (catch_up.balls.empty()) return;
+        catch_up.serialize();
+        send(conn, catch_up.raw.str().data(), catch_up.size(), bmmo::net::kSendReliableNoNagle);
+    }
+
     // Runs on the network thread SERVER_TICK_DELAY into each loop iteration:
     // broadcasts ball states collected since the last tick and, periodically,
     // latency / real-world-time data.
@@ -4980,7 +5040,7 @@ protected:
         std::lock_guard lk(state_mutex_);
         if (config_.ghost_mode) {
             for (const auto& i: ghost_spectator_clients_)
-                send(i, ball_msg.raw.str().data(), ball_msg.size(), bmmo::net::kSendUnreliableNoDelay);
+                if (const auto c = clients_.find(i); c != clients_.end()) send_ball_states(i, c->second, ball_msg);
         } else {
             // Room-scoped fan-out: a room's members see only their room's balls;
             // players not in any room (room 0) still see one another, as before.
@@ -4990,10 +5050,9 @@ protected:
             for (const auto& u: ball_msg.unchanged_balls)
                 per_room[rooms_.room_of(u.player_id)].unchanged_balls.push_back(u);
             for (auto& [_, m]: per_room) m.serialize();
-            for (const auto& [conn, _]: clients_) {
+            for (const auto& [conn, client]: clients_) {
                 auto it = per_room.find(rooms_.room_of(conn));
-                if (it != per_room.end())
-                    send(conn, it->second.raw.str().data(), it->second.size(), bmmo::net::kSendUnreliableNoDelay);
+                if (it != per_room.end()) send_ball_states(conn, client, it->second);
             }
         }
 

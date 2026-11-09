@@ -96,7 +96,7 @@ target_include_directories(BallanceMMOServer PRIVATE)
 target_link_libraries(BallanceMMOServer ${BMMO_GNS_LIB} yaml-cpp replxx bmmo_zstd)
 add_executable(BallanceMMOMockClient client.cpp ${BMMO_COMMON_SRC} ${YA_GETOPT_SRC})
 target_include_directories(BallanceMMOMockClient PRIVATE)
-target_link_libraries(BallanceMMOMockClient ${BMMO_GNS_LIB} replxx)
+target_link_libraries(BallanceMMOMockClient ${BMMO_GNS_LIB} replxx bmmo_zstd)   # message_all: the resync state codec
 add_executable(BallanceMMORecordParser record_parser.cpp ${BMMO_COMMON_SRC} ${YA_GETOPT_SRC})
 # Step T1c (docs/canned-tests-plan.md): a coordinated run's network and time.
 add_executable(BallanceMMOCoordinator sim/coordinator_main.cpp)
@@ -106,7 +106,7 @@ if(UNIX)
     target_link_libraries(BallanceMMOCoordinator PRIVATE Threads::Threads)
 endif()
 target_include_directories(BallanceMMORecordParser PRIVATE)
-target_link_libraries(BallanceMMORecordParser ${BMMO_GNS_LIB} replxx)
+target_link_libraries(BallanceMMORecordParser ${BMMO_GNS_LIB} replxx bmmo_zstd)   # message_all: the resync state codec
 
 endif ()  # NOT BMMO_BUILD_SIM_ONLY (executables)
 if (BMMO_BUILD_SIM)

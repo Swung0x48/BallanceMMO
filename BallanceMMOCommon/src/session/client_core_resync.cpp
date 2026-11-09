@@ -94,6 +94,38 @@ namespace bmmo::session {
     void session_client_core::on_session_resync_state(bmmo::session_resync_state_msg&& msg) {
         ++s.resync_states_;
         if (msg.session != s.session_ || s.phase_ != client_core_state::phase::running) return;
+        // Protocol 34: the body out of its zstd frame, against the body of
+        // the last state decoded when the server coded it so - only the one
+        // this core holds under the id the message names, and zstd's content
+        // checksum checks the result (session/resync_state_codec.hpp).  A
+        // stale state is decoded too: the server's slot moved to it, so it is
+        // the reference our next request names.  One that does not decode
+        // leaves no reference: the next request names none, and its answer
+        // is plain.
+        const bool against = msg.ref_kind == bmmo::session::RESYNC_REF_PREVIOUS;
+        const bool reference = !against || (s.resync_ref_.held && s.resync_ref_.tick == msg.ref_tick
+                                             && s.resync_ref_.check == msg.ref_check);
+        std::string body;
+        if (!reference || !resync_codec_.decode(msg.frame, against ? &s.resync_ref_body_ : nullptr, msg.raw_size, body)
+                || !msg.read_body_bytes(body)) {
+            ++s.resync_decode_failed_;
+            s.resync_ref_ = {};
+            s.resync_ref_body_.clear();
+            const bool pending = s.resync_pending_ && s.resync_exact_ && msg.base == s.resync_base_ && msg.tick + 1 == msg.base;
+            logf("resync: the state of tick %u (%s) does not decode%s%s", msg.tick,
+                 against ? ("against the state of tick " + std::to_string(msg.ref_tick)).c_str() : "plain",
+                 reference ? "" : ": that reference is not the one held here", pending ? ": asking again" : "");
+            if (pending) {
+                ++s.resync_states_refused_;
+                s.resync_in_flight_ = false;
+                request_resync("the resync state does not decode", true);
+            }
+            return;
+        }
+        if (against) ++s.resync_states_coded_;
+        s.resync_ref_ = {msg.tick, bmmo::session::resync_frame_check(msg.frame), true};
+        s.resync_ref_body_.swap(body);
+        msg.frame = {};
         // The rows as received, like every snapshot's (flag RESYNC).
         if (journal_.journalling())
             journal_.writer().checkpoint(msg.tick, static_cast<uint8_t>(bmmo::session::JOURNAL_CHECKPOINT_RECEIVED
@@ -108,23 +140,6 @@ namespace bmmo::session {
                  s.resync_pending_ && s.resync_exact_ ? "pending" : "none pending, last", s.resync_base_);
             return;
         }
-        // The packed sections back to their bytes (the server packs the
-        // record and the blob: see session_resync_state_msg).
-        for (auto [bytes, size, what]: {std::tuple<std::vector<uint8_t>*, uint32_t, const char*>{&msg.scripts, msg.scripts_size, "script record"},
-                                        {&msg.savestate, msg.savestate_size, "savestate"}}) {
-            if (!size) continue;
-            std::vector<uint8_t> out;
-            if (!platform_.unpack_bytes || !platform_.unpack_bytes(*bytes, size, out) || out.size() != size) {
-                ++s.resync_states_refused_;
-                logf("resync: the state of tick %u: its %s (%zu bytes packed, %u unpacked) does not unpack%s: asking again",
-                     msg.tick, what, bytes->size(), size, platform_.unpack_bytes ? "" : " (no unpack here)");
-                s.resync_in_flight_ = false;
-                request_resync("the resync state does not unpack", true);
-                return;
-            }
-            bytes->swap(out);
-        }
-        msg.scripts_size = msg.savestate_size = 0;
         s.resync_state_ = std::move(msg);
         s.have_resync_state_ = true;
         s.resync_state_arrived_ = current_tick();

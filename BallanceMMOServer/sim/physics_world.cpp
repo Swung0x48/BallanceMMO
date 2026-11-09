@@ -1640,22 +1640,6 @@ namespace bmmo::sim {
             if (out.error.empty()) out.error = "savestate: " + e;
         }
         bmmo::physics::clear_environment_identity(out.savestate);   // it travels (step T2: the same bytes every run)
-        // Packed for the wire (CKPackData: zlib, the CK file format's own):
-        // the client unpacks with its CK's CKUnPackData.  A section that does
-        // not pack is carried as it is (size 0).
-        const auto pack = [](std::vector<uint8_t>& bytes, uint32_t& size) {
-            if (bytes.empty()) return;
-            int packed_size = 0;
-            char* packed = CKPackData(reinterpret_cast<const char*>(bytes.data()), static_cast<int>(bytes.size()), packed_size, 6);
-            if (!packed) return;
-            if (packed_size > 0 && static_cast<size_t>(packed_size) < bytes.size()) {
-                size = static_cast<uint32_t>(bytes.size());
-                bytes.assign(reinterpret_cast<const uint8_t*>(packed), reinterpret_cast<const uint8_t*>(packed) + packed_size);
-            }
-            CKDeletePointer(packed);
-        };
-        pack(out.scripts, out.scripts_size);
-        pack(out.savestate, out.savestate_size);
         if (options_.trafo_inputs) capture_trafo_ledger(out.trafo_ledger);
     }
 

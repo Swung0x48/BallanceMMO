@@ -399,11 +399,6 @@ namespace {
                 out = portable;
                 return true;
             };
-            // The state's packed sections: carried unpacked in these tests.
-            p.unpack_bytes = [](const std::vector<uint8_t>& packed, uint32_t size, std::vector<uint8_t>& out) {
-                out = packed;
-                return out.size() == size;
-            };
             p.forget_activations_from = [this](uint32_t tick) {
                 calls.push_back("forget_activations_from:" + std::to_string(tick));
             };
@@ -437,7 +432,7 @@ namespace {
     }
 
     TEST(SessionClientCore, RefusesAPlatformWithoutAnOperation) {
-        for (int missing = 0; missing < 42; ++missing) {
+        for (int missing = 0; missing < 41; ++missing) {
             fake_platform fake;
             session_platform p = fake.make();
             if (missing == 0) p.send = nullptr;
@@ -480,8 +475,7 @@ namespace {
             if (missing == 37) p.localize_scripts = nullptr;
             if (missing == 38) p.forget_activations_from = nullptr;
             if (missing == 39) p.forget_births_after = nullptr;
-            if (missing == 40) p.unpack_bytes = nullptr;
-            if (missing == 41) p.forget_pending_activations = nullptr;
+            if (missing == 40) p.forget_pending_activations = nullptr;
             EXPECT_THROW(session_client_core(p, session_capabilities{}), std::invalid_argument) << missing;
         }
         // E7: the capture only with the event log's own births; make_own and
@@ -8075,6 +8069,16 @@ namespace {
         return msg;
     }
 
+    // A hand-built state as the wire carries it (protocol 34): its sections
+    // as one plain zstd frame, which the core decodes.
+    bmmo::session_resync_state_msg framed(bmmo::session_resync_state_msg msg) {
+        const std::string body = msg.body_bytes();
+        bmmo::session::resync_codec codec;
+        EXPECT_TRUE(codec.encode(body, nullptr, msg.frame));
+        msg.raw_size = static_cast<uint32_t>(body.size());
+        return msg;
+    }
+
     bmmo::session_resync_state_msg resync_state(uint32_t base, const std::set<int>& active) {
         bmmo::session_resync_state_msg msg;
         msg.session = 9;
@@ -8093,7 +8097,7 @@ namespace {
     // resync poll every host runs before pre_step (A3 fix-up: after the whole
     // drain, so the notices queued behind it amend the re-step's records).
     void deliver(session_client_core& core, bmmo::session_resync_state_msg msg) {
-        core.on_session_resync_state(std::move(msg));
+        core.on_session_resync_state(framed(std::move(msg)));
         core.poll_resync_hold();
     }
 
@@ -8130,7 +8134,7 @@ namespace {
         EXPECT_EQ(s.snapshots_while_resync_, 1u);
         EXPECT_TRUE(s.resync_pending_);
         // A state for another base is stale.
-        core.on_session_resync_state(resync_state(150, {1}));
+        core.on_session_resync_state(framed(resync_state(150, {1})));
         EXPECT_EQ(s.resync_states_stale_, 1u);
         EXPECT_FALSE(s.have_resync_state_);
     }
@@ -8144,7 +8148,7 @@ namespace {
             if (depth) b1_frames(core, 140, 139 + depth);
             auto& s = state_of(core);
             const size_t from = fake.calls.size();
-            core.on_session_resync_state(resync_state(140, {1, 2}));
+            core.on_session_resync_state(framed(resync_state(140, {1, 2})));
             s.final_unconfirmed_ = true;
             EXPECT_TRUE(s.resync_pending_) << "kept until the drain is over";
             EXPECT_TRUE(s.have_resync_state_);
@@ -8455,6 +8459,54 @@ namespace {
     // 60 frames, or the depth about to take the anchor out of the history -
     // then the state goes on without it, and a later state does not wait for
     // that name again.
+    // Protocol 34: a decoded state is the reference the next request names;
+    // the next state, coded against it, decodes to its body bit for bit and
+    // applies; a state naming a reference this core does not hold is refused,
+    // the reference is dropped (the next request names none), and the
+    // pending resync is asked for again.
+    TEST(SessionClientCoreResync, AStateCodedAgainstThePreviousOneApplies) {
+        flow_fake fake;
+        session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+        b1_session(core, fake, 125);
+        auto& s = state_of(core);
+        core.on_session_assign(exact_assign(9, 140));
+        const std::string first_body = resync_state(140, {1}).body_bytes();
+        auto first = framed(resync_state(140, {1}));
+        const uint32_t first_check = bmmo::session::resync_frame_check(first.frame);
+        core.on_session_resync_state(std::move(first));
+        core.poll_resync_hold();
+        ASSERT_FALSE(s.resync_pending_);
+        EXPECT_EQ(s.resync_ref_, (bmmo::session::resync_ref_id{139, first_check, true}));
+        EXPECT_EQ(s.resync_ref_body_, first_body);
+        bmmo::session::resync_codec codec;
+        const auto against_first = [&](uint32_t base) {
+            auto msg = resync_state(base, {1});
+            const std::string body = msg.body_bytes();
+            EXPECT_TRUE(codec.encode(body, &first_body, msg.frame));
+            msg.raw_size = static_cast<uint32_t>(body.size());
+            msg.ref_kind = bmmo::session::RESYNC_REF_PREVIOUS;
+            msg.ref_tick = 139;
+            msg.ref_check = first_check;
+            return msg;
+        };
+        core.on_session_assign(exact_assign(9, 200));
+        b1_frames(core, 200, 202);
+        core.on_session_resync_state(against_first(200));
+        core.poll_resync_hold();
+        EXPECT_FALSE(s.resync_pending_);
+        EXPECT_EQ(s.resync_states_coded_, 1u);
+        EXPECT_EQ(s.resync_ref_.tick, 199u);
+        EXPECT_EQ(s.resync_ref_body_, resync_state(200, {1}).body_bytes()) << "bit for bit";
+        core.on_session_assign(exact_assign(9, 260));
+        b1_frames(core, 260, 262);
+        const uint64_t refused = s.resync_states_refused_;
+        core.on_session_resync_state(against_first(260));   // names 139, this core holds 199
+        EXPECT_EQ(s.resync_decode_failed_, 1u);
+        EXPECT_EQ(s.resync_states_refused_, refused + 1) << "the pending resync's: asked again";
+        EXPECT_FALSE(s.resync_ref_.held) << "the next request names none: its answer is plain";
+        EXPECT_FALSE(s.have_resync_state_);
+    }
+
     TEST(SessionClientCoreResync, TheWaitForALostBodyIsBounded) {
         const auto lost_row = [] {
             bmmo::session::body_state row;
@@ -9042,7 +9094,7 @@ namespace {
                 EXPECT_EQ(state.forced_own_.at(124).frame.keys, 1u);
                 auto msg = resync_state(121, {1});
                 msg.savestate = {1};
-                core.on_session_resync_state(std::move(msg));
+                core.on_session_resync_state(framed(std::move(msg)));
                 const size_t from = fake.calls.size();
                 core.poll_resync_hold();
                 EXPECT_TRUE(state.resync_pending_) << "the known birth is still ahead of the new numbering";
