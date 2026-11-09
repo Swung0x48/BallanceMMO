@@ -2942,6 +2942,17 @@ namespace bmmo::game {
                 if (child) capture_behavior(child, hooks, out);
             }
             put_delayed_links(beh, out);
+            // The slot copies this record leaves out keep their live image
+            // (script_slots::refresh).  The reusing capture (step OPC2) skips
+            // this: it takes an inactive root's block, whose copies have not
+            // run since the capture that refreshed them.
+            if (hooks.slots)
+                for (int index = 0; index < beh->GetSubBehaviorCount(); ++index)
+                    if (CKBehavior* child = beh->GetSubBehavior(index); child && hooks.slots->unbound(child->GetID())) {
+                        std::vector<uint8_t> image;
+                        capture_behavior(child, hooks, image);
+                        hooks.slots->refresh(child->GetID(), std::move(image));
+                    }
         }
 
         // The runtime flags and the active inputs and outputs (v2 and the

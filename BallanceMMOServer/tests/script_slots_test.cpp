@@ -28,23 +28,30 @@ TEST(ScriptSlots, InvalidJoinOrderDoesNotShiftPastTheMask) {
     EXPECT_EQ(bmmo::session::bound_member_slots(lives, 10), 0u);
 }
 
-TEST(ScriptSlots, CaptureRestoreAcrossBindingUsesAnchorBeforeAndRecordAfter) {
+// R1: a copy runs while its slot is unbound (the module's script activates it
+// with the original), so a restore of a record from before the binding puts
+// back the image the last capture without the slot took, not the copy step's.
+TEST(ScriptSlots, CaptureRestoreAcrossBindingUsesUnboundImageBeforeAndRecordAfter) {
     bmmo::game::script_slots slots;
-    const std::vector<uint8_t> anchor{1, 2, 3}, changed{4, 5, 6};
-    slots.add(123, 3, anchor);
+    const std::vector<uint8_t> copied{1, 2, 3}, running{7, 8, 9}, changed{4, 5, 6};
+    slots.add(123, 3, copied);
     std::vector<bmmo::session::member_life> lives(1);
     lives[0].entry.join_order = 3;
     lives[0].from = 20;
-    const auto capture = [&](uint32_t tick, const std::vector<uint8_t>& live) {
+    const auto capture = [&](uint32_t tick, const std::vector<uint8_t>& live) {   // as script_replay::capture_behavior
         slots.select(bmmo::session::bound_member_slots(lives, tick));
-        return slots.omit(123) ? std::vector<uint8_t>{} : live;
+        if (!slots.omit(123)) return live;
+        EXPECT_TRUE(slots.unbound(123));
+        slots.refresh(123, live);
+        return std::vector<uint8_t>{};
     };
-    const auto before = capture(19, anchor);
+    const auto before = capture(19, running);
     const uint64_t before_mask = slots.mask();
     const auto after = capture(20, changed);
     const uint64_t after_mask = slots.mask();
     EXPECT_TRUE(before.empty());
     EXPECT_EQ(after, changed);
+    EXPECT_FALSE(slots.unbound(123));
     std::vector<uint8_t> live = changed;
     const auto restore = [&](uint64_t mask, const std::vector<uint8_t>& record) {
         slots.select_record(mask);
@@ -55,11 +62,11 @@ TEST(ScriptSlots, CaptureRestoreAcrossBindingUsesAnchorBeforeAndRecordAfter) {
         return true;
     };
     ASSERT_TRUE(restore(before_mask, before));
-    EXPECT_EQ(live, anchor);
+    EXPECT_EQ(live, running);
     ASSERT_TRUE(restore(after_mask, after));
     EXPECT_EQ(live, changed);
     ASSERT_TRUE(restore(before_mask, before));
-    EXPECT_EQ(live, anchor);
+    EXPECT_EQ(live, running);
     EXPECT_EQ(capture(19, live), before);
     EXPECT_EQ(capture(20, changed), after);
 }

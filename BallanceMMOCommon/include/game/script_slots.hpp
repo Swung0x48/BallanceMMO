@@ -28,6 +28,23 @@ namespace bmmo::game {
             const auto found = blocks_.find(id);
             if (found != blocks_.end()) found->second.at_anchor = false;
         }
+        // A block of a slot the selection leaves out of the record.
+        bool unbound(uint32_t id) const {
+            const auto found = blocks_.find(id);
+            return found != blocks_.end() && !(bound_ & found->second.slot);
+        }
+        // The live image of a block a capture leaves out: what a restore of a
+        // record without its slot puts back.  The copy-step image is the
+        // state before the module's script ever ran, which an unbound copy
+        // does not keep: the script activates it with the original (its
+        // graphs active since the sector's start), so a rewind across a late
+        // join left the joiner's copies inactive for good (R1).
+        void refresh(uint32_t id, std::vector<uint8_t> image) {
+            const auto found = blocks_.find(id);
+            if (found == blocks_.end()) return;
+            found->second.anchor = std::move(image);
+            found->second.at_anchor = true;
+        }
         template <typename Write> bool restore_anchor(uint32_t id, Write&& write) {
             const auto found = blocks_.find(id);
             if (found == blocks_.end()) return false;
