@@ -611,7 +611,10 @@ namespace bmmo::session {
             return recorded_input_at(entity, tick, out);
         };
         const scope_guard keep_cells = keep_live_cells();
-        if (rewind_world(event_tick - 1, now, input_at, reason)) {
+        // A stamp inside the last exact resync's re-step reaches as deep as
+        // that re-step did, as an input correction there does (step A3): the
+        // events of the window arrive with its frames, behind the state.
+        if (rewind_world(event_tick - 1, now, input_at, reason, life_rewind_reach(event_tick))) {
             ++s.life_rewinds_;
             s.life_rewind_depth_ += now - (event_tick - 1);
             drop_carried_own_replay(event_tick - 1, false);
@@ -636,7 +639,14 @@ namespace bmmo::session {
         if (static_cast<int32_t>(event_tick - now) > 0) return false;
         if (s.resync_pending_ && s.resync_exact_ && static_cast<int32_t>(event_tick - s.resync_base_) < 0) return false;
         const uint32_t anchor = event_tick - 1;
-        return s.rollback_.knows_tick(anchor) && now - anchor <= s.rollback_.thresholds().max_resim_ticks;
+        return s.rollback_.knows_tick(anchor) && now - anchor <= window_rewind_reach(event_tick);
+    }
+
+    // rewind_world's reach for a lifecycle stamp: 0 (the standard reach)
+    // outside a re-step window, the window's reach inside one.
+    uint32_t session_client_core::life_rewind_reach(uint32_t event_tick) const {
+        const uint32_t reach = window_rewind_reach(event_tick);
+        return reach > s.rollback_.thresholds().max_resim_ticks ? reach : 0;
     }
 
     // Step SRT3: before the drain applies an event of `player` stamped
@@ -677,7 +687,8 @@ namespace bmmo::session {
             // every correction after it, so a pending replay from there on
             // is carried too.
             uint32_t restored = batch.anchor;
-            rolled = rewind_world(batch.anchor, now, input_at, batch.reason, 0, &restored);
+            rolled = rewind_world(batch.anchor, now, input_at, batch.reason, life_rewind_reach(batch.anchor + 1),
+                                  &restored);
             if (rolled) {
                 ++s.life_rewinds_;
                 s.life_rewind_depth_ += now - batch.anchor;

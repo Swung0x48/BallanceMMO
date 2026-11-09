@@ -2265,8 +2265,14 @@ namespace {
                 origin_ -= std::chrono::duration_cast<clock_type::duration>(
                         std::chrono::duration<double>(static_cast<double>(ticks) / bmmo::sim::kTickRate));
             };
-            // Step A3: the frames a resync hold did not run are not owed.
-            p.hooks.resync_hold_ended = [this](std::chrono::steady_clock::duration held) { origin_ += held; };
+            // Step A3: the frames a resync hold did not run are owed, up to
+            // kHoldCatchUpFrames (the retail driver's release_hold_owing):
+            // the pacing catches them up; the rest of a long hold is dropped.
+            p.hooks.resync_hold_ended = [this](std::chrono::steady_clock::duration held) {
+                const auto owed = std::chrono::duration_cast<clock_type::duration>(
+                        std::chrono::duration<double>(bmmo::session::kHoldCatchUpFrames / bmmo::sim::kTickRate));
+                if (held > owed) origin_ += held - owed;
+            };
             // FULL step R6H: the hold is session/event_hold.hpp's, shared with
             // the retail 'session hold-event' verb.
             event_hold_.set_log([this](const std::string& line) { logf("%s", line.c_str()); });
@@ -3668,6 +3674,8 @@ namespace {
             // before the schedule is read: one tick earlier per tick period
             // for a raise (two frames per slot), one later per ten for a
             // lower.
+            core_.note_pacer_behind(std::chrono::duration<double>(wall_now(bmmo::sim::wall_site::pace_expected) - origin_).count()
+                                    * bmmo::sim::kTickRate - static_cast<double>(next_frame));
             if (core_.slewing()) advance_lead_slew(next_frame);
             const double expected = std::chrono::duration<double>(wall_now(bmmo::sim::wall_site::pace_expected) - origin_).count() * bmmo::sim::kTickRate;
             // 33 frames behind is a stall, plus whatever a slew still has to

@@ -1258,7 +1258,9 @@ namespace {
     class core_pacer_slew final : public bs::pacer_slew {
     public:
         int step(clock_type::time_point now, double behind) override {
-            if (!core_session_running() || !host.core->slewing()) return 0;
+            if (!core_session_running()) return 0;
+            host.core->note_pacer_behind(behind);
+            if (!host.core->slewing()) return 0;
             return host.core->slew_step(now, bs::kTickRate, behind);
         }
         double rebase_threshold() const override {
@@ -4171,8 +4173,10 @@ void BallanceMMOClient::core_host_frame() {
     // Step A3 (resync design 2.6.6): the resync hold.  While a pending exact
     // resync's anchor would leave the history with the next step, nothing
     // steps: the mailbox is drained (its state applies the resync and ends
-    // the hold) under the tick driver's hold, so the wait is no lag and
-    // `rebases` does not move (a rebase would ask for another resync).
+    // the hold) under the tick driver's hold.  The release keeps the held
+    // ticks due, up to kHoldCatchUpFrames, so the pacing catches up the
+    // server's schedule without a rebase (a rebase would ask for another
+    // resync).
     if (core.poll_resync_hold().held) {
         fixed_tick_.set_hold(true);
         while (core_session_running() && host.core->resync_held()) {
@@ -4181,7 +4185,7 @@ void BallanceMMOClient::core_host_frame() {
             if (!host.core->poll_resync_hold().held) break;
             bmmo::retail::host_clock().sleep_for(bs::clock_site::retail_blocking_wait, std::chrono::milliseconds(1));
         }
-        fixed_tick_.set_hold(false);
+        fixed_tick_.release_hold_owing(bs::kHoldCatchUpFrames);
         host.last_rebases = fixed_tick_.rebases();
         if (!core_session_running()) return;
     }

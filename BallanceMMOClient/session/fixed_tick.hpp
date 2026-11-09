@@ -65,6 +65,10 @@ namespace bmmo::session {
         // not lag the pacing tries to catch up with (which would count as a
         // rebase and ask the session for a resync).
         void set_hold(bool hold);
+        // A resync hold's release: the schedule keeps the held time as
+        // ticks due, at most `max_behind` of them (the pacing catches up),
+        // and drops the rest as set_hold(false) drops all of it.
+        void release_hold_owing(double max_behind);
         // FULL step AHN: the non-blocking anchor hold's release - the hold
         // ends and the schedule's origin is `at` less the ticks counted so
         // far, so the next frame is due at `at` (the scheduled start instant,

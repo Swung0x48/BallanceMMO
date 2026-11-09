@@ -984,6 +984,15 @@ TEST(LeadSlew, ARebaseKeepsTheSlewAndAResyncAcknowledgesTheWholeDelta) {
     EXPECT_EQ(slew.advance(10.0, 0.0), -1);
     EXPECT_EQ(slew.finish_reanchored(), -3);
     EXPECT_EQ(slew.finish_reanchored(), 0);
+    // a raise that stalled (the pacer stays behind past 2k + the grace): a
+    // resync acknowledges what it moved, not the whole delta
+    slew.start(15, 10);
+    EXPECT_EQ(slew.advance(1.0, 0.0), 1);
+    EXPECT_EQ(slew.advance(85.0, 2.0), 0);
+    EXPECT_FALSE(slew.stalled()) << "86 periods <= 2 x 10 + 66";
+    EXPECT_EQ(slew.advance(1.0, 2.0), 0);
+    EXPECT_TRUE(slew.stalled());
+    EXPECT_EQ(slew.finish_reanchored(), 1);
     // superseded by a newer decision: what was moved, never the rest
     slew.start(14, 5);
     EXPECT_EQ(slew.advance(1.0, 0.0), 1);

@@ -247,9 +247,13 @@ namespace bmmo::session {
         // along in another event's rewind, and remote input corrections a
         // lifecycle rewind replayed already - only when there were any
         // (every other status line is the text it was).
-        const std::string coalesced = !s.life_events_coalesced_ && !s.input_rewinds_carried_ ? std::string() : textf(
-            " coalesced: life=%llu input=%llu", static_cast<unsigned long long>(s.life_events_coalesced_),
-            static_cast<unsigned long long>(s.input_rewinds_carried_));
+        // ... and the frames a remote's correction waited while the pacer
+        // was behind (kRemoteCoalesceBehind).
+        const std::string coalesced = !s.life_events_coalesced_ && !s.input_rewinds_carried_ && !s.input_rewinds_deferred_
+            ? std::string()
+            : textf(" coalesced: life=%llu input=%llu deferred=%llu", static_cast<unsigned long long>(s.life_events_coalesced_),
+                    static_cast<unsigned long long>(s.input_rewinds_carried_),
+                    static_cast<unsigned long long>(s.input_rewinds_deferred_));
         // RC2 (b) (step RCB): ccache=hits/mismatches - the bodies whose
         // extras and contacts a capture took from the record before, and the
         // cached entries that differed from a fresh read (verify only, then

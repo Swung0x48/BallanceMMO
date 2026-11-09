@@ -71,8 +71,20 @@ namespace bmmo::session {
         return static_cast<int32_t>(anchor - (earliest - 1)) <= 0;
     }
 
+    // A client behind its schedule by at least kRemoteCoalesceBehind ticks
+    // (CPU-bound: in a crowded room every remote's correction is a rewind,
+    // 18-22 a second, 40-55% of the frame budget in the 2026-11-08 public
+    // test) puts a remote's correction off for up to this many frames too,
+    // under the same reach deadline: the replay that runs carries every
+    // correction of the frames it waited, a tick or two deeper.  The world
+    // after it is the same; only the mirrors show their correction later,
+    // in frames a catch-up mostly does not render.
+    constexpr uint32_t kRemoteReplayCoalesceFrames = 3;
+    constexpr double kRemoteCoalesceBehind = 2.0;
+
     class own_replay_pacer {
     public:
+        explicit own_replay_pacer(uint32_t coalesce_frames = kOwnReplayCoalesceFrames) : coalesce_(coalesce_frames) {}
         // Once per frame, before due().
         void frame() { ++frames_; }
 
@@ -87,7 +99,7 @@ namespace bmmo::session {
         // acked < tick); false runs the replay now - nothing will join it.
         bool due(uint32_t now, uint32_t earliest, uint32_t reach, bool notices_coming) const {
             if (!notices_coming) return true;
-            if (!ran_any_ || frames_ - last_ >= kOwnReplayCoalesceFrames) return true;
+            if (!ran_any_ || frames_ - last_ >= coalesce_) return true;
             const int64_t depth_next = static_cast<int64_t>(static_cast<int32_t>(now - earliest)) + 2;   // now + 1 - (earliest - 1)
             if (depth_next <= 1) return true;
             return depth_next > static_cast<int64_t>(reach);
@@ -105,6 +117,7 @@ namespace bmmo::session {
         void reset() { ran_any_ = false; }
 
     private:
+        uint32_t coalesce_;
         uint64_t frames_ = 0;
         uint64_t last_ = 0;
         bool ran_any_ = false;

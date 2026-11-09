@@ -578,6 +578,7 @@ namespace bmmo::session {
         drop_pending_rewind();
         drop_lead_state(why);
         s.own_replay_pacer_.reset();
+        s.remote_replay_pacer_.reset();
         s.held_seen_.clear();
         s.held_ahead_.clear();
         s.sent_inputs_.clear();

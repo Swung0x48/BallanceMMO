@@ -794,6 +794,11 @@ namespace bmmo::session {
         // with another's, or carried by such a rewind).
         uint64_t subst_deferred_ = 0, subst_unseen_ = 0, subst_subsumed_ = 0, subst_saved_ = 0;
         bmmo::session::own_replay_pacer own_replay_pacer_;
+        // A remote's correction put off while the pacer is behind
+        // (note_pacer_behind, kRemoteCoalesceBehind), and the frames it was.
+        bmmo::session::own_replay_pacer remote_replay_pacer_{bmmo::session::kRemoteReplayCoalesceFrames};
+        double pacer_behind_ = 0.0;
+        uint64_t input_rewinds_deferred_ = 0;
         uint32_t subst_late_logs_ = 0, subst_unresolved_logs_ = 0;
         // The frames each uplink datagram carried (remember_sent), and the
         // notices of ticks not simulated yet with whether to correct them
@@ -1656,6 +1661,10 @@ namespace bmmo::session {
         // earlier, the clock runs ahead).
         int slew_step(std::chrono::steady_clock::time_point now, double tick_rate, double behind_ticks);
         bool slewing() const { return s.lead_slew_.active(); }
+        // How far behind its schedule the host's pacer is this frame (the
+        // expected frame less the one about to run), every counted frame:
+        // a client that is behind coalesces remote corrections.
+        void note_pacer_behind(double behind_ticks) { s.pacer_behind_ = behind_ticks; }
         // The input basis (design 1.2): the last camera reference seen,
         // nullptr until one was.
         const float (*previous_cam() const)[3] { return s.previous_cam_valid_ ? s.previous_cam_ : nullptr; }
@@ -2268,6 +2277,7 @@ namespace bmmo::session {
         // go: max_resim_ticks, or the resync reach inside the last exact
         // resync's re-step window.
         uint32_t window_rewind_reach(uint32_t tick) const;
+        uint32_t life_rewind_reach(uint32_t event_tick) const;
         // Late-player plan step 12: one relay lag sample (the header of a
         // datagram's first arrival of a server tick) and the reach it gives
         // (config.reach_ticks 0), or the pinned reach (apply_reach at begin).

@@ -122,6 +122,7 @@ namespace bmmo::session {
         BMMO_CORE_STEP(try_apply_resync)
         BMMO_CORE_STEP(rewind_for_lifecycle)
         BMMO_CORE_STEP(window_rewind_reach)
+        BMMO_CORE_STEP(life_rewind_reach)
         BMMO_CORE_STEP(drain_pending_deaths)
         BMMO_CORE_STEP(probe_candidates)
         BMMO_CORE_STEP(settle_held_tick)
@@ -8173,6 +8174,9 @@ namespace {
             EXPECT_EQ(steps{core}.window_rewind_reach(139u + depth), depth ? 95u : 48u) << "the apply's tick";
             EXPECT_EQ(steps{core}.window_rewind_reach(140u + depth), 48u) << "after the apply";
             EXPECT_EQ(steps{core}.window_rewind_reach(139u), 48u) << "its anchor would be before S";
+            // A late birth or death stamped in the window rewinds as deep.
+            EXPECT_EQ(steps{core}.life_rewind_reach(140u), depth ? 95u : 0u) << "lifecycle, S + 1";
+            EXPECT_EQ(steps{core}.life_rewind_reach(140u + depth), 0u) << "lifecycle, after the apply";
             core.on_session_assign(exact_assign(9, 200));
             EXPECT_FALSE(s.resync_window_) << "a new numbering ends it";
         }
@@ -9697,6 +9701,36 @@ namespace {
             EXPECT_FALSE(s.input_rewind_pending_);
             EXPECT_EQ(s.trafo_missed_, 0u);
         }
+    }
+
+    // A client behind its schedule (note_pacer_behind >= 2) puts a remote's
+    // correction off for up to kRemoteReplayCoalesceFrames frames after the
+    // last replay (on schedule it replays at once, as every other test has).
+    TEST(SessionClientCoreTrafo, ARemoteCorrectionWaitsAFewFramesWhileThePacerIsBehind) {
+        flow_fake fake;
+        trafo_fake t;
+        session_client_core core(trafo_rewind_platform(fake, t), trafo_caps());
+        trafo_tick_125(core, fake);
+        core.config.rollback = true;
+        trafo_record_ticks(core, 110, 125);
+        auto& s = state_of(core);
+        const auto late = [&](uint32_t seq, uint32_t tick) {
+            core.on_session_event(trafo_message(4, seq, bmmo::session::TRAFO_RESET | bmmo::session::TRAFO_SERVER
+                                                            | bmmo::session::TRAFO_FINAL, tick, tick));
+            ASSERT_TRUE(s.input_rewind_pending_);
+        };
+        core.note_pacer_behind(5.0);
+        late(1, 120);
+        steps{core}.replay_corrected_inputs();
+        EXPECT_EQ(s.input_rewinds_, 1u) << "nothing ran before it: at once";
+        late(2, 121);
+        steps{core}.replay_corrected_inputs();
+        steps{core}.replay_corrected_inputs();
+        EXPECT_EQ(s.input_rewinds_deferred_, 2u);
+        EXPECT_TRUE(s.input_rewind_pending_);
+        steps{core}.replay_corrected_inputs();
+        EXPECT_EQ(s.input_rewinds_, 2u) << "the third frame after the last replay";
+        EXPECT_FALSE(s.input_rewind_pending_);
     }
 
     TEST(SessionClientCoreTrafo, AnInputPastTheHistoryAsksForAResync) {

@@ -33,6 +33,7 @@ namespace bmmo::session {
     // One replay for every input correction this frame collected.
     void session_client_core::replay_corrected_inputs() {
         s.own_replay_pacer_.frame();
+        s.remote_replay_pacer_.frame();
         if (!s.input_rewind_pending_) return;
         // Our own corrections alone are coalesced (own_replay_pacer): while
         // the server keeps substituting our ticks, one notice per server
@@ -53,6 +54,11 @@ namespace bmmo::session {
         if (s.input_rewind_own_ && s.input_rewind_entities_.empty()
                 && !s.own_replay_pacer_.due(current_tick(), s.input_rewind_tick_, reach, own_notices_coming())) {
             ++s.subst_deferred_;
+            return;
+        }
+        if (s.pacer_behind_ >= bmmo::session::kRemoteCoalesceBehind
+                && !s.remote_replay_pacer_.due(current_tick(), s.input_rewind_tick_, reach, true)) {
+            ++s.input_rewinds_deferred_;
             return;
         }
         const uint32_t anchor = s.input_rewind_tick_;
@@ -80,6 +86,7 @@ namespace bmmo::session {
         const std::string reason = own ? "own input substituted at tick " + std::to_string(anchor)
                                        : entity + " input corrected at tick " + std::to_string(anchor);
         if (has_own) s.own_replay_pacer_.ran();
+        s.remote_replay_pacer_.ran();
         const uint32_t standard = s.rollback_.thresholds().max_resim_ticks;
         if (rewind_world(anchor - 1, now, input_at, reason, reach > standard ? reach : 0)) {
             if (reach > standard && now - (anchor - 1) > standard) ++s.resync_window_rewinds_;

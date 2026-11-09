@@ -79,6 +79,15 @@ namespace bmmo::session {
         return kPacerRebaseFrames + static_cast<double>(std::abs(outstanding));
     }
 
+    // A resync hold (resync design 2.6.6) stops the clock while the server's
+    // runs on: the ticks it held are owed to the schedule, and dropping them
+    // (moving the origin by the hold) made the client late by the hold's
+    // length for good - the server read that as lateness and raised the
+    // lead (2026-11-08 public test: a 316 ms hold, the next assign's delta
+    // -21).  The pacer keeps up to this many of them to catch up, short of
+    // the rebase threshold by a margin; a longer hold drops the rest.
+    inline constexpr double kHoldCatchUpFrames = kPacerRebaseFrames - 8.0;
+
     // One SessionLead's slew of the tick clock.  The caller asks advance()
     // with the tick periods of wall time since the previous call and how far
     // its pacer is behind its schedule, and moves its origin by what it
@@ -94,6 +103,10 @@ namespace bmmo::session {
         // that cannot run at 2x (a slow CPU, a stall) slews more slowly
         // instead of falling behind by the slew and reading as a stall.
         static constexpr double kRaiseMaxBehind = 1.0;
+        // A raise of k gains its ticks in about k periods while the pacer
+        // keeps up, 2k with every other render; past 2k plus this grace it
+        // is stalled (finish_reanchored).
+        static constexpr double kStallGracePeriods = 66.0;
 
         // A new adjustment.  The server takes no decision while one is
         // unacknowledged, and this one is acknowledged only when it ends, so
@@ -105,6 +118,7 @@ namespace bmmo::session {
             delta_ = delta;
             applied_ = 0;
             credit_ = 0.0;
+            elapsed_ = 0.0;
         }
         bool active() const { return active_; }
         uint32_t seq() const { return seq_; }
@@ -114,11 +128,18 @@ namespace bmmo::session {
         int outstanding() const { return active_ ? delta_ - applied_ : 0; }
         // The whole delta moved: the caller acknowledges it (finish).
         bool done() const { return active_ && applied_ == delta_; }
+        // A raise that has not moved its delta in 2k + kStallGracePeriods
+        // periods: the client cannot run ahead (a slow CPU, a pacer that
+        // stays behind).
+        bool stalled() const {
+            return active_ && delta_ > 0 && applied_ < delta_ && elapsed_ > 2.0 * delta_ + kStallGracePeriods;
+        }
 
         // `wall_ticks`: tick periods since the previous call; `behind`: the
         // pacer's expected frame less its next frame (>= 0: a frame is due).
         int advance(double wall_ticks, double behind) {
             if (!active_ || applied_ == delta_ || wall_ticks <= 0.0) return 0;
+            elapsed_ += wall_ticks;
             if (delta_ > 0) {
                 if (behind >= kRaiseMaxBehind) return 0;
                 credit_ = std::min(credit_ + wall_ticks, 1.0);
@@ -145,6 +166,7 @@ namespace bmmo::session {
             delta_ = 0;
             applied_ = 0;
             credit_ = 0.0;
+            elapsed_ = 0.0;
             return applied;
         }
 
@@ -155,8 +177,14 @@ namespace bmmo::session {
         // ack, sent before the request on the same reliable channel, says
         // all of it - one that said only the part moved would re-anchor the
         // client short of the lead the server decided, and late again from
-        // its first frame.
+        // its first frame.  Except a stalled raise: a client that could not
+        // run ahead for it is late for its own reasons, not the path's, and
+        // a lead it never reached does not make it on time - acknowledged in
+        // full at every resync, such raises ratcheted a 60 ms player from 15
+        // to the 80 cap, past what its reach could take (2026-11-08 public
+        // test).  It acknowledges what it moved.
         int finish_reanchored() {
+            if (stalled()) return finish();
             const int whole = active_ ? delta_ : 0;
             finish();
             return whole;
@@ -168,5 +196,6 @@ namespace bmmo::session {
         int delta_ = 0;
         int applied_ = 0;
         double credit_ = 0.0;
+        double elapsed_ = 0.0;   // tick periods since start
     };
 }
