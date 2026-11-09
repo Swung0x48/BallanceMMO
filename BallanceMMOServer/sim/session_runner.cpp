@@ -514,6 +514,7 @@ namespace bmmo::sim {
                 info.spawn_rotation[3] = rotation.w;
             }
             info.resetpoints = s->world->resetpoints();
+            info.ready_at = clock_->now(bmmo::session::clock_site::runner_world_ready);
             if (callbacks_.on_world_ready) callbacks_.on_world_ready(info);
         });
     }

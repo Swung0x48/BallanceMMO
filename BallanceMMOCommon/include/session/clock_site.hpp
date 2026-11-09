@@ -124,6 +124,7 @@ namespace bmmo::session {
         retail_connected,            // core host: whether the connection is up, where that steers the session (K7d; a value, not a time)
         retail_operator,             // automation: whether a gated verb is asked of the server (connected; a value)
         server_input_stall,          // check_stalled_members: a member's time since its last input datagram
+        runner_world_ready,          // a world boot's end: the start barrier's origin (world_ready_info::ready_at)
         count_
     };
 
@@ -140,7 +141,7 @@ namespace bmmo::session {
             "wait_test_stall", "wait_room_list", "wait_hold", "wait_test_pause", "wait_pace", "login_uuid",
             "retail_deadline", "retail_reload", "retail_hold_frame", "retail_hold_armed", "retail_prep", "retail_net",
             "retail_inbox", "retail_pace_origin", "retail_hold_release", "retail_blocking_wait", "retail_display",
-            "retail_connected", "retail_operator", "server_input_stall"};
+            "retail_connected", "retail_operator", "server_input_stall", "runner_world_ready"};
         static_assert(sizeof(names) / sizeof(names[0]) == static_cast<size_t>(clock_site::count_),
                       "a name for every clock site");
         const auto i = static_cast<size_t>(site);

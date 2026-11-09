@@ -203,6 +203,12 @@ namespace bmmo::sim {
     struct world_ready_info {
         uint32_t session = 0;
         bool ok = false;
+        // The instant the boot ended (the runner's clock, read at the end of
+        // the boot): the start barrier counts from it.  The runner's logical
+        // instant cannot: the boot blocks the runner, so it is still the boot
+        // request's, and the passes queued meanwhile carry their own earlier
+        // stamps.
+        std::chrono::steady_clock::time_point ready_at{};
         uint64_t anchor_hash = 0, anchor_surfaces = 0;
         float spawn_position[3] = {};
         float spawn_rotation[4] = {0.0f, 0.0f, 0.0f, 1.0f};

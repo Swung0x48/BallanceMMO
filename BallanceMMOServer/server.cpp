@@ -825,13 +825,6 @@ public:
         // boot for ever.  Checked by check_start_barriers() from the main loop.
         std::chrono::steady_clock::time_point start_deadline{};
         bool start_barrier_armed = false;
-        // The deadline is taken at the main loop's first barrier check after
-        // the world is ready, not in on_world_ready: that runs on the runner
-        // right after the boot, at the logical instant the boot began (the
-        // boot blocks the runner, its clock does not move), so a 15 s boot
-        // used to leave the members 5 s of the 20 (T3C S0: three of 28 retail
-        // starts "did not report ready", their boots 12-15 s instead of 6-7).
-        bool start_deadline_pending = false;
         uint64_t anchor_hash = 0, anchor_surfaces = 0;
         // Protocol 12 (sector placement design 2.4): the world's placement
         // signature at its anchor, compared with every member's that declares
@@ -1656,10 +1649,17 @@ public:
         // The barrier starts now: from here on check_start_barriers() will drop
         // members that never answer with SessionReady once the window is up.
         s.start_barrier_armed = true;
-        s.start_deadline_pending = true;   // check_start_barriers takes it
+        // From the boot's end (world_ready_info::ready_at), not from this
+        // handler's instant: it runs on the runner at the logical instant the
+        // boot began - the boot blocks the runner - so a 15 s boot left the
+        // members 5 s of the 20 (T3C S0: 3 of 28 retail starts "did not report
+        // ready", their boots 12-15 s instead of 6-7; 5d354e68's first-check
+        // rule did not hold: the passes queued during the boot carry their
+        // earlier stamps).
+        s.start_deadline = info.ready_at + bmmo::sim::kStartBarrierTimeout;
         Printf("Physics session %u: world ready %.3f s after the boot request (anchor %016llx, placement %016llx), "
                "SessionStart sent to %zu players.", s.id,
-               std::chrono::duration<double>(instant(bmmo::session::clock_site::server_boot_log) - s.boot_requested).count(),
+               std::chrono::duration<double>(info.ready_at - s.boot_requested).count(),
                static_cast<unsigned long long>(s.anchor_hash), static_cast<unsigned long long>(s.anchor_placement),
                s.members.size());
     }
@@ -2807,10 +2807,6 @@ public:
         for (auto& [id, s]: physics_sessions_) {
             if (!s.start_barrier_armed || !s.world_ready) continue;
             if (runner_->running(id)) { s.start_barrier_armed = false; continue; }
-            if (s.start_deadline_pending) {
-                s.start_deadline_pending = false;
-                s.start_deadline = now + bmmo::sim::kStartBarrierTimeout;
-            }
             if (now < s.start_deadline) continue;
             s.start_barrier_armed = false;
             size_t silent = 0;
