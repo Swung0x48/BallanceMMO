@@ -1009,6 +1009,7 @@ namespace bmmo::session {
         bmmo::session_resync_state_msg resync_state_;
         uint32_t resync_state_arrived_ = 0;
         uint32_t resync_wait_frames_ = 0;
+        uint32_t resync_walk_frames_ = 0;   // step A5: frames a late joiner's state waited for its level walk
         // Bodies a state stopped waiting for (try_apply_resync's bound): this
         // world lost them (a stone ball fallen off, a removed box) while the
         // server keeps them; later states do not wait for them again.

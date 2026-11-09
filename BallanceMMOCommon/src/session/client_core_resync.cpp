@@ -45,6 +45,9 @@ namespace bmmo::session {
         // asked for a state that named it again, until the level ended.
         constexpr uint32_t kBodyWaitFrames = kNavigationWaitFrames;
         constexpr uint32_t kBodyWaitReachMargin = 2;
+        // Step A5: how long a late joiner's state waits for the level's own
+        // walk to end - the gate's own bound, plus the walk.
+        constexpr uint32_t kWalkWaitFrames = 2 * static_cast<uint32_t>(sector_union::kLevelWalkWait);
     }
 
     // post_step's tracked set, for a record made outside a frame (the
@@ -75,6 +78,7 @@ namespace bmmo::session {
         s.resync_old_tick_ = old_tick;
         s.resync_delta_ = static_cast<int64_t>(old_tick) - static_cast<int64_t>(anchor);
         s.resync_wait_frames_ = 0;
+        s.resync_walk_frames_ = 0;
         s.have_resync_state_ = false;
         s.resync_state_ = bmmo::session_resync_state_msg{};
         s.pending_deaths_.clear();
@@ -455,6 +459,35 @@ namespace bmmo::session {
             }
             ++s.resync_deferred_ticks_;
             return false;
+        }
+        // Step A5: a late joiner's anchor is the level start, and its own
+        // sector-1 walk runs in its first frames - over several frames
+        // (the manager's delayed links), placing every module of the sector
+        // (Set World Matrix, which no record carries) and resetting their
+        // scripts.  The server's state at S has run that walk long before:
+        // its scripts and bodies replace the walk's, and the walk's placement
+        // is the server's (the same rows, the same matrices).  A state
+        // applied while the walk runs cancels it halfway (the manager is
+        // restored idle: the sector's modules stay unplaced - Level 6's
+        // P_Modul_18_MF001 on its level-file matrix, 756 m from its row), or,
+        // re-issued by the re-step, walks the sector again over the server's
+        // mid-run modules (a module reset: their proximity checks out of phase
+        // with every other world for good).  So the state waits until the
+        // walk was seen and the manager is idle again; the activation is then
+        // dropped below.  Bounded: the gate's timeout opens it, and the reach.
+        if (s.resync_join_) {
+            const auto& opened = s.sectors_.walk_open();
+            const bool walking = !s.sectors_.walk().seen || (opened.known && platform_.sector_manager_active());
+            if (walking && !opened.timed_out && s.resync_walk_frames_ < kWalkWaitFrames
+                    && depth + kBodyWaitReachMargin < s.rollback_.resync_reach()) {
+                if (s.resync_walk_frames_++ == 0)
+                    logf("resync: the state of tick %u waits at tick %u for this world's own level walk", anchor, now);
+                ++s.resync_deferred_ticks_;
+                return false;
+            }
+            if (s.resync_walk_frames_)
+                logf("resync: the state of tick %u waited %u frame(s) for the level walk (%s)", anchor, s.resync_walk_frames_,
+                     walking ? "still running: goes on" : "ended");
         }
         if (s.resync_wait_frames_)
             logf("resync: the state of tick %u waited %u frame(s) for its bodies", anchor, s.resync_wait_frames_);

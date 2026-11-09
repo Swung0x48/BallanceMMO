@@ -8358,6 +8358,39 @@ namespace {
         }
     }
 
+    // R1 joiner: a late joiner's state that arrives before its own level walk
+    // has ended waits for it - applied halfway, the restore cancels the walk
+    // (the sector's modules stay unplaced), and re-issued by the re-step it
+    // resets the server's mid-run modules.  Not seen yet, then running: the
+    // state waits; the manager idle again: applied, the walk's activation
+    // dropped.
+    TEST(SessionClientCoreResync, ALateJoinersStateWaitsForItsOwnLevelWalk) {
+        flow_fake fake;
+        session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+        run_to_anchor(core, fake);
+        core.on_session_assign(exact_assign(9, 140));
+        auto& s = state_of(core);
+        ASSERT_TRUE(s.resync_join_);
+        b1_frames(core, 140, 141);
+        deliver(core, resync_state(140, {1}));
+        EXPECT_TRUE(s.resync_pending_) << "the walk not seen yet";
+        EXPECT_NE(std::find(fake.calls.begin(), fake.calls.end(),
+                            "log:0:resync: the state of tick 139 waits at tick 141 for this world's own level walk"),
+                  fake.calls.end());
+        fake.manager_active = true;   // the walk runs 142-144
+        b1_frames(core, 142, 144);
+        EXPECT_TRUE(s.sectors_.walk().seen);
+        EXPECT_FALSE(steps{core}.try_apply_resync("retry")) << "the walk still runs";
+        fake.manager_active = false;
+        b1_frames(core, 145, 145);
+        const size_t from = fake.calls.size();
+        EXPECT_TRUE(steps{core}.try_apply_resync("retry"));
+        const auto calls = since(fake.calls, from);
+        EXPECT_FALSE(s.resync_pending_);
+        EXPECT_EQ(s.resyncs_restepped_, 1u);
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "forget_pending_activations:140:142"), calls.end());
+    }
+
     // Step A5 review fix-up: the level-walk drop is the late joiner's alone,
     // and only for a walk seen in the current numbering.  (a) A running
     // member's exact resync whose window holds its own walk (a request in
@@ -8924,7 +8957,11 @@ namespace {
         ASSERT_TRUE(s.remotes_.at(4).physicalized) << "made live at base";
         ASSERT_FALSE(s.remotes_.at(4).birth_known) << "not at its stamp 112";
         core.on_session_event(event_message(4, bmmo::session::event_type::Unphysicalize, 142, 142));
-        b1_frames(core, 143, 146, [&](uint32_t t) { steps{core}.apply_held_lifecycle(t - 1); });
+        b1_frames(core, 143, 146, [&](uint32_t t) {
+            steps{core}.apply_held_lifecycle(t - 1);
+            fake.manager_active = t >= 144 && t <= 145;   // the level's own walk
+        });
+        fake.manager_active = false;
         ASSERT_FALSE(s.remotes_.at(4).physicalized) << "its owner left at 142";
         auto msg = resync_state(140, {1});
         bmmo::session::body_state ball;
