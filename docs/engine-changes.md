@@ -1539,6 +1539,25 @@ on Level 11's, against 17-28 us for the rest of the hash - every frame of the
 public test's "15 ms frames without a rewind" (a5). No simulated value
 changes; server journal replays and the fast LBM are exact.
 
+## Bridge notes: a body by the entity's CK id (bridge API v36, no engine change)
+
+`has_body_id` (T3C) answers what `get_body_state` answers for one entity - a
+physics object with its IVP object - but takes the entity's CK id instead of
+its name (`physics_state.cpp` `has_body_id`; `physics_view::has_body_id`,
+`physics_direct::has_body_id`; `trafo_set_hooks::has_body_id`). The trafo
+hold's effect check (`trafo_sets.hpp` `effect_check`, every tick from the
+anchor on, a diagnostic: the `trafo_original_leaks` count and line) asked
+`has_body` of the 51 original pieces by name, and each lookup by name scans
+the context's 3D entities: ~0.3 ms of a retail Level 12 frame (T3C's "other"
+census: 0.25-0.35 ms of the live core). The pieces' ids are taken at `arm`
+beside their names. An entity lookup scope over the 51 lookups was tried first
+and saved only ~0.05 ms: the scope's name table is built from every 3D entity
+once per scope, about what the scans it replaces cost. Nothing simulated reads
+the check, so no simulated value changes. Measured (the census, E-core retail,
+one-way lag 150, 3 runs x 2 clients, frames without a rewind, means): the
+trafo poll 0.25-0.35 -> 0.01 ms; the live core L12_h 3.09 -> 2.72, ctl_h
+2.75 -> 2.52, L12 3.12 -> 2.83 ms.
+
 ---
 
 ## Notes on things that were verified *not* to need engine changes

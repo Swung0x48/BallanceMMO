@@ -1183,3 +1183,33 @@ by arm, 9.8k hits per client, 0 mismatches; retail verify (L12, L12_h, L11 ctl_h
 
 The retail recipes run K = 8 slots; the public servers run 20 (29 of 30 rooms), about three times the omitted copies,
 so the saving there is about three times as large (a projection, measured by T3C's public-test re-drive).
+
+## Measured (T3C: the live core's "other" share)
+
+The census (S0's recipe) with twelve more buckets: the inclusive post_step, inbound drain and pre_step, and self
+time - an enclosed timed scope excluded - for the own trafo poll and retirement, drain_body_events,
+record_script_order, the tracked set's build, rollback_.record, the input uplink, the airship and spawn ghost frames
+and place_probes; plus a count of physics_view's by-name lookups. E-core retail, one-way lag 150, 3 runs, frames
+without a rewind, means in us:
+
+| | L12_h | ctl_h | L12 |
+|---|---|---|---|
+| live core | 3088 | 2751 | 3117 |
+| of it uncovered before ("other") | 916 | 833 | 934 |
+| trafo poll (the effect check) | 344 | 251 | 349 |
+| place_probes (the union) | 146 | 106 | 155 |
+| post_step not in a bucket | 91 | 79 | 94 |
+| core_host_frame outside post / drain / pre | 80 | 78 | 80 |
+| drain_body_events | 56 | 54 | 49 |
+| uplink | 47 | 55 | 50 |
+| ghosts | 34 | 32 | 41 |
+| tracked + record | 60 | 116 | 58 |
+| drain + order + pre_step rest | 58 | 62 | 58 |
+| by-name lookups: count, time (across buckets) | 67, 528 | 77, 447 | 68, 539 |
+
+The trafo effect check asked has_body of the 51 original pieces by name every frame; each lookup scans the 3D
+entities. By CK id (bridge API v36, docs/engine-changes.md): trafo poll 8-11 us, by-name lookups 16-26 per frame,
+live core 3088 -> 2724 (L12_h), 2751 -> 2521 (ctl_h), 3117 -> 2828 us (L12). An entity lookup scope over the 51
+lookups saved only ~50 us (its table is built from every 3D entity once per scope). Next by size: the union's probe
+placement (grows with K), the per-frame GetScriptByName("Gameplay_Ingame") in core_host_frame, the event drain's
+256 KiB buffer.

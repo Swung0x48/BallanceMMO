@@ -208,6 +208,10 @@ namespace bmmo::physics {
     // be null or too small.  Poses are the object pose at the environment's
     // current time, which after a tick is the last PSI.
     int list_bodies(CKIpionManager* physics, body_state* out, int max);
+    // Whether the 3D entity with this id has a physics body now: the answer
+    // get_body_state gives for the entity, without its lookup by name (T3C,
+    // bridge API v36: the trafo effect check's original pieces, every tick).
+    bool has_body_id(CKIpionManager* physics, uint32_t entity_id);
     // One body, by CK3dEntity name.
     bool get_body_state(CKIpionManager* physics, const char* entity_name, body_state& out,
                         std::string& error);

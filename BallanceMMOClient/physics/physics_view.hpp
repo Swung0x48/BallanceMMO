@@ -195,6 +195,8 @@ namespace bmmo::physics {
         // clock reset, right after the trafo quiesce, restores the originals
         // (game/host_backend.hpp trafo_hooks_for leaves the hook empty).
         bool has_body(const char* entity_name) const;
+        // The same answer for the entity with this CK id (bridge v36).
+        bool has_body_id(uint32_t entity_id) const;
         bool trafo_set_register(uint32_t player, const uint32_t frames[3], const uint32_t* explosions, int explosion_count,
                                 bmmo_physics_trafo_set_report& out, std::string& error) const;
         bool trafo_set_unregister(uint32_t player, std::string& error) const;

@@ -1025,6 +1025,10 @@ namespace bmmo::physics {
 
     // ---- bridge API v21 / v22: the trafo sets (step T4) ----
 
+    bool physics_view::has_body_id(uint32_t entity_id) const {
+        return available() && api_->has_body_id && api_->has_body_id(manager_, entity_id) != 0;
+    }
+
     bool physics_view::has_body(const char* entity_name) const {
         if (!available() || !entity_name || !entity_name[0]) return false;
         bmmo_physics_body_state state{};

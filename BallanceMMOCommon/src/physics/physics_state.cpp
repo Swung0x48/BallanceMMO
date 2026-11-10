@@ -1356,6 +1356,14 @@ namespace bmmo::physics {
 
     bmmo_physics_lookup_totals entity_lookup_totals() { return lookup_scope().totals; }
 
+    bool has_body_id(CKIpionManager* physics, uint32_t entity_id) {
+        if (!physics || !physics->m_Context || entity_id == 0) return false;
+        CK3dEntity* entity = CK3dEntity::Cast(physics->m_Context->GetObject(static_cast<CK_ID>(entity_id)));
+        if (!entity) return false;
+        PhysicsObject* object = physics->GetPhysicsObject(entity);
+        return object && object->m_RealObject;
+    }
+
     bool get_body_state(CKIpionManager* physics, const char* entity_name, body_state& out,
                         std::string& error) {
         error.clear();
