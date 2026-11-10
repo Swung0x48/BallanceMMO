@@ -4,13 +4,10 @@
 #include "message_utils.hpp"
 
 namespace bmmo {
-    // client -> server, reliable (protocol 38, step A6): what a member's
-    // frames looked like in the last kTelemetryTicks ticks, for the server's
-    // log (the public test of 2026-11-08 uploaded no client log, so nobody's
-    // frame times were known).  The server logs it and nothing reads it: no
-    // world, journal or schedule depends on it.  Times in 0.1 ms, saturated.
-    struct session_telemetry_msg : public serializable_message {
-        static constexpr uint8_t kSchema = 1;
+    // What a member's frames looked like in the last kTelemetryTicks ticks
+    // (step A6): the SessionTelemetry's fields, a plain copyable value (the
+    // core keeps the last one for the F3 panel).  Times in 0.1 ms, saturated.
+    struct session_telemetry {
         enum host_kind : uint8_t { HostRetail = 1, HostHeadless = 2 };
 
         uint32_t session = 0;
@@ -35,6 +32,15 @@ namespace bmmo {
         // How long a SessionRemoteInput waited from the transport's receive
         // stamp to its handover to the session core (step A5's measure).
         uint16_t inbound_p50 = 0, inbound_p99 = 0, inbound_max = 0;
+    };
+
+    // client -> server, reliable (protocol 38, step A6): the session_telemetry
+    // of the window, for the server's log (the public test of 2026-11-08
+    // uploaded no client log, so nobody's frame times were known).  The
+    // server logs it and nothing reads it: no world, journal or schedule
+    // depends on it.
+    struct session_telemetry_msg : public serializable_message, public session_telemetry {
+        static constexpr uint8_t kSchema = 1;
 
         session_telemetry_msg() : serializable_message(bmmo::SessionTelemetry) {}
 

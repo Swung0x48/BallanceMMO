@@ -115,6 +115,8 @@ namespace bmmo::session {
             msg.inbound_max = tenths(w.inbound.empty() ? 0.0 : w.inbound.back());
             msg.serialize();
             platform_.send(msg.raw.str(), send_mode::reliable);
+            w.last = msg;   // the values (the F3 panel)
+            w.have_last = true;
         }
         w.based = true;
         w.first_tick = tick;

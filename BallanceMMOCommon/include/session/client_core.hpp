@@ -104,6 +104,7 @@
 #include "../message/session_resync_state_msg.hpp"
 #include "../message/session_start_msg.hpp"
 #include "../message/session_clock_ack_msg.hpp"
+#include "../message/session_telemetry_msg.hpp"
 #include "../message/session_start_at_msg.hpp"
 #include "../message/session_start_status_msg.hpp"
 #include "start_handshake.hpp"
@@ -826,6 +827,8 @@ namespace bmmo::session {
             std::vector<float> interval, work, inbound;
             uint64_t rewinds = 0, replayed = 0, resyncs = 0, holds = 0, starved = 0;
             double behind_max = 0.0;
+            bool have_last = false;          // the last window sent (the F3 panel's)
+            bmmo::session_telemetry last{};
         } telemetry_;
         uint32_t subst_late_logs_ = 0, subst_unresolved_logs_ = 0;
         // The frames each uplink datagram carried (remember_sent), and the
@@ -1731,6 +1734,11 @@ namespace bmmo::session {
         // network thread's poll and the wait for the frame).  Measures only.
         void note_inbound_wait(double ms) {
             if (config.telemetry_host && ms >= 0.0) s.telemetry_.inbound.push_back(static_cast<float>(ms));
+        }
+        // The last telemetry window this session sent (the F3 panel), or
+        // nullptr before the first one.
+        const bmmo::session_telemetry* last_telemetry() const {
+            return s.telemetry_.have_last ? &s.telemetry_.last : nullptr;
         }
         // The input basis (design 1.2): the last camera reference seen,
         // nullptr until one was.

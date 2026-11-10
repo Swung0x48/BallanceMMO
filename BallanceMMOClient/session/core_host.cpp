@@ -6620,13 +6620,30 @@ std::string BallanceMMOClient::core_host_overlay_text() {
     auto& core = *host.core;
     const auto& rs = core.rollback_stats();
     text += std::format("Tick: {}\n", core.current_tick());
-    text += std::format("Snapshots: {} ok, {} corrected\n", rs.matched, rs.mismatched);
-    if (rs.snapshots)
-        text += std::format("Rollbacks: {} ({:.0f}%), {} ticks resim\n", rs.rollbacks,
-                            100.0 * static_cast<double>(rs.mismatched) / static_cast<double>(rs.snapshots), rs.resim_ticks);
-    text += std::format("Max error: {:.3f} m\n", rs.max_error);
+    if (rs.snapshots) {
+        text += std::format("Snapshots: {} ok, {} corrected\n", rs.matched, rs.mismatched);
+        text += std::format("Max error: {:.3f} m\n", rs.max_error);
+    }
+    // Every rollback class (with the snapshots off, the default, the input
+    // corrections are nearly all of them).
+    text += std::format("Rollbacks: {}, {} ticks resim\n", rs.rollbacks, rs.resim_ticks);
     if (rs.too_far || rs.frozen || core.resyncs_sent())
         text += std::format("Too far: {}  Frozen: {}  Resyncs: {}\n", rs.too_far, rs.frozen, core.resyncs_sent());
     if (!core.remotes().empty()) text += std::format("Remote balls: {}\n", core.remotes().size());
+    // Step A6: the last telemetry window the server got (every 10 s).
+    if (const auto* t = core.last_telemetry()) {
+        const auto ms = [](uint16_t tenths) { return tenths / 10.0; };
+        const double seconds = t->ticks / static_cast<double>(bmmo::session::TICK_RATE);
+        text += std::format("Last {:.0f} s (to tick {}):\n", seconds, t->tick);
+        text += std::format("  Frame p50 {:.1f}  p99 {:.1f}  p999 {:.1f}  max {:.1f} ms\n", ms(t->interval_p50),
+                            ms(t->interval_p99), ms(t->interval_p999), ms(t->interval_max));
+        text += std::format("  Frames over 33 / 50 / 100 ms: {} / {} / {}\n", t->over_33, t->over_50, t->over_100);
+        text += std::format("  Session work p99 {:.1f}  max {:.1f} ms\n", ms(t->work_p99), ms(t->work_max));
+        text += std::format("  Rollbacks {:.1f}/s, {:.1f} ticks each\n", seconds > 0 ? t->rewinds / seconds : 0.0,
+                            t->rewinds ? static_cast<double>(t->replayed) / t->rewinds : 0.0);
+        text += std::format("  Relay wait p50 {:.1f}  p99 {:.1f} ms\n", ms(t->inbound_p50), ms(t->inbound_p99));
+        text += std::format("  Behind max {:.1f} ticks  Resyncs {}  Holds {}  Starved {}\n", ms(t->behind_max),
+                            t->resyncs, t->holds, t->starved);
+    }
     return text;
 }
