@@ -75,6 +75,7 @@
 #include <message/session_remote_input_msg.hpp>
 #include <message/session_resync_msg.hpp>
 #include <message/session_resync_state_msg.hpp>
+#include <message/session_telemetry_msg.hpp>
 
 // The core's state and its frame's steps are private (step E11); the tests
 // reach them through this friend.  steps{core}.<step>(...) calls a private
@@ -109,6 +110,7 @@ namespace bmmo::session {
         BMMO_CORE_STEP(sector_union_pass)
         BMMO_CORE_STEP(poll_own_sector)
         BMMO_CORE_STEP(replay_corrected_inputs)
+        BMMO_CORE_STEP(telemetry_tick)
         BMMO_CORE_STEP(retry_owed_resync)
         BMMO_CORE_STEP(take_forced_own)
         BMMO_CORE_STEP(play_forced_own)
@@ -7192,6 +7194,57 @@ namespace {
         EXPECT_EQ(text.substr(text.size() - tail_text.size()), tail_text) << "the last field, not cut off";
         EXPECT_GT(text.size(), 256u) << "past the first buffer, whole";
         EXPECT_EQ(text.find('\n'), std::string::npos);
+    }
+
+    // Step A6: the first call only starts the telemetry window; one
+    // SessionTelemetry (reliable) once it spans kTelemetryTicks, with the
+    // window's frame times and the counters' deltas; nothing without
+    // telemetry_host.
+    TEST(SessionClientCoreReport, TelemetryEveryWindow) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        auto& s = state_of(core);
+        s.session_ = 5;
+        steps{core}.telemetry_tick(100);
+        EXPECT_TRUE(fake.sent.empty()) << "telemetry_host 0: nothing";
+        core.config.telemetry_host = bmmo::session_telemetry_msg::HostHeadless;
+        steps{core}.telemetry_tick(100);
+        EXPECT_TRUE(fake.sent.empty()) << "the first call starts the window";
+        for (int i = 0; i < 100; ++i) core.note_frame_time(15.0, 2.0);
+        core.note_frame_time(60.0, 40.0);
+        core.note_frame_time(120.0, 3.0);
+        core.note_pacer_behind(2.5);
+        s.resyncs_sent_ += 1;
+        s.input_starved_ += 3;
+        steps{core}.telemetry_tick(759);
+        EXPECT_TRUE(fake.sent.empty()) << "659 ticks: inside the window";
+        steps{core}.telemetry_tick(760);
+        ASSERT_EQ(fake.sent.size(), 1u);
+        EXPECT_EQ(fake.sent[0].second, send_mode::reliable);
+        const auto m = decode<bmmo::session_telemetry_msg>(fake.sent[0].first);
+        EXPECT_EQ(m.session, 5u);
+        EXPECT_EQ(m.tick, 760u);
+        EXPECT_EQ(m.host, bmmo::session_telemetry_msg::HostHeadless);
+        EXPECT_EQ(m.ticks, 660);
+        EXPECT_EQ(m.frames, 102);
+        EXPECT_EQ(m.interval_p50, 150);
+        EXPECT_EQ(m.interval_p99, 600) << "the 101st of 102";
+        EXPECT_EQ(m.interval_max, 1200);
+        EXPECT_EQ(m.over_33, 2);
+        EXPECT_EQ(m.over_50, 2);
+        EXPECT_EQ(m.over_100, 1);
+        EXPECT_EQ(m.work_max, 400);
+        EXPECT_EQ(m.resyncs, 1);
+        EXPECT_EQ(m.starved, 3);
+        EXPECT_EQ(m.behind_max, 25);
+        steps{core}.telemetry_tick(1419);
+        EXPECT_EQ(fake.sent.size(), 1u) << "a new window from 760";
+        steps{core}.telemetry_tick(1420);
+        ASSERT_EQ(fake.sent.size(), 2u);
+        const auto next = decode<bmmo::session_telemetry_msg>(fake.sent[1].first);
+        EXPECT_EQ(next.frames, 0);
+        EXPECT_EQ(next.resyncs, 0);
+        EXPECT_EQ(next.behind_max, 0);
     }
 
     // The window: line (design 1.3 step 31): nothing on the first edge

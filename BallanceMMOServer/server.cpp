@@ -2300,6 +2300,26 @@ public:
                bmmo::sim::effective_lead_ticks(lead->second.assigned_lead, lead->second.offset));
     }
 
+    // Step A6: a member's frame times, rewinds and resyncs of its last 10 s,
+    // one log line (with the link's ping as GNS sees it now).  Read by
+    // nothing: no world, journal or schedule depends on it.
+    void handle_session_telemetry(bmmo::net::connection c, const bmmo::session_telemetry_msg& m) {
+        auto cs = client_session_.find(c);
+        if (cs == client_session_.end() || cs->second != m.session) return;
+        bmmo::net::connection_status status{};
+        const int ping = link_status(c, status) ? status.ping_ms : -1;
+        auto ms = [](uint16_t tenths) { return tenths / 10.0; };
+        Printf("Physics session %u: telemetry %s (#%u, %s): tick=%u ticks=%u frames=%u interval p50=%.1f p99=%.1f "
+               "p999=%.1f max=%.1f ms over33=%u over50=%u over100=%u work p99=%.1f max=%.1f ms rewinds=%u "
+               "replayed=%u resyncs=%u holds=%u starved=%u behind=%.1f ping=%d ms",
+               m.session, get_client_name(c), c,
+               m.host == bmmo::session_telemetry_msg::HostRetail ? "retail"
+                   : m.host == bmmo::session_telemetry_msg::HostHeadless ? "headless" : "unknown",
+               m.tick, m.ticks, m.frames, ms(m.interval_p50), ms(m.interval_p99), ms(m.interval_p999),
+               ms(m.interval_max), m.over_33, m.over_50, m.over_100, ms(m.work_p99), ms(m.work_max), m.rewinds,
+               m.replayed, m.resyncs, m.holds, m.starved, ms(m.behind_max), ping);
+    }
+
     // (Protocol 14-16's SessionGhostPose relay, step BALA, is retired at 17
     // (step BALL): an airship ghost is shown at its owner's legacy ball
     // stream, which tick() relays room-scoped like every other legacy
@@ -5103,6 +5123,12 @@ protected:
             case bmmo::SessionLeadAck: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::session_lead_ack_msg>(networking_msg);
                 handle_session_lead_ack(networking_msg->conn, msg);
+                break;
+            }
+            case bmmo::SessionTelemetry: {   // protocol 38, step A6
+                bmmo::session_telemetry_msg msg{};
+                msg.raw.write(static_cast<const char*>(networking_msg->data), networking_msg->size);
+                if (msg.deserialize()) handle_session_telemetry(networking_msg->conn, msg);
                 break;
             }
 #endif

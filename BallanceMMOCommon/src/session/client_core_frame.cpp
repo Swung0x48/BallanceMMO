@@ -1167,6 +1167,7 @@ namespace bmmo::session {
             const std::string text = window_text(tick, host_values());
             if (!text.empty() && platform_.hooks.window) platform_.hooks.window(text);
         }
+        if (s.assigned_) telemetry_tick(tick);   // step A6
         // The box's own view of this frame, last: the fingerprint of the
         // world the corrections above have finished with, and the bodies
         // when a checkpoint is due.

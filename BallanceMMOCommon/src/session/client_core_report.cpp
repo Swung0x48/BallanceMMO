@@ -15,7 +15,10 @@
 
 #include "session/client_core.hpp"
 
+#include "message/session_telemetry_msg.hpp"
+
 #include <algorithm>
+#include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -58,6 +61,67 @@ namespace bmmo::session {
             if (seen * 100 >= total * 99) return b;
         }
         return client_core_state::kRelayLagBuckets - 1;
+    }
+
+    // Step A6: a SessionTelemetry once the window spans kTelemetryTicks
+    // (reliable, to the server's log).  The first call of a session (or
+    // after the numbering went back) only starts the window.
+    void session_client_core::telemetry_tick(uint32_t tick) {
+        if (!config.telemetry_host) return;
+        auto& w = s.telemetry_;
+        const auto& rs = s.rollback_.stats();
+        const int32_t span = static_cast<int32_t>(tick - w.first_tick);
+        if (w.based && span >= 0 && span < static_cast<int32_t>(client_core_state::kTelemetryTicks)) return;
+        if (w.based && span >= 0) {
+            auto tenths = [](double ms) {
+                return static_cast<uint16_t>(std::min(65535.0, std::max(0.0, std::round(ms * 10.0))));
+            };
+            auto count16 = [](uint64_t n) { return static_cast<uint16_t>(std::min<uint64_t>(n, 65535)); };
+            auto quantile = [](std::vector<float>& v, double q) {   // v sorted
+                if (v.empty()) return 0.0;
+                const size_t i = static_cast<size_t>(std::ceil(q * static_cast<double>(v.size())));
+                return static_cast<double>(v[std::min(v.size(), std::max<size_t>(i, 1)) - 1]);
+            };
+            std::sort(w.interval.begin(), w.interval.end());
+            std::sort(w.work.begin(), w.work.end());
+            bmmo::session_telemetry_msg msg;
+            msg.session = s.session_;
+            msg.tick = tick;
+            msg.host = config.telemetry_host;
+            msg.ticks = count16(static_cast<uint64_t>(span));
+            msg.frames = count16(w.work.size());
+            msg.interval_p50 = tenths(quantile(w.interval, 0.5));
+            msg.interval_p99 = tenths(quantile(w.interval, 0.99));
+            msg.interval_p999 = tenths(quantile(w.interval, 0.999));
+            msg.interval_max = tenths(w.interval.empty() ? 0.0 : w.interval.back());
+            auto over = [&w](double ms) {
+                return static_cast<uint64_t>(w.interval.end() - std::upper_bound(w.interval.begin(), w.interval.end(),
+                                                                                 static_cast<float>(ms)));
+            };
+            msg.over_33 = count16(over(1000.0 / 30.0));
+            msg.over_50 = count16(over(50.0));
+            msg.over_100 = count16(over(100.0));
+            msg.work_p99 = tenths(quantile(w.work, 0.99));
+            msg.work_max = tenths(w.work.empty() ? 0.0 : w.work.back());
+            msg.rewinds = count16(rs.rollbacks - w.rewinds);
+            msg.replayed = static_cast<uint32_t>(std::min<uint64_t>(rs.resim_ticks - w.replayed, 0xFFFFFFFFu));
+            msg.resyncs = count16(s.resyncs_sent_ - w.resyncs);
+            msg.holds = count16(s.resync_holds_ - w.holds);
+            msg.starved = count16(s.input_starved_ - w.starved);
+            msg.behind_max = tenths(w.behind_max);   // ticks, in tenths
+            msg.serialize();
+            platform_.send(msg.raw.str(), send_mode::reliable);
+        }
+        w.based = true;
+        w.first_tick = tick;
+        w.interval.clear();
+        w.work.clear();
+        w.rewinds = rs.rollbacks;
+        w.replayed = rs.resim_ticks;
+        w.resyncs = s.resyncs_sent_;
+        w.holds = s.resync_holds_;
+        w.starved = s.input_starved_;
+        w.behind_max = 0.0;
     }
 
     // One line per kWindowTicks ticks (late-player design 5.1 C1): what

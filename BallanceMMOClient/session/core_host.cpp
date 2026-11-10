@@ -2304,6 +2304,7 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     // scripted own birth on the parking path (the control arm).
     config.own_births_parked = own_births_parked_next.load();
     config.remote_cadence_frames = remote_cadence_next.load();   // step A2
+    config.telemetry_host = bmmo::session_telemetry_msg::HostRetail;   // step A6
     // RC3 (step B5RX, the user: work as if snapshots did not exist): with
     // the session's snapshots off, a body-set change's full snapshot is no
     // correction, only names and rows.
@@ -4145,17 +4146,23 @@ void BallanceMMOClient::core_host_frame() {
         frame_times.session = host.session;
         frame_times.have_last = false;
     }
-    if (frame_times.have_last)
-        frame_times.interval.note(std::chrono::duration<double, std::milli>(frame_started - frame_times.last).count());
+    double interval_ms = -1.0;
+    if (frame_times.have_last) {
+        interval_ms = std::chrono::duration<double, std::milli>(frame_started - frame_times.last).count();
+        frame_times.interval.note(interval_ms);
+    }
     frame_times.last = frame_started;
     frame_times.have_last = true;
     struct frame_time_scope {
         std::chrono::steady_clock::time_point started;
+        double interval_ms;
         ~frame_time_scope() {
-            frame_times.frame.note(
-                    std::chrono::duration<double, std::milli>(bmmo::retail::host_clock().now(bs::clock_site::retail_display) - started).count());
+            const double ms =
+                    std::chrono::duration<double, std::milli>(bmmo::retail::host_clock().now(bs::clock_site::retail_display) - started).count();
+            frame_times.frame.note(ms);
+            if (host.core) host.core->note_frame_time(interval_ms, ms);   // step A6: the telemetry window
         }
-    } frame_time{frame_started};
+    } frame_time{frame_started, interval_ms};
     std::string error;
     // Step BALL: the airship ghosts' CK matrices are physics_RT's for the
     // whole frame (ghost_pins above), the stream's again after it.

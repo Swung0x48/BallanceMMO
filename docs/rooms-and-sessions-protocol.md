@@ -197,6 +197,8 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 
 `session_end_msg`（server → client，reliable）：session u32、reason string ≤ 256。
 
+**协议 38（步骤 A6，2026-11-10）：客户端遥测。** 新消息 `SessionTelemetry`（client → server，reliable；opcode 追加在 `BallStateMute` 之后；`message/session_telemetry_msg.hpp`）。会话核心在每个成员自己的世界里每 `kTelemetryTicks`（660 tick，10 秒）发一条，说明这段时间的帧是什么样子。字段依次为：schema u8（1，其他值拒收）、session u32、tick u32（这段的最后一个 tick，按成员自己的编号）、host u8（1 零售、2 无头）、ticks u16、frames u16，帧间隔（零售：一次 OnProcess 到下一次，包括渲染、实时步进和宿主；无头：帧开始到帧开始）的 p50 / p99 / p999 / max 各 u16（0.1 ms，饱和），长于 33.3 / 50 / 100 ms 的帧数各 u16，会话核心本身在一帧里的耗时（零售 `core_host_frame`，无头 `frame()`，含回滚与重放）p99 / max 各 u16（0.1 ms），这段的回滚次数 u16（各类合计）、重放 tick 数 u32、发出的重同步请求数 u16、进入的重同步等待次数 u16、服务端回报为饥饿的输入报告数 u16、节拍落后的最大值 u16（0.1 tick）。会话开始后（以及编号倒退时）的第一次只开始计时，不发送。服务端只写一行日志 `Physics session S: telemetry NAME (#ID, retail|headless): tick=… ticks=… frames=… interval p50=… p99=… p999=… max=… ms over33=… over50=… over100=… work p99=… max=… ms rewinds=… replayed=… resyncs=… holds=… starved=… behind=… ping=… ms`（ping 是服务端此刻从 GNS 读到的该连接往返时间），任何世界、journal 和调度都不读它；不属于该会话的发送者被忽略。无头客户端 `--no-telemetry` 关闭发送（对照组）；零售客户端总是发送。37 的服务端会把每一条当作无效 opcode 记日志，所以升了版本号。消息布局之外没有 journal 变化。
+
 ## 3. 服务端配置
 
 ```yaml

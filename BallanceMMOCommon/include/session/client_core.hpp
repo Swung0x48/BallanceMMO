@@ -748,6 +748,7 @@ namespace bmmo::session {
         // is kept per source player because a late player shows up in the
         // others' lag for its frames alone.
         static constexpr uint32_t kWindowTicks = 60;
+        static constexpr uint32_t kTelemetryTicks = 660;   // step A6: a SessionTelemetry every 10 s
         uint32_t window_index_ = 0xFFFFFFFFu;
         std::map<uint32_t, std::map<uint32_t, uint32_t>> window_lag_;   // source -> lag -> first arrivals
         std::map<uint32_t, uint32_t> window_inrew_src_;                 // source -> input rewinds naming its ball
@@ -817,6 +818,15 @@ namespace bmmo::session {
         uint64_t input_rewinds_deferred_ = 0;
         uint64_t input_rewinds_deadline_ = 0;   // step A2: cadence waits the reach cut short
         uint64_t input_rewinds_near_ = 0;       // step A2: not held, a corrected ball near the own one
+        // Step A6: the telemetry window (session_telemetry_msg): the host's
+        // frame times since the window began, and the counters then.
+        struct telemetry_window {
+            bool based = false;
+            uint32_t first_tick = 0;
+            std::vector<float> interval, work;
+            uint64_t rewinds = 0, replayed = 0, resyncs = 0, holds = 0, starved = 0;
+            double behind_max = 0.0;
+        } telemetry_;
         uint32_t subst_late_logs_ = 0, subst_unresolved_logs_ = 0;
         // The frames each uplink datagram carried (remember_sent), and the
         // notices of ticks not simulated yet with whether to correct them
@@ -1287,6 +1297,10 @@ namespace bmmo::session {
         // kRemoteCadenceNearMeters of the own ball.  Headless
         // --remote-cadence N; retail 'session cadence N'.
         uint32_t remote_cadence_frames = 0;
+        // Step A6: the SessionTelemetry this host sends every kTelemetryTicks
+        // (bmmo::session_telemetry_msg::host_kind; 0 = none).  Headless
+        // --no-telemetry sets 0.
+        uint8_t telemetry_host = 0;
         // Design 1.2 feature switch (R1): `lifecycle_rewind` - a remote birth
         // stamped in the past is made inside a replay at its tick
         // (make_remote_birth's pending path) and a late body change rewinds
@@ -1700,7 +1714,18 @@ namespace bmmo::session {
         // How far behind its schedule the host's pacer is this frame (the
         // expected frame less the one about to run), every counted frame:
         // a client that is behind coalesces remote corrections.
-        void note_pacer_behind(double behind_ticks) { s.pacer_behind_ = behind_ticks; }
+        void note_pacer_behind(double behind_ticks) {
+            s.pacer_behind_ = behind_ticks;
+            s.telemetry_.behind_max = std::max(s.telemetry_.behind_max, behind_ticks);   // step A6
+        }
+        // Step A6: one frame's times for the telemetry window, every frame -
+        // the period since the previous frame began (negative: none) and the
+        // core's work in it, in ms.  Measures only.
+        void note_frame_time(double interval_ms, double work_ms) {
+            if (!config.telemetry_host) return;
+            if (interval_ms >= 0.0) s.telemetry_.interval.push_back(static_cast<float>(interval_ms));
+            s.telemetry_.work.push_back(static_cast<float>(work_ms));
+        }
         // The input basis (design 1.2): the last camera reference seen,
         // nullptr until one was.
         const float (*previous_cam() const)[3] { return s.previous_cam_valid_ ? s.previous_cam_ : nullptr; }
@@ -2137,6 +2162,7 @@ namespace bmmo::session {
         // relay's and our own substituted frames').
         void replay_corrected_inputs();
         bool correction_near_own_ball() const;   // step A2
+        void telemetry_tick(uint32_t tick);       // step A6
         void calibrate_rewind_cost();
         void retry_owed_resync();
         // Every rewind the core asks of the engine outside a snapshot

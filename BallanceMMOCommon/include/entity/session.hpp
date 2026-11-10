@@ -291,7 +291,11 @@ namespace bmmo::session {
     //      mirrors with them instead of hold-last.  With the option off the
     //      datagrams are byte for byte 36's.  No journal version (a hint is
     //      a prediction: no world's inputs change).
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 37;
+    //  38  SessionTelemetry (session_telemetry_msg.hpp, step A6): a member
+    //      reports its frame times, rewinds and resyncs to the server every
+    //      kTelemetryTicks; the server logs it, nothing else reads it.  A 37
+    //      server would log every one as an invalid opcode.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 38;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
     // The protocol whose SessionStart carries `mechanism_slots` (step Q7).

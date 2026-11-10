@@ -330,6 +330,8 @@ namespace {
         uint32_t starved_resync_reports = bmmo::session::kStarvedResyncReports;
         // Step A2: --remote-cadence N (the core's remote_cadence_frames).
         uint32_t remote_cadence_frames = 0;
+        // Step A6: --no-telemetry (no SessionTelemetry; the A/B control).
+        bool telemetry = true;
         int stall_after_ready_ms = 0;
         bool correct = true;
         bool rollback = true;         // design 9.6; --no-rollback falls back to blending
@@ -627,6 +629,7 @@ namespace {
                   "       [--reach N]   (the rollback's reach pinned at N ticks, 48..120; default: per client, from the relay lag)\n"
                   "       [--rewind-cost R:P]   (the reach's cap from a fixed rewind cost: R ms of restore, P ms a tick; default measured)\n"
                   "       [--starved-resync-reports N]   (N starved input reports in a row ask for a resync; 0 = never; default 330)\n"
+                  "       [--no-telemetry]   (send no SessionTelemetry)\n"
                   "       [--remote-cadence N]   (a remote's correction waits up to N frames after the last input replay; 0 = only while behind)\n"
                   "       [--stall-after-ready MS]   (test: sleep MS ms right after sending SessionReady)\n"
                   "       [--body-set-corrections]   (snapshots off: a body-set change's full snapshot still corrects, as before RC3; the control arm)\n"
@@ -868,6 +871,7 @@ namespace {
                 if (!(v = next())) return false;
                 out.starved_resync_reports = static_cast<uint32_t>(std::max(0, std::atoi(v)));
             }
+            else if (arg == "--no-telemetry") out.telemetry = false;
             else if (arg == "--remote-cadence") {
                 if (!(v = next())) return false;
                 out.remote_cadence_frames = static_cast<uint32_t>(std::max(0, std::atoi(v)));
@@ -2537,6 +2541,7 @@ namespace {
             c.own_birth_move = args_.own_birth_move;
             c.starved_resync_reports = args_.starved_resync_reports;
             c.remote_cadence_frames = args_.remote_cadence_frames;
+            c.telemetry_host = args_.telemetry ? bmmo::session_telemetry_msg::HostHeadless : 0;
             c.rollback = args_.rollback;
             c.correct = args_.correct;
             c.trace = args_.trace;
@@ -3705,7 +3710,14 @@ namespace {
             ++flow_steps_;
             const auto frame_started = std::chrono::steady_clock::now();
             frame();
-            note_frame_time(std::chrono::steady_clock::now() - frame_started);
+            const auto frame_ended = std::chrono::steady_clock::now();
+            note_frame_time(frame_ended - frame_started);
+            // Step A6: the telemetry window's times (start to start, and the frame).
+            using ms = std::chrono::duration<double, std::milli>;
+            core_.note_frame_time(have_last_frame_ ? ms(frame_started - last_frame_started_).count() : -1.0,
+                                  ms(frame_ended - frame_started).count());
+            last_frame_started_ = frame_started;
+            have_last_frame_ = true;
             paced_frames_ = static_cast<int64_t>(next_frame);   // step DX9: the frame the origin's schedule ran
             phase_kept_unrun_ = false;
         }
@@ -3764,6 +3776,8 @@ namespace {
         std::vector<uint32_t> frame_time_hist_ = std::vector<uint32_t>(kFrameTimeBuckets, 0);
         uint64_t frame_time_count_ = 0;
         double frame_time_max_ms_ = 0.0;
+        std::chrono::steady_clock::time_point last_frame_started_{};   // step A6
+        bool have_last_frame_ = false;
         void note_frame_time(std::chrono::steady_clock::duration took) {
             const double ms = std::chrono::duration<double, std::milli>(took).count();
             const size_t bucket = std::min(kFrameTimeBuckets - 1, static_cast<size_t>(ms * 10.0));

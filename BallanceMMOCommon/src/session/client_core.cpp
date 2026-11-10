@@ -540,6 +540,7 @@ namespace bmmo::session {
         s.life_batch_ = client_core_state::life_rewind_batch{};   // step SRT3
         s.life_events_coalesced_ = s.input_rewinds_carried_ = s.input_rewinds_deferred_ = s.input_rewinds_deadline_ = s.input_rewinds_near_ = 0;
         s.pacer_behind_ = 0.0;
+        s.telemetry_ = client_core_state::telemetry_window{};   // step A6
         // (R1's own_body_backstop state, reset here until FULL step R6V,
         // went with the policy.)
         // Step B2SW (U30): the run of unmatched snapshots and the resyncs it
