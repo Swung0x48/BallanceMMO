@@ -1248,6 +1248,28 @@ The per-entity probes add ~40 us to a replayed tick against o3's 736 (L12_h). Ne
 without the name scan (as v36 did for the trafo check: 184 -> ~10-20 us a replayed tick, ~200 us a live frame,
 estimated), the whole records' scripts (e1, or fewer whole records), the replay's place_probes.
 
+## Measured (T3C: the entity name cache, 2026-11-10)
+
+find_entity's name -> CK id cache (47308459, bridge v37; docs/engine-changes.md "the entity name cache"). The
+same census build on 47308459, `BMMO_LOOKUP_CACHE` off / on interleaved, 2 runs x 2 clients each, then one
+verify run (`work/S0/run_lc.sh`), E-core retail, K = 8, one-way lag 150, us:
+
+| | L12_h off -> on | ctl_h off -> on | L12 off -> on (12 rewinds) |
+|---|---|---|---|
+| a replayed tick | 751 -> 541 (-28 %) | 837 -> 569 (-32 %) | 678 -> 543 |
+| of it get_body | 183 -> 11 | 206 -> 29 | 97 -> 7 |
+| of it the replay's place_probes | 76 -> 54 | 71 -> 40 | 63 -> 45 |
+| the restore | 2234 -> 2319 | 2556 -> 2543 | 2472 -> 2485 |
+| a live frame's core (no rewind) | 2837 -> 2476 | 2857 -> 2336 | 2804 -> 2624 |
+| of it the capture's get_body | 214 -> 12 | 198 -> 30 | 210 -> 13 |
+
+So a rewind of the ~6 ticks a hinted member replays is ~1.3 ms shorter (L12_h: 2.3 + 6.2 x 0.75 -> 0.54), one of
+24 ticks ~5 ms. Verify: 1.26 M hits over the three verify sessions, 0 mismatches, no shared name. The journals'
+FINAL rows of off, on and verify, client by client: the balls and the 14 / 23 bodies bit-equal; ctl_h's 32 trafo
+pieces differ between any two sessions, two off runs and two runs of 381dbd4d alike (the comparison keys pieces
+across sessions; not this change). The restore is unchanged: it is the next fixed part (restore_scripts 1.4-1.5 ms
+on L12, set_savestate 1.2 ms on L11), with the whole records' scripts (~0.2 ms a replayed tick).
+
 ## Measured (step A2: a remote correction cadence, 2026-11-10)
 
 The architecture review of 2026-11-09 (after public test 1) proposed a cadence for the remote corrections: in a
