@@ -218,6 +218,9 @@ namespace bmmo::physics {
         // own Unphysicalize + Physicalize between two hashed ticks cannot
         // leave a value behind even at identical addresses (step OPA).
         std::atomic<uint64_t> g_surface_memo_generation{0};
+        // T3C: a body was made or deleted, an environment deleted, or the
+        // listener put on a new one - the name cache's reset (find_entity).
+        std::atomic<uint64_t> g_body_set_generation{0};
 
         // An environment was deleted: every slot whose last hash saw it is
         // erased and its counters folded into `retired`, so a long-lived
@@ -751,6 +754,7 @@ namespace bmmo::physics {
             void event_object_deleted(IVP_Event_Object* event) override {
                 // Step OPA: a body went, and with it maybe its private surface.
                 g_surface_memo_generation.fetch_add(1);
+                g_body_set_generation.fetch_add(1);
                 record("deleted", event);
                 if (event && event->real_object) psi_watch_forget(event->real_object);
                 if (event && event->real_object) {
@@ -760,6 +764,7 @@ namespace bmmo::physics {
                 }
             }
             void event_object_created(IVP_Event_Object* event) override {
+                g_body_set_generation.fetch_add(1);
                 record("created", event);
                 record_recipe(event);
                 record_birth(event);
@@ -789,6 +794,7 @@ namespace bmmo::physics {
             void event_object_frozen(IVP_Event_Object* event) override { record("frozen", event); }
             void event_environment_deleted(IVP_Environment* deleted) override {
                 g_surface_memo_generation.fetch_add(1);   // step OPA
+                g_body_set_generation.fetch_add(1);
                 retire_surface_memo(deleted);
                 environment = nullptr;
             }
@@ -900,6 +906,7 @@ namespace bmmo::physics {
         if (environment && g_event_log.environment != environment) {
             environment->add_listener_object_global(&g_event_log);
             g_event_log.environment = environment;
+            g_body_set_generation.fetch_add(1);   // bodies made before the listener went unseen
             g_event_log.text += "listener installed;";
         }
         if (environment) g_event_log.manager = physics;
@@ -1171,8 +1178,93 @@ namespace bmmo::physics {
             return scope;
         }
 
+        // ParentClass: balls are CK3dObjects, frames plain CK3dEntities.
+        CK3dEntity* scan_entity(CKIpionManager* physics, const std::string& name) {
+            return CK3dEntity::Cast(physics->m_Context->GetObjectByNameAndParentClass(
+                const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr));
+        }
+
+        // T3C: the names find_entity answered, by CK id (BMMO_LOOKUP_CACHE =
+        // off | on | verify, on when unset).  A scan walks every 3D entity
+        // (13.5 us a lookup on Level 12): a capture's tracked bodies were
+        // most of a replayed light record.  A name is entered only when one
+        // 3D entity had it at the fill; a hit is taken while the id still
+        // names a 3D entity of that name, anything else scans and fills
+        // again.  The premise: no second entity of a cached name appears
+        // before the first in the scan's order without a body made or
+        // deleted.  CK appends a new object to its class list, so that takes
+        // an entity of a lower class (a frame named like a cached ball) or a
+        // freed CK_ID reused under the name - nothing BMMO does (its copies
+        // and frames get names of their own).  The cache is emptied for
+        // another manager or environment and whenever a body or environment
+        // was made or deleted, or the event listener went onto a new
+        // environment (g_body_set_generation).  Per thread, like the scope.
+        // Verify scans every hit too, returns the scan's answer and counts a
+        // difference (entity_lookup_totals; the session's lookup_cache line).
+        enum class lookup_cache_mode { off = 0, on = 1, verify = 2 };
+        lookup_cache_mode lookup_cache() {
+            static const lookup_cache_mode mode = [] {
+                const char* text = std::getenv("BMMO_LOOKUP_CACHE");
+                if (text && (std::strcmp(text, "off") == 0 || std::strcmp(text, "0") == 0)) return lookup_cache_mode::off;
+                if (text && std::strcmp(text, "verify") == 0) return lookup_cache_mode::verify;
+                return lookup_cache_mode::on;
+            }();
+            return mode;
+        }
+        struct entity_name_cache {
+            CKIpionManager* physics = nullptr;
+            const void* environment = nullptr;
+            uint64_t generation = 0;
+            std::unordered_map<std::string, CK_ID> ids;   // 0: the name was shared at the fill (always scanned)
+        };
+        entity_name_cache& name_cache() {
+            thread_local entity_name_cache cache;
+            return cache;
+        }
+
+        CK3dEntity* find_entity_uncached(CKIpionManager* physics, const std::string& name);
+
         CK3dEntity* find_entity(CKIpionManager* physics, const std::string& name) {
             if (!physics || !physics->m_Context || name.empty()) return nullptr;
+            const lookup_cache_mode mode = lookup_cache();
+            if (mode == lookup_cache_mode::off) return find_entity_uncached(physics, name);
+            entity_name_cache& cache = name_cache();
+            const void* environment = physics->GetEnvironment();
+            const uint64_t generation = g_body_set_generation.load();
+            if (cache.physics != physics || cache.environment != environment || cache.generation != generation) {
+                cache.ids.clear();
+                cache.physics = physics;
+                cache.environment = environment;
+                cache.generation = generation;
+            }
+            bmmo_physics_lookup_totals& totals = lookup_scope().totals;
+            const auto it = cache.ids.find(name);
+            const bool shared = it != cache.ids.end() && it->second == 0;
+            if (it != cache.ids.end() && !shared) {
+                CK3dEntity* entity = CK3dEntity::Cast(physics->m_Context->GetObject(it->second));
+                const char* entity_name = entity ? entity->GetName() : nullptr;
+                if (entity_name && name == entity_name) {
+                    ++totals.cache_hits;
+                    if (mode == lookup_cache_mode::on) return entity;
+                    CK3dEntity* scanned = scan_entity(physics, name);
+                    ++totals.cache_verified;
+                    if (scanned != entity) ++totals.cache_mismatches;
+                    return scanned;
+                }
+                cache.ids.erase(it);
+            }
+            CK3dEntity* found = find_entity_uncached(physics, name);
+            if (found && !shared) {
+                // Unique: the scan resumed after the first finds no other.
+                const bool unique = !physics->m_Context->GetObjectByNameAndParentClass(
+                    const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, found);
+                cache.ids[name] = unique ? found->GetID() : 0;
+                ++(unique ? totals.cache_fills : totals.cache_shared);
+            }
+            return found;
+        }
+
+        CK3dEntity* find_entity_uncached(CKIpionManager* physics, const std::string& name) {
             entity_lookup_scope& scope = lookup_scope();
             if (scope.depth > 0 && scope.physics == physics && ++scope.lookups > entity_lookup_scope::kScanLookups) {
                 if (!scope.built) {
@@ -1200,17 +1292,14 @@ namespace bmmo::physics {
                 if (scope.verify) {
                     // FULL step SRT2B: the table's premise checked against
                     // the scan it stands for; the scan's answer is kept.
-                    CK3dEntity* scanned = CK3dEntity::Cast(physics->m_Context->GetObjectByNameAndParentClass(
-                        const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr));
+                    CK3dEntity* scanned = scan_entity(physics, name);
                     ++scope.totals.verified;
                     if (scanned != served) ++scope.totals.mismatches;
                     return scanned;
                 }
                 return served;
             }
-            // ParentClass: balls are CK3dObjects, frames plain CK3dEntities.
-            return CK3dEntity::Cast(physics->m_Context->GetObjectByNameAndParentClass(
-                const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr));
+            return scan_entity(physics, name);
         }
 
         CKMesh* find_mesh(CKIpionManager* physics, const std::string& name) {
@@ -1354,7 +1443,11 @@ namespace bmmo::physics {
         }
     }
 
-    bmmo_physics_lookup_totals entity_lookup_totals() { return lookup_scope().totals; }
+    bmmo_physics_lookup_totals entity_lookup_totals() {
+        bmmo_physics_lookup_totals totals = lookup_scope().totals;
+        totals.cache_mode = static_cast<uint64_t>(lookup_cache());
+        return totals;
+    }
 
     bool has_body_id(CKIpionManager* physics, uint32_t entity_id) {
         if (!physics || !physics->m_Context || entity_id == 0) return false;

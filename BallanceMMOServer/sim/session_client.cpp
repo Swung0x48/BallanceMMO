@@ -5118,6 +5118,14 @@ namespace {
                 logf("%s", memo.line(bmmo::game::slot_memo_mode_from_env()).c_str());
                 for (const std::string& note: memo.notes) logf("%s", note.c_str());
             }
+            {   // T3C: find_entity's name cache, this thread's lookups since the process started
+                const bmmo_physics_lookup_totals t = bmmo::physics::entity_lookup_totals();
+                static const char* const modes[] = {"off", "on", "verify"};
+                logf("lookup_cache: mode=%s hits=%llu fills=%llu shared=%llu verified=%llu mismatches=%llu",
+                     t.cache_mode < 3 ? modes[t.cache_mode] : "?", static_cast<unsigned long long>(t.cache_hits),
+                     static_cast<unsigned long long>(t.cache_fills), static_cast<unsigned long long>(t.cache_shared),
+                     static_cast<unsigned long long>(t.cache_verified), static_cast<unsigned long long>(t.cache_mismatches));
+            }
             // Steps RLM / FX1: the restores' membership ledger in this process -
             // registrations, those taken back, settled, and the replayed
             // frames' pending adds a later restore of the same live frame took

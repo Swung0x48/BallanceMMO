@@ -164,6 +164,8 @@ namespace bmmo::physics {
         // (physics_state.hpp entity_lookup_scope_begin; rollback_world::capture_scope).  A bridge
         // without the entry leaves every lookup a scan, as before.
         void lookup_scope(bool on, bool verify = false, bmmo_physics_lookup_totals* totals = nullptr) const;
+        // v37 (T3C): this thread's lookup totals, the name cache's included; zero without a bridge.
+        bmmo_physics_lookup_totals lookup_totals() const;
 
         // ---- bridge API v6 (design 9.10): spawn impulse, deterministic Random block ----
         // Impulse direction_ws * speed * mass at the body's mass centre; applied

@@ -1558,6 +1558,37 @@ one-way lag 150, 3 runs x 2 clients, frames without a rewind, means): the
 trafo poll 0.25-0.35 -> 0.01 ms; the live core L12_h 3.09 -> 2.72, ctl_h
 2.75 -> 2.52, L12 3.12 -> 2.83 ms.
 
+## Bridge notes: the entity name cache (bridge API v37, no engine change)
+
+Every by-name bridge call resolves its entity in `physics_state.cpp`
+`find_entity`, which scanned the context's 3D entities
+(`GetObjectByNameAndParentClass`, the first entity of the name in its order)
+or, inside a capture's lookup scope past 12 lookups, used the scope's table.
+A replayed tick's light record reads ~14 tracked bodies and paid ~13.5 us a
+lookup on Level 12 (T3C, `docs/realtime-design.md` "a replayed tick's
+parts"). Now a per-thread cache of name -> CK id sits in front
+(`BMMO_LOOKUP_CACHE` = off | on | verify, on when unset): a name is entered
+only when the scan resumed after its answer finds no second entity of it; a
+hit is taken while the id still names a 3D entity of exactly that name, and
+anything else scans and fills again (a dead entry is erased). The cache is
+emptied for another manager or environment and on every body made or
+deleted, environment deleted or event listener put on a new environment
+(`g_body_set_generation`). The premise: no second entity of a cached name
+appears before the first in the scan's order without such an event - CK
+appends new objects to their class list, so that needs an entity of a lower
+class under the name or a freed CK id reused under it, which nothing in BMMO
+does (copies and frames get their own names). Verify scans every hit too,
+returns the scan's answer and counts a difference. The counters are appended
+to `bmmo_physics_lookup_totals` (`cache_mode`, `cache_hits`, `cache_fills`,
+`cache_shared`, `cache_verified`, `cache_mismatches`), `lookup_scope` with
+`begin < 0` only reads them (`physics_view::lookup_totals`), and both hosts
+log a `lookup_cache:` line at session end. The lookup scope still serves the
+misses, so its own SRT2B verify now sees few lookups. Gate: fast LBM with
+`BMMO_LOOKUP_CACHE=verify` 38/38 FINAL exact, every criteria row equal to
+step A5's run, 43.3 M hits over 140 client sessions, 91 k fills, no shared
+name, 0 mismatches; with the cache on (before the review's simpler
+uniqueness test) 38/38 and the same rows.
+
 ---
 
 ## Notes on things that were verified *not* to need engine changes

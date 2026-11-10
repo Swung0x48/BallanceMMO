@@ -382,8 +382,8 @@ namespace {
     int32_t api_lookup_scope(void* manager, int32_t begin, uint32_t flags, bmmo_physics_lookup_totals* totals) {
         if (!manager) return 0;
         CKIpionManager* physics = static_cast<CKIpionManager*>(manager);
-        if (begin) bmmo::physics::entity_lookup_scope_begin(physics, (flags & BMMO_LOOKUP_SCOPE_VERIFY) != 0);
-        else bmmo::physics::entity_lookup_scope_end(physics);
+        if (begin > 0) bmmo::physics::entity_lookup_scope_begin(physics, (flags & BMMO_LOOKUP_SCOPE_VERIFY) != 0);
+        else if (begin == 0) bmmo::physics::entity_lookup_scope_end(physics);
         if (totals) *totals = bmmo::physics::entity_lookup_totals();
         return 1;
     }
