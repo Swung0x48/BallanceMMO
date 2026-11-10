@@ -263,8 +263,8 @@ by the step instant (the take's own cutoff, so a replayed inbound capture builds
 run-length coded (4 + 1 + 1 + 3 B per run), and only for a member with some queued tick that differs from the frame
 just applied for it - the rest hold-last already predicts. They ride the datagram's spare room, never open one, and
 are not acknowledged: the next tick's datagram carries what is queued then. A member whose cursor a lead reset or a
-re-anchor holds ahead gets none. The server's world and journal do not change; `physics.input_hints` (default off)
-switches the section, and without it a datagram is byte for byte protocol 36's.
+re-anchor holds ahead gets none. The server's world and journal do not change; `physics.input_hints` (default on since
+the retail smoke below; off until then) switches the section, and without it a datagram is byte for byte protocol 36's.
 
 **The client.** A hint is a prediction, the applied frame stays the only truth: nothing is journalled or counted as
 relayed. Per mirror, a map of hinted ticks; past the newest relayed frame the mirror is driven with that frame and
@@ -295,6 +295,17 @@ Time, the 6270-tick pair run alone, one after the other (headless x64, medians o
 10.2 -> 6.7 ms (restore 1.95 the same, replay 8.2 -> 4.8), rewind work 234 -> 152 ms per second, frame p99
 16.2 -> 14.2, p999 24.5 -> 18.8 ms. (A recipe with a 0 ms link runs at 0.2x on the coordinator;
 with the smallest latency at 15 ms the same arms run at 6x.)
+
+**Retail, and the default (2026-11-10).** Two retail x86 copies on the Arch server (protocol 38), T3C S0's driver,
+RT1's L11 recipe at human key rates (`ctl_h`), E-cores. Both copies at 150 ms one way: FINAL rows exact (own,
+mirror, 186 mechanism rows), no resync, 1-2 hints a copy (uniform latency). Copy 1 at 150 ms and copy 2 at 20 ms one
+way, the option off / on (one run each, the copies' SessionTelemetry, `.local-tools/work/ARCH/a6`): copy 1 replayed
+1418 -> 394 ticks (22.2 -> 6.2 a rewind, 64 rewinds either way), frame interval p99 21.7 -> 16.8 and p999 45.1 ->
+32.3 ms, frames over 33 ms 4 -> 0 a minute, the core's work p99 17.5 -> 9.2 ms; 1163 hinted ticks, 0 contradicted, 0
+out of reach; copy 2 unchanged (24.7 / 24.9 a rewind: copy 1's frames reach the server late, nothing is queued to
+hint). Both FINAL exact in both runs. So `physics.input_hints` is on by default from here (config_manager,
+arena_map_test.py `--input-hints`); a config.yml a protocol 37-38 server already loaded has `input_hints: false`
+written into it (a missing key is written with the default) and keeps it until edited.
 
 ## 5. Interactions to handle
 

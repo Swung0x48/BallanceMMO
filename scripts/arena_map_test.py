@@ -3872,8 +3872,9 @@ def main():
     ap.add_argument('--hold', help='lifecycle hold in milliseconds, or drop (A6: 496; A6m/A6b: 300)')
     ap.add_argument('--patience', choices=('off', 'on'), default=None, help='default off (on with --coordinated)')
     ap.add_argument('--lead-adjust', choices=('off', 'on'), default=None, help='default off (on with --coordinated)')
-    ap.add_argument('--input-hints', choices=('off', 'on'), default='off',
-                    help='protocol 37: the relay also carries the frames queued at the server (physics.input_hints)')
+    ap.add_argument('--input-hints', choices=('off', 'on'), default='on',
+                    help='protocol 37: the relay also carries the frames queued at the server (physics.input_hints; '
+                         'default on, as the server since 2026-11-10)')
     ap.add_argument('--test-clock-skew', default='', metavar='T:MS:PCT')
     ap.add_argument('--server-control', default='', metavar='PYTHON_SCRIPT',
                     help='controller called with start/stop and JSON physics flags; required for external-server twins')

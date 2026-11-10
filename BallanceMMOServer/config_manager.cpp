@@ -300,7 +300,7 @@ void config_manager::save(bool reload_values) {
                    "#     gets a longer lead of its own through SessionLead, if its client declared it can apply\n"
                    "#     one; a late joiner's first lead and a resync's lead are then per player instead of\n"
                    "#     capped at 34 ticks),\n"
-                   "#   input_hints (protocol 37, default false: every relay datagram also carries what the other\n"
+                   "#   input_hints (protocol 37, default true: every relay datagram also carries what the other\n"
                    "#     members' frames already queued at the server hold for the ticks not stepped yet, so a\n"
                    "#     client's rewind for a key change is as deep as its own round trip, not as deep as the\n"
                    "#     session's wait for its slowest member),\n"
