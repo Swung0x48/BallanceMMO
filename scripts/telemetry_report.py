@@ -16,9 +16,10 @@ LINE = re.compile(
     r'Physics session (\d+): telemetry (.*) \(#(\d+), (\w+)\): tick=(\d+) ticks=(\d+) frames=(\d+) interval '
     r'p50=([\d.]+) p99=([\d.]+) p999=([\d.]+) max=([\d.]+) ms over33=(\d+) over50=(\d+) over100=(\d+) work '
     r'p99=([\d.]+) max=([\d.]+) ms rewinds=(\d+) replayed=(\d+) resyncs=(\d+) holds=(\d+) starved=(\d+) '
-    r'behind=([\d.]+) ping=(-?\d+) ms')
+    r'behind=([\d.]+)(?: inbound p50=([\d.]+) p99=([\d.]+) max=([\d.]+) ms)? ping=(-?\d+) ms')
 KEYS = ('tick', 'ticks', 'frames', 'p50', 'p99', 'p999', 'max', 'over33', 'over50', 'over100', 'work_p99',
-        'work_max', 'rewinds', 'replayed', 'resyncs', 'holds', 'starved', 'behind', 'ping')
+        'work_max', 'rewinds', 'replayed', 'resyncs', 'holds', 'starved', 'behind', 'in_p50', 'in_p99', 'in_max',
+        'ping')
 
 
 def main():
@@ -35,21 +36,21 @@ def main():
         session, name, player, host = int(m.group(1)), m.group(2), int(m.group(3)), m.group(4)
         if a.session is not None and session != a.session:
             continue
-        vals = dict(zip(KEYS, (float(x) for x in m.groups()[4:])))
+        vals = dict(zip(KEYS, (float(x) if x is not None else 0.0 for x in m.groups()[4:])))
         rows[(session, player)].append(vals)
         names[(session, player)] = '%s (%s)' % (name, host)
     if not rows:
         print('no telemetry lines')
         return
-    print('%-8s %-24s %4s %7s | %6s %6s %6s | %6s %6s %6s | %6s %6s | %6s %6s | %3s %3s %4s %5s %5s' % (
+    print('%-8s %-24s %4s %7s | %6s %6s %6s | %6s %6s %6s | %6s %6s | %6s %6s | %3s %3s %4s %5s | %5s %5s | %5s' % (
         'session', 'player', 'win', 'frames', 'p99', 'p999', 'max', '>33/m', '>50/m', '>100/m', 'work99', 'wmax',
-        'rew/s', 'depth', 'rsy', 'hld', 'strv', 'behnd', 'ping'))
+        'rew/s', 'depth', 'rsy', 'hld', 'strv', 'behnd', 'in50', 'in99', 'ping'))
     for key in sorted(rows):
         r = rows[key]
         ticks = sum(x['ticks'] for x in r)
         minutes = ticks / 66.0 / 60.0 or 1.0
         rewinds = sum(x['rewinds'] for x in r)
-        print('%-8d %-24s %4d %7d | %6.1f %6.1f %6.1f | %6.1f %6.1f %6.1f | %6.1f %6.1f | %6.1f %6.1f | %3d %3d %4d %5.1f %5.0f' % (
+        print('%-8d %-24s %4d %7d | %6.1f %6.1f %6.1f | %6.1f %6.1f %6.1f | %6.1f %6.1f | %6.1f %6.1f | %3d %3d %4d %5.1f | %5.1f %5.1f | %5.0f' % (
             key[0], names[key][:24], len(r), sum(x['frames'] for x in r),
             statistics.median(x['p99'] for x in r), max(x['p999'] for x in r), max(x['max'] for x in r),
             sum(x['over33'] for x in r) / minutes, sum(x['over50'] for x in r) / minutes,
@@ -57,7 +58,8 @@ def main():
             statistics.median(x['work_p99'] for x in r), max(x['work_max'] for x in r),
             rewinds / (ticks / 66.0) if ticks else 0.0, sum(x['replayed'] for x in r) / rewinds if rewinds else 0.0,
             sum(x['resyncs'] for x in r), sum(x['holds'] for x in r), sum(x['starved'] for x in r),
-            max(x['behind'] for x in r), statistics.median(x['ping'] for x in r)))
+            max(x['behind'] for x in r), statistics.median(x['in_p50'] for x in r),
+            statistics.median(x['in_p99'] for x in r), statistics.median(x['ping'] for x in r)))
 
 
 if __name__ == '__main__':

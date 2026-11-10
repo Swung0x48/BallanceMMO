@@ -459,6 +459,7 @@ namespace {
     struct mailbox_entry {
         int code = 0;
         std::string bytes;
+        bmmo::net::microseconds received = 0;   // the transport's stamp (step A5's measure)
     };
     class core_mailbox {
     public:
@@ -467,7 +468,7 @@ namespace {
         // gone since FULL step LGD.
         static constexpr size_t kMaxSnapshots = 64;
 
-        void push(int code, const void* data, size_t size) {
+        void push(int code, const void* data, size_t size, bmmo::net::microseconds received = 0) {
             std::lock_guard lk(mutex_);
             if (code == bmmo::SessionSnapshot) {
                 // The cap, on the snapshot entries only: the oldest one goes.
@@ -482,7 +483,7 @@ namespace {
                 }
                 ++snapshots_;
             }
-            entries_.push_back({code, std::string(static_cast<const char*>(data), size)});
+            entries_.push_back({code, std::string(static_cast<const char*>(data), size), received});
             ++pushed_;
         }
         std::deque<mailbox_entry> take() {
@@ -2139,7 +2140,8 @@ bool BallanceMMOClient::core_host_offer(const bmmo::net::message* network_msg) {
     case bmmo::SessionStartAt:       // FULL step SAXH (protocol 24)
     case bmmo::SessionStartStatus:
         if (!core_latched.load()) { core_stray.fetch_add(1); return true; }
-        mailbox.push(static_cast<int>(raw->code), network_msg->data, static_cast<size_t>(network_msg->size));
+        mailbox.push(static_cast<int>(raw->code), network_msg->data, static_cast<size_t>(network_msg->size),
+                     network_msg->received);
         return true;
     default:
         return false;
@@ -3165,6 +3167,10 @@ void BallanceMMOClient::core_host_drain() {
                 core_host_end_local("ended by the server: " + msg.reason);
             continue;
         }
+        // Step A5's measure: from the transport's stamp to the handover.
+        if (entry.code == bmmo::SessionRemoteInput && entry.received
+                && !bmmo::retail::session_capture::instance().replaying())
+            host.core->note_inbound_wait((transport().local_timestamp() - entry.received) / 1000.0);
         core_host_dispatch(entry.code, entry.bytes);
     }
     core_host_capture_idle();

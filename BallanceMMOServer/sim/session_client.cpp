@@ -1734,6 +1734,8 @@ namespace {
             case bmmo::SessionRemoteInput: {
                 bmmo::session_remote_input_msg msg;
                 if (!fill(msg)) return;
+                // Step A5's measure: from the transport's stamp to here.
+                if (received.received) core_.note_inbound_wait((transport_->local_timestamp() - received.received) / 1000.0);
                 core_.on_session_remote_input(msg);
                 break;
             }

@@ -2358,6 +2358,7 @@ TEST(SessionTelemetryMsg, RoundTripAndSchema) {
     msg.frames = 655; msg.interval_p50 = 152; msg.interval_p99 = 331; msg.interval_p999 = 512; msg.interval_max = 65535;
     msg.over_33 = 4; msg.over_50 = 2; msg.over_100 = 1; msg.work_p99 = 88; msg.work_max = 240; msg.rewinds = 210;
     msg.replayed = 1234567; msg.resyncs = 1; msg.holds = 2; msg.starved = 5; msg.behind_max = 27;
+    msg.inbound_p50 = 31; msg.inbound_p99 = 148; msg.inbound_max = 902;
     const auto back = round_trip(msg);
     EXPECT_EQ(back.session, 3u); EXPECT_EQ(back.tick, 6600u); EXPECT_EQ(back.host, msg.host); EXPECT_EQ(back.ticks, 660);
     EXPECT_EQ(back.frames, 655); EXPECT_EQ(back.interval_p50, 152); EXPECT_EQ(back.interval_p99, 331);
@@ -2365,6 +2366,7 @@ TEST(SessionTelemetryMsg, RoundTripAndSchema) {
     EXPECT_EQ(back.over_50, 2); EXPECT_EQ(back.over_100, 1); EXPECT_EQ(back.work_p99, 88); EXPECT_EQ(back.work_max, 240);
     EXPECT_EQ(back.rewinds, 210); EXPECT_EQ(back.replayed, 1234567u); EXPECT_EQ(back.resyncs, 1); EXPECT_EQ(back.holds, 2);
     EXPECT_EQ(back.starved, 5); EXPECT_EQ(back.behind_max, 27);
+    EXPECT_EQ(back.inbound_p50, 31); EXPECT_EQ(back.inbound_p99, 148); EXPECT_EQ(back.inbound_max, 902);
     bmmo::session_telemetry_msg once{};
     once.serialize();
     const std::string full = once.raw.str();

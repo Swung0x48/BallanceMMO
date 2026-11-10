@@ -20,14 +20,19 @@ public:
         return true;
     }
 
+    // Step A5: an idle pass sleeps 1 ms, not a tick.  A relayed frame used to
+    // wait for the next 1/66 s pass (~7.5 ms on average) before the frame's
+    // drain could take it - half a tick of every rewind's depth.  A pass that
+    // finds nothing costs microseconds.
     void run() override {
         mark_running();
         while (running_) {
-            auto next_update = std::chrono::steady_clock::now() + bmmo::CLIENT_RECEIVE_INTERVAL;
+            auto next_update = std::chrono::steady_clock::now() + kIdlePoll;
             if (!update())
                 std::this_thread::sleep_until(next_update);
         }
     }
+    static constexpr std::chrono::milliseconds kIdlePoll{1};
 
     bmmo::net::connection_state get_connection_state() {
         return estate_;

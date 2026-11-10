@@ -823,7 +823,7 @@ namespace bmmo::session {
         struct telemetry_window {
             bool based = false;
             uint32_t first_tick = 0;
-            std::vector<float> interval, work;
+            std::vector<float> interval, work, inbound;
             uint64_t rewinds = 0, replayed = 0, resyncs = 0, holds = 0, starved = 0;
             double behind_max = 0.0;
         } telemetry_;
@@ -1725,6 +1725,12 @@ namespace bmmo::session {
             if (!config.telemetry_host) return;
             if (interval_ms >= 0.0) s.telemetry_.interval.push_back(static_cast<float>(interval_ms));
             s.telemetry_.work.push_back(static_cast<float>(work_ms));
+        }
+        // Step A5's measure: how long a SessionRemoteInput waited between the
+        // transport's receive stamp and its handover to the core, in ms (the
+        // network thread's poll and the wait for the frame).  Measures only.
+        void note_inbound_wait(double ms) {
+            if (config.telemetry_host && ms >= 0.0) s.telemetry_.inbound.push_back(static_cast<float>(ms));
         }
         // The input basis (design 1.2): the last camera reference seen,
         // nullptr until one was.

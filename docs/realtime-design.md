@@ -1257,3 +1257,20 @@ left 0. Gate: 840/840; fast LBM with the default 38/38 twins FINAL exact, every 
 tree (a1g); with cadence 4 38/38 FINAL exact, the only rows that moved already failing (A6M's late ball: input
 rollbacks in D 3 -> 2, its mirror 0.85 -> 1.11 m off from T_off+60); x64 and x86 builds. Not run: retail with the
 cadence on (own_replica_name matching the recorded own-ball name is verified headless only).
+
+## Measured (step A5: how long a relayed frame waits on the client, 2026-11-10)
+
+The review guessed the network polls cost 1-2 ticks of depth (both sides polling every 15.15 ms). The server's half
+was already gone: since K4b the runner asks the loop for a receive pass at each step instant (server.cpp
+wait_until / request_poll), so a frame that arrives before the step is in it. The client's half was measured with
+SessionTelemetry's new inbound fields (the wait from the transport's receive stamp to the core's handover of each
+SessionRemoteInput: retail, the network thread's poll plus the wait for the frame's mailbox drain; headless, its
+poll). Retail, two x86 copies on the Arch server (protocol 38, hints on), RT1's L11 recipe at human key rates, copy
+1 at 150 ms and copy 2 at 20 ms one way, E-cores: inbound p50 15.6 / 16.1 ms and p99 29.6 / 30.5 ms - a whole tick
+at the median, two at p99: the network thread's idle pass slept to the next 1/66 s (client.h run(), uniform 0-15 ms)
+and the drain waits for the next frame (another 0-15 ms). The idle pass now sleeps 1 ms (client.h kIdlePoll; a
+pass that finds nothing costs microseconds, the Player.exe timer resolution allows it): inbound p50 8.3 / 8.3 ms,
+p99 16.9 / 16.9 ms - the frame's own wait is what is left (a frame-paced game takes its messages once a frame). Depth
+a rewind 6.1 -> 5.8 (copy 1) and 25.2 -> 23.9 (copy 2), one run each; FINAL rows exact in both runs, no resync; the
+games' CPU in the session unchanged within the sampler's noise (20-40 % of a core each). The headless client already
+polls every <= 2 ms while it paces.

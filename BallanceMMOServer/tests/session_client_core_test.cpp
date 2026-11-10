@@ -7214,6 +7214,8 @@ namespace {
         core.note_frame_time(60.0, 40.0);
         core.note_frame_time(120.0, 3.0);
         core.note_pacer_behind(2.5);
+        core.note_inbound_wait(3.0);
+        core.note_inbound_wait(9.0);
         s.resyncs_sent_ += 1;
         s.input_starved_ += 3;
         steps{core}.telemetry_tick(759);
@@ -7237,6 +7239,8 @@ namespace {
         EXPECT_EQ(m.resyncs, 1);
         EXPECT_EQ(m.starved, 3);
         EXPECT_EQ(m.behind_max, 25);
+        EXPECT_EQ(m.inbound_p50, 30);
+        EXPECT_EQ(m.inbound_max, 90);
         steps{core}.telemetry_tick(1419);
         EXPECT_EQ(fake.sent.size(), 1u) << "a new window from 760";
         steps{core}.telemetry_tick(1420);

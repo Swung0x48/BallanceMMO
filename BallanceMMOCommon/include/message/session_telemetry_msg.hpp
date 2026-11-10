@@ -32,6 +32,9 @@ namespace bmmo {
         uint16_t holds = 0;        // resync holds entered
         uint16_t starved = 0;      // input reports the server answered starved
         uint16_t behind_max = 0;   // the most the pacer was behind its schedule, 0.1 tick
+        // How long a SessionRemoteInput waited from the transport's receive
+        // stamp to its handover to the session core (step A5's measure).
+        uint16_t inbound_p50 = 0, inbound_p99 = 0, inbound_max = 0;
 
         session_telemetry_msg() : serializable_message(bmmo::SessionTelemetry) {}
 
@@ -43,6 +46,7 @@ namespace bmmo {
             put(interval_p50); put(interval_p99); put(interval_p999); put(interval_max);
             put(over_33); put(over_50); put(over_100); put(work_p99); put(work_max);
             put(rewinds); put(replayed); put(resyncs); put(holds); put(starved); put(behind_max);
+            put(inbound_p50); put(inbound_p99); put(inbound_max);
             return raw.good();
         }
 
@@ -54,7 +58,8 @@ namespace bmmo {
             return get(session) && get(tick) && get(host) && get(ticks) && get(frames)
                 && get(interval_p50) && get(interval_p99) && get(interval_p999) && get(interval_max)
                 && get(over_33) && get(over_50) && get(over_100) && get(work_p99) && get(work_max)
-                && get(rewinds) && get(replayed) && get(resyncs) && get(holds) && get(starved) && get(behind_max);
+                && get(rewinds) && get(replayed) && get(resyncs) && get(holds) && get(starved) && get(behind_max)
+                && get(inbound_p50) && get(inbound_p99) && get(inbound_max);
         }
     };
 }

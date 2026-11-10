@@ -84,6 +84,7 @@ namespace bmmo::session {
             };
             std::sort(w.interval.begin(), w.interval.end());
             std::sort(w.work.begin(), w.work.end());
+            std::sort(w.inbound.begin(), w.inbound.end());
             bmmo::session_telemetry_msg msg;
             msg.session = s.session_;
             msg.tick = tick;
@@ -109,6 +110,9 @@ namespace bmmo::session {
             msg.holds = count16(s.resync_holds_ - w.holds);
             msg.starved = count16(s.input_starved_ - w.starved);
             msg.behind_max = tenths(w.behind_max);   // ticks, in tenths
+            msg.inbound_p50 = tenths(quantile(w.inbound, 0.5));
+            msg.inbound_p99 = tenths(quantile(w.inbound, 0.99));
+            msg.inbound_max = tenths(w.inbound.empty() ? 0.0 : w.inbound.back());
             msg.serialize();
             platform_.send(msg.raw.str(), send_mode::reliable);
         }
@@ -116,6 +120,7 @@ namespace bmmo::session {
         w.first_tick = tick;
         w.interval.clear();
         w.work.clear();
+        w.inbound.clear();
         w.rewinds = rs.rollbacks;
         w.replayed = rs.resim_ticks;
         w.resyncs = s.resyncs_sent_;

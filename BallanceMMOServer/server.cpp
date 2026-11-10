@@ -2311,13 +2311,15 @@ public:
         auto ms = [](uint16_t tenths) { return tenths / 10.0; };
         Printf("Physics session %u: telemetry %s (#%u, %s): tick=%u ticks=%u frames=%u interval p50=%.1f p99=%.1f "
                "p999=%.1f max=%.1f ms over33=%u over50=%u over100=%u work p99=%.1f max=%.1f ms rewinds=%u "
-               "replayed=%u resyncs=%u holds=%u starved=%u behind=%.1f ping=%d ms",
+               "replayed=%u resyncs=%u holds=%u starved=%u behind=%.1f inbound p50=%.1f p99=%.1f max=%.1f ms "
+               "ping=%d ms",
                m.session, get_client_name(c), c,
                m.host == bmmo::session_telemetry_msg::HostRetail ? "retail"
                    : m.host == bmmo::session_telemetry_msg::HostHeadless ? "headless" : "unknown",
                m.tick, m.ticks, m.frames, ms(m.interval_p50), ms(m.interval_p99), ms(m.interval_p999),
                ms(m.interval_max), m.over_33, m.over_50, m.over_100, ms(m.work_p99), ms(m.work_max), m.rewinds,
-               m.replayed, m.resyncs, m.holds, m.starved, ms(m.behind_max), ping);
+               m.replayed, m.resyncs, m.holds, m.starved, ms(m.behind_max), ms(m.inbound_p50), ms(m.inbound_p99),
+               ms(m.inbound_max), ping);
     }
 
     // (Protocol 14-16's SessionGhostPose relay, step BALA, is retired at 17
