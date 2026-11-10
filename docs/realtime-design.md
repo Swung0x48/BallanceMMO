@@ -1214,6 +1214,40 @@ lookups saved only ~50 us (its table is built from every 3D entity once per scop
 placement (grows with K), the per-frame GetScriptByName("Gameplay_Ingame") in core_host_frame, the event drain's
 256 KiB buffer.
 
+## Measured (T3C: a replayed tick's parts, 2026-11-10)
+
+With the relay hints a rewind is ~6 ticks deep for the member they help, so a rewind is still two thirds replay
+(restore ~2.2-2.5 ms, a replayed tick ~0.74-0.81 ms on these recipes). The census (S0's recipe on 381dbd4d) with
+28 more buckets (`work/S0/apply_cap.py` after apply_diag.py and apply_other.py; report `work/S0/rc_split.py`): the
+capture's parts by context (replay / live) - the lookup scope's build, get_body, extras + contacts, nav + clock +
+globals, observe_scripts, the scripts, the blob - each replayed record whole or light, and the replay loop's other
+parts as laps. E-core retail, K = 8, one-way lag 150, 3 runs x 2 clients, means over the replayed ticks (they add
+up to the replay meter within 4-5 us), us:
+
+| a replayed tick | L12_h | ctl_h | L12 (12 rewinds) |
+|---|---|---|---|
+| all | 779 | 809 | 743 |
+| capture: scripts (of it the slot images) | 237 (69) | 161 (35) | 274 (76) |
+| capture: get_body | 184 | 199 | 103 |
+| capture: blob, extras + contacts, rest | 48, 12, 13 | 67, 15, 24 | 56, 13, 11 |
+| pre_step, step | 79, 44 | 84, 68 | 96, 39 |
+| place_probes (the replay's union) | 78 | 68 | 72 |
+| the record's build and store (the replaced one freed) | 42 | 52 | 34 |
+| replay_mechanisms | 32 | 46 | 31 |
+| the rest (feed, births, remotes, globals, after_step) | 12 | 25 | 14 |
+| light records, us each / whole, us each | 84 %, 194 / 2071 | 84 %, 227 / 1691 | 82 %, 92 / 2080 |
+
+- The scripts are the whole records' (one in six replayed ticks; a light record observes only, ~2 us).
+- get_body is a light record's whole cost: 14 lookups a tick on L12 (37 on L11) at 13.5 us (5.4) each - every
+  tracked name scanned over the 3D entities, because the capture's lookup scope builds its table only after
+  kScanLookups = 12 scans (physics_state.cpp find_entity), so a capture of 13-14 names pays 12 scans and the
+  table. The live capture the same: 214 us of L12's 1.95 ms (13 lookups at 16 us).
+- The physics itself (pre_step's scripts and the step) is 16-19 % of a replayed tick.
+
+The per-entity probes add ~40 us to a replayed tick against o3's 736 (L12_h). Next by size: a tracked body read
+without the name scan (as v36 did for the trafo check: 184 -> ~10-20 us a replayed tick, ~200 us a live frame,
+estimated), the whole records' scripts (e1, or fewer whole records), the replay's place_probes.
+
 ## Measured (step A2: a remote correction cadence, 2026-11-10)
 
 The architecture review of 2026-11-09 (after public test 1) proposed a cadence for the remote corrections: in a
