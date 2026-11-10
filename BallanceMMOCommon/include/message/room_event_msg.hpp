@@ -41,7 +41,7 @@ namespace bmmo {
             if (!message_utils::read_string<uint16_t>(raw, reason)) return false;
             if (reason.size() > room::MAX_REASON) return false;
             if (t > static_cast<uint8_t>(room::event_type::SessionEnded)) return false;
-            if (e > static_cast<uint8_t>(room::error_code::Unsupported)) return false;
+            if (e > static_cast<uint8_t>(room::error_code::NoSession)) return false;
             type = static_cast<room::event_type>(t);
             error = static_cast<room::error_code>(e);
             return true;

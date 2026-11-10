@@ -28,9 +28,21 @@ namespace bmmo::room {
         Start = 6,
         Kick = 7,
         Close = 8,
+        // The host's settings for the session its room will start, while the
+        // room waits (refused once a session runs): the map - the one the
+        // host's game has loaded when it asks - and the kind.
+        SetMap = 9,
+        SetMode = 10,
+        // While the room's session runs: a session member's vote to restart
+        // it (and its withdrawal), and the host's Restart, which the server
+        // takes once every member in the session has voted - a new session
+        // of the same kind on the same map, with every member of the room.
+        VoteRestart = 11,
+        UnvoteRestart = 12,
+        Restart = 13,
     };
 
-    // Session kind chosen by the host at Start.
+    // Session kind: the room's setting (SetMode), confirmed by the host's Start.
     enum class mode : uint8_t {
         Shadow = 0,   // legacy shadow-ball logic, scoped to the room
         Physics = 1,  // server-authoritative shared physics (milestone M3)
@@ -68,6 +80,8 @@ namespace bmmo::room {
         InvalidName,
         ServerBusy,
         Unsupported,
+        SessionRunning,
+        NoSession,
     };
 
     inline const char* error_string(error_code e) {
@@ -85,8 +99,17 @@ namespace bmmo::room {
             case error_code::InvalidName: return "invalid room name";
             case error_code::ServerBusy: return "server is busy";
             case error_code::Unsupported: return "unsupported request";
+            case error_code::SessionRunning: return "the room's session is running";
+            case error_code::NoSession: return "the room has no running session";
             default: return "unknown error";
         }
+    }
+
+    // A room's map is set once it names one: a zeroed map (no md5) is "none
+    // yet" - the room waits in the lobby, and a Start takes the host's own.
+    inline bool map_set(const bmmo::map& m) {
+        static constexpr uint8_t none[sizeof(m.md5)] = {};
+        return std::memcmp(m.md5, none, sizeof(none)) != 0;
     }
 
     // One row in a room_state listing.
@@ -108,6 +131,9 @@ namespace bmmo::room {
         uint32_t id = 0;
         std::string name;
         bool ready = false;
+        bool vote = false;      // voted to restart the running session
+        bool in_session = false;  // takes part in the room's running session (a late joiner yet to join,
+                                  // a finisher is in the room but out of it)
         bool is_host = false;
         bmmo::map map{};
     };

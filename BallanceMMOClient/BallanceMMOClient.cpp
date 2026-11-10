@@ -1185,6 +1185,22 @@ void BallanceMMOClient::init_commands() {
                                   m), bmmo::ansi::BrightRed);
                 return;
             }
+            // No kind named: the room's own (its SetMode setting).
+            msg.mode = m.empty() ? own_room_mode()
+                     : (m == "physics") ? bmmo::room::mode::Physics : bmmo::room::mode::Shadow;
+        }
+        else if (sub == "setmap") { msg.action = bmmo::room::action::SetMap; }   // the map: send_room_request's
+        // While the session runs: every member's vote lets the host restart it.
+        else if (sub == "vote") { msg.action = bmmo::room::action::VoteRestart; }
+        else if (sub == "unvote") { msg.action = bmmo::room::action::UnvoteRestart; }
+        else if (sub == "restart") { msg.action = bmmo::room::action::Restart; }
+        else if (sub == "setmode") {
+            msg.action = bmmo::room::action::SetMode;
+            const auto m = console_.get_next_word(true);
+            if (m != "physics" && m != "shadow") {
+                SendIngameMessage("Usage: /mmo room setmode <physics|shadow>", bmmo::ansi::BrightRed);
+                return;
+            }
             msg.mode = (m == "physics") ? bmmo::room::mode::Physics : bmmo::room::mode::Shadow;
         }
         else if (sub == "kick") {
@@ -1197,7 +1213,7 @@ void BallanceMMOClient::init_commands() {
         }
         else if (sub == "close") { msg.action = bmmo::room::action::Close; }
         else if (sub == "session") { SendIngameMessage(core_host_status_text()); return; }
-        else { SendIngameMessage(std::format("Error: unknown room subcommand \"{}\". Try list|create|join|leave|ready|start|kick|close|status|session.", sub), bmmo::ansi::BrightRed); return; }
+        else { SendIngameMessage(std::format("Error: unknown room subcommand \"{}\". Try list|create|join|leave|ready|setmap|setmode|start|vote|unvote|restart|kick|close|status|session.", sub), bmmo::ansi::BrightRed); return; }
         // One entry for every room request (session/room_client.cpp): the
         // outcome names this subcommand.
         send_room_request(msg.action, msg.room, msg.target, msg.mode, msg.name);
@@ -1604,7 +1620,8 @@ std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const std::
             }
             else if (lower1 == "room") {
                 if (length == 3)
-                    return {"list", "create", "join", "leave", "ready", "unready", "start", "kick", "close", "status"};
+                    return {"list", "create", "join", "leave", "ready", "unready", "setmap", "setmode", "start", "vote",
+                            "unvote", "restart", "kick", "close", "status"};
                 const auto sub = boost::algorithm::to_lower_copy(args[2]);
                 if (length == 4 && sub == "start") return {"shadow", "physics"};
                 if (length == 4 && (sub == "ready" || sub == "unready")) return {"on", "off"};

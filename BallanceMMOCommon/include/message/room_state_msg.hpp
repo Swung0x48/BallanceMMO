@@ -10,6 +10,7 @@ namespace bmmo {
         uint32_t own_room = 0;                     // 0 = not in a room
         std::vector<room::room_info> rooms;
         std::vector<room::room_member> members;    // only for own_room
+        bmmo::map own_map{};                       // own_room's map (room::map_set); zeroed outside a room
 
         room_state_msg() : serializable_message(bmmo::RoomState) {}
 
@@ -54,12 +55,17 @@ namespace bmmo {
                 const auto& mem = members[i];
                 raw.write(reinterpret_cast<const char*>(&mem.id), sizeof(mem.id));
                 message_utils::write_string<uint16_t>(mem.name.substr(0, room::MAX_MEMBER_NAME), raw);
-                const uint8_t ready = mem.ready ? 1 : 0;
+                // One byte of flags: bit 0 ready, bit 1 the restart vote,
+                // bit 2 in the running session (a peer from before the vote
+                // writes and reads 0 or 1 here).
+                const uint8_t ready = static_cast<uint8_t>((mem.ready ? 1 : 0) | (mem.vote ? 2 : 0)
+                                                           | (mem.in_session ? 4 : 0));
                 const uint8_t is_host = mem.is_host ? 1 : 0;
                 raw.write(reinterpret_cast<const char*>(&ready), sizeof(ready));
                 raw.write(reinterpret_cast<const char*>(&is_host), sizeof(is_host));
                 write_map(mem.map, raw);
             }
+            write_map(own_map, raw);
             return raw.good();
         }
 
@@ -103,10 +109,15 @@ namespace bmmo {
                 if (!message_utils::read_variable(raw, &ready)) return false;
                 if (!message_utils::read_variable(raw, &is_host)) return false;
                 if (!read_map(mem.map, raw)) return false;
-                mem.ready = ready != 0;
+                mem.ready = (ready & 1) != 0;
+                mem.vote = (ready & 2) != 0;
+                mem.in_session = (ready & 4) != 0;
                 mem.is_host = is_host != 0;
                 members.push_back(std::move(mem));
             }
+            // The last field, absent from a server older than SetMap: it then stays zeroed.
+            own_map = {};
+            read_map(own_map, raw);
             return true;
         }
     };

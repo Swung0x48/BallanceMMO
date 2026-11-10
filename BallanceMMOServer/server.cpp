@@ -710,6 +710,17 @@ public:
         send(to, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
     }
 
+    // Whether a member takes part in its room's running session.  A physics
+    // session has members of its own (one who joined the room late and has
+    // not joined it, or finished, is out of it); a shadow one is the room's.
+    bool in_room_session(const bmmo::server_room& r, bmmo::net::connection c) const {
+        if (r.phase != bmmo::room::phase::Running) return false;
+#if BMMO_BUILD_SIM
+        if (r.mode == bmmo::room::mode::Physics) return client_session_.contains(c);
+#endif
+        return true;
+    }
+
     bmmo::room_state_msg build_room_state(bmmo::net::connection recipient) {
         bmmo::room_state_msg st;
         st.own_room = rooms_.room_of(recipient);
@@ -722,9 +733,11 @@ public:
         }
         if (st.own_room != 0) {
             if (const auto* r = rooms_.find(st.own_room)) {
+                st.own_map = r->map;
                 for (const auto& m: r->members) {
                     bmmo::room::room_member mm;
-                    mm.id = m.id; mm.ready = m.ready; mm.is_host = (m.id == r->host);
+                    mm.id = m.id; mm.ready = m.ready; mm.vote = m.vote; mm.is_host = (m.id == r->host);
+                    mm.in_session = in_room_session(*r, m.id);
                     auto ci = clients_.find(m.id);
                     if (ci != clients_.end()) { mm.name = ci->second.name; mm.map = ci->second.current_map; }
                     st.members.push_back(std::move(mm));
@@ -759,17 +772,6 @@ public:
     // Room membership / list changed: refresh everyone's view (rare events).
     void broadcast_room_states() {
         for (const auto& [conn, _]: clients_) send_room_state(conn);
-    }
-
-    bool room_members_same_map(const bmmo::server_room& r) {
-        const bmmo::map* first = nullptr;
-        for (const auto& m: r.members) {
-            auto ci = clients_.find(m.id);
-            if (ci == clients_.end()) continue;
-            if (!first) first = &ci->second.current_map;
-            else if (ci->second.current_map != *first) return false;
-        }
-        return true;
     }
 
     // Removes a client from its room (voluntary Leave or a disconnect) and
@@ -1991,9 +1993,11 @@ public:
             client_session_[c] = s.id;
             Printf("Physics session %u: %s waits for the start handshake to end (joins late once the session ticks).",
                    s.id, get_client_name(c));
+            send_room_state_to_room(room);   // who is in the session is part of the room's state
             return;
         }
         join_member(s, c);
+        send_room_state_to_room(room);
     }
 
     // The join itself (physics_session_member_joined's body until SAXH; also
@@ -2073,6 +2077,12 @@ public:
         auto it = physics_sessions_.find(session);
         if (it == physics_sessions_.end()) return;
         auto& s = it->second;
+        // Out of the session, out of its restart vote; and who is in a
+        // session is part of its room's state, which the room sees now.
+        if (auto* r = rooms_.find(s.room)) {
+            if (auto* m = r->find_member(c)) m->vote = false;
+            send_room_state_to_room(s.room);
+        }
         // Step Q7: a joiner still waiting for a join order holds nothing else.
         if (const auto w = std::find(s.waiting_orders.begin(), s.waiting_orders.end(), c); w != s.waiting_orders.end()) {
             s.waiting_orders.erase(w);
@@ -3584,8 +3594,13 @@ public:
                     send_room_event(c, event_type::RequestDenied, err, 0);
                     break;
                 }
-                if (name.empty())
-                    if (auto* r = rooms_.find(id)) r->name = "Room #" + std::to_string(id);
+                if (auto* r = rooms_.find(id)) {
+                    if (name.empty()) r->name = "Room #" + std::to_string(id);
+#if BMMO_BUILD_SIM
+                    // A new room's kind is a physics session where this server offers one (SetMode changes it).
+                    if (runner_) r->mode = bmmo::room::mode::Physics;
+#endif
+                }
                 send_room_event(c, event_type::RequestAccepted, error_code::None, id, c);
                 broadcast_room_states();
                 Printf("%s (#%u) created room %u.", client_it->second.name, c, id);
@@ -3652,18 +3667,32 @@ public:
                                     "not every member is ready: " + waiting);
                     break;
                 }
-                if (!room_members_same_map(*r)) { send_room_event(c, event_type::RequestDenied, error_code::MapMismatch, room); break; }
+                // The session's map: the room's (SetMap), or - none set, as
+                // before SetMap - the one the host's game has loaded, which
+                // the room shows while that session runs.  Every member's
+                // game must have the session's map loaded.
+                const bool room_map = bmmo::room::map_set(r->map) && !r->map_taken;
+                const bmmo::map session_map = room_map ? r->map : client_it->second.current_map;
+                std::string elsewhere;
+                for (const auto& m: r->members)
+                    if (auto mi = clients_.find(m.id); mi != clients_.end() && mi->second.current_map != session_map)
+                        elsewhere += (elsewhere.empty() ? "" : ", ") + mi->second.name;
+                if (!elsewhere.empty()) {
+                    send_room_event(c, event_type::RequestDenied, error_code::MapMismatch, room, c, 0,
+                                    room_map ? "not on the room's map: " + elsewhere : std::string{});
+                    break;
+                }
                 if (msg.mode == bmmo::room::mode::Physics) {
 #if BMMO_BUILD_SIM
                     if (!runner_) { send_room_event(c, event_type::RequestDenied, error_code::PhysicsUnavailable, room); break; }
-                    const int level = client_it->second.current_map.level;
+                    const int level = session_map.level;
                     // Step CMAP: an original level, or a custom map the server has (BML+'s custom-map
                     // loading; the world loads the same file into the same slot).
                     std::filesystem::path map_file;
                     std::string map_reason;
                     // Only a custom map consults the directory (rescanned so a new map needs no restart; the
                     // cache re-reads only files whose size or time changed).
-                    const auto& requested_map = client_it->second.current_map;
+                    const auto& requested_map = session_map;
                     std::vector<bmmo::session::custom_map_file> known_maps;
                     if (requested_map.type == bmmo::map_type::CustomMap && !requested_map.is_original_level())
                         known_maps = bmmo::session::scan_custom_maps(custom_maps_dir_, &custom_map_md5s_);
@@ -3716,7 +3745,9 @@ public:
                     }
                     auto err = rooms_.start(c, msg.mode);
                     if (err != error_code::None) { send_room_event(c, event_type::RequestDenied, err, room); break; }
-                    const uint32_t session = start_physics_session(*r, client_it->second.current_map, map_file);
+                    r->map = session_map;
+                    r->map_taken = !room_map;
+                    const uint32_t session = start_physics_session(*r, session_map, map_file);
                     send_room_event(c, event_type::RequestAccepted, error_code::None, room, c);
                     for (const auto& m: r->members)
                         send_room_event(m.id, event_type::SessionStarting, error_code::None, room, c);
@@ -3729,11 +3760,85 @@ public:
                 }
                 auto err = rooms_.start(c, msg.mode);
                 if (err != error_code::None) { send_room_event(c, event_type::RequestDenied, err, room); break; }
+                r->map = session_map;
+                r->map_taken = !room_map;
                 send_room_event(c, event_type::RequestAccepted, error_code::None, room, c);
                 for (const auto& m: r->members)
                     send_room_event(m.id, event_type::SessionStarting, error_code::None, room, c);
                 broadcast_room_states();
                 Printf("Room %u started a shadow session.", room);
+                break;
+            }
+            case action::SetMap: {
+                // The map the room's session will run: the one the host's
+                // game has loaded as it asks, carried by the request (a
+                // zeroed one - the host is in no level - clears it).
+                const uint32_t room = rooms_.room_of(c);
+                auto err = rooms_.set_map(c, msg.map);
+                if (err != error_code::None) { send_room_event(c, event_type::RequestDenied, err, room); break; }
+                send_room_event(c, event_type::RequestAccepted, error_code::None, room, c);
+                send_room_state_to_room(room);
+                if (bmmo::room::map_set(msg.map))
+                    Printf("Room %u: %s set its map (level %d).", room, client_it->second.name, msg.map.level);
+                else
+                    Printf("Room %u: %s cleared its map.", room, client_it->second.name);
+                break;
+            }
+            case action::VoteRestart:
+            case action::UnvoteRestart: {
+                const uint32_t room = rooms_.room_of(c);
+                // The vote is a session member's: one in the room but out of
+                // its session has none to give.
+                if (const auto* r = rooms_.find(room); msg.action == action::VoteRestart && r
+                        && r->phase == bmmo::room::phase::Running && !in_room_session(*r, c)) {
+                    send_room_event(c, event_type::RequestDenied, error_code::NoSession, room, c, 0,
+                                    "you are not in the session: join it first");
+                    break;
+                }
+                auto err = rooms_.set_vote(c, msg.action == action::VoteRestart);
+                if (err != error_code::None) { send_room_event(c, event_type::RequestDenied, err, room); break; }
+                send_room_event(c, event_type::RequestAccepted, error_code::None, room, c);
+                send_room_state_to_room(room);
+                break;
+            }
+            case action::Restart: {
+                // The host's restart of the running session, once every
+                // member in it has voted for it: a Start of the room's own
+                // kind on its own map, with every member of the room - the
+                // votes are their Ready.  The Start answers the request.
+                const uint32_t room = rooms_.room_of(c);
+                const auto in_session = [&](bmmo::net::connection id) {
+                    const auto* r = rooms_.find(room);
+                    return r && in_room_session(*r, id);
+                };
+                auto err = rooms_.can_restart(c, in_session);
+                if (err != error_code::None) {
+                    std::string waiting;
+                    if (const auto* r = err == error_code::NotReady ? rooms_.find(room) : nullptr)
+                        for (const auto& m: r->members)
+                            if (in_session(m.id) && !m.vote)
+                                if (auto mi = clients_.find(m.id); mi != clients_.end())
+                                    waiting += (waiting.empty() ? "" : ", ") + mi->second.name;
+                    send_room_event(c, event_type::RequestDenied, err, room, c, 0,
+                                    waiting.empty() ? std::string{} : "not everyone in the session voted to restart: " + waiting);
+                    break;
+                }
+                auto* r = rooms_.find(room);
+                for (auto& m: r->members) m.ready = true;
+                bmmo::room_request_msg start;
+                start.action = action::Start;
+                start.room = room;
+                start.mode = r->mode;
+                Printf("Room %u: restart voted by everyone in the session.", room);
+                handle_room_request(client_it, start);
+                break;
+            }
+            case action::SetMode: {
+                const uint32_t room = rooms_.room_of(c);
+                auto err = rooms_.set_mode(c, msg.mode);
+                if (err != error_code::None) { send_room_event(c, event_type::RequestDenied, err, room); break; }
+                send_room_event(c, event_type::RequestAccepted, error_code::None, room, c);
+                broadcast_room_states();   // the room list carries each room's kind
                 break;
             }
             case action::Kick: {
@@ -4757,6 +4862,10 @@ protected:
                     case bmmo::current_map_state::NameChange: {
                         client_it->second.current_map = msg->content.map;
                         client_it->second.current_sector = msg->content.sector;
+                        // A member's map is part of its room's state (the
+                        // roster shows it and a Start compares it), so the
+                        // room sees the change at once, not at its next event.
+                        send_room_state_to_room(rooms_.room_of(networking_msg->conn));
                         broadcast_message(*msg, bmmo::net::kSendReliableNoNagle, networking_msg->conn);
                         break;
                     }

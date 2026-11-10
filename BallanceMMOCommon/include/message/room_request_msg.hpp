@@ -1,6 +1,7 @@
 #ifndef BALLANCEMMOSERVER_ROOM_REQUEST_MSG_HPP
 #define BALLANCEMMOSERVER_ROOM_REQUEST_MSG_HPP
 #include "message.hpp"
+#include "room_state_msg.hpp"   // the map's wire form
 #include "../entity/room.hpp"
 
 namespace bmmo {
@@ -11,7 +12,8 @@ namespace bmmo {
         uint32_t room = 0;                 // target room; 0 for Create / List
         std::string name;                  // Create only, <= MAX_ROOM_NAME
         uint32_t target = 0;               // Kick only: player to remove
-        room::mode mode = room::mode::Shadow;  // Start only
+        room::mode mode = room::mode::Shadow;  // Start / SetMode
+        bmmo::map map{};                   // SetMap only: the map to set; a zeroed one clears it
 
         room_request_msg() : serializable_message(bmmo::RoomRequest) {}
 
@@ -24,6 +26,7 @@ namespace bmmo {
             message_utils::write_string<uint16_t>(name.substr(0, room::MAX_ROOM_NAME), raw);
             raw.write(reinterpret_cast<const char*>(&target), sizeof(target));
             raw.write(reinterpret_cast<const char*>(&m), sizeof(m));
+            room_state_msg::write_map(map, raw);
             return raw.good();
         }
 
@@ -37,8 +40,11 @@ namespace bmmo {
             if (name.size() > room::MAX_ROOM_NAME) return false;
             if (!message_utils::read_variable(raw, &target)) return false;
             if (!message_utils::read_variable(raw, &m)) return false;
-            if (a > static_cast<uint8_t>(room::action::Close)) return false;
+            if (a > static_cast<uint8_t>(room::action::Restart)) return false;
             if (m > static_cast<uint8_t>(room::mode::Physics)) return false;
+            // The last field, absent from a client older than SetMap: it then stays zeroed.
+            map = {};
+            room_state_msg::read_map(map, raw);
             action = static_cast<room::action>(a);
             mode = static_cast<room::mode>(m);
             return true;

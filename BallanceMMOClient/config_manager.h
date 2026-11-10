@@ -75,4 +75,7 @@ public:
     void set_server_data(const picojson::array& servers, size_t server_index);
     bool get_player_list_visible();
     void set_player_list_visible(bool visible);
+    // The room panel's tab: its screen edge and how far down it sits (0..1).
+    void get_room_panel_dock(bool& right, double& position);
+    void set_room_panel_dock(bool right, double position);
 };
