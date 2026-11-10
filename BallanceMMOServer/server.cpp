@@ -1113,6 +1113,7 @@ public:
         rc.patience = config_.physics_patience;
         rc.arrival_trace = config_.physics_arrival_trace;
         rc.lead_adjust = config_.physics_lead_adjust;
+        rc.input_hints = config_.physics_input_hints;
         rc.scheduled_start = true;   // FULL step SAXH: the start handshake names the start instant
         if (!bmmo::session::parse_test_clock_skew(config_.physics_test_clock_skew, rc.test_clock_skew)) {
             Printf("Physics sessions: invalid physics.test_clock_skew (expected T:MS:PCT, 0 < PCT < 100).");
@@ -1144,8 +1145,9 @@ public:
             on_resync_base_missed(session, player, base);
         };
         callbacks.on_inputs = [this](uint32_t session, uint32_t tick,
-                                     const std::vector<bmmo::session::applied_input>& applied) {
-            on_session_inputs(session, tick, applied);
+                                     const std::vector<bmmo::session::applied_input>& applied,
+                                     std::vector<bmmo::session::hint_entry> queued) {
+            on_session_inputs(session, tick, applied, std::move(queued));
         };
         callbacks.on_lead = [this](const bmmo::sim::lead_notice& notice) { on_session_lead(notice); };
         callbacks.on_event_accepted = [this](const bmmo::sim::accepted_event& a) { on_event_accepted(a); };
@@ -1184,11 +1186,11 @@ public:
         if (virtual_) rc.clock = virtual_;
         runner_ = std::make_unique<bmmo::sim::session_runner>(rc, callbacks);
         Printf("Physics sessions enabled (game root %s, input delay >= %u ticks (per session, from ping), "
-               "snapshot interval %u, full every %u, journal %s, patience %s, lead adjust %s).",
+               "snapshot interval %u, full every %u, journal %s, patience %s, lead adjust %s, input hints %s).",
                config_.physics_game_root,
                config_.physics_input_delay, rc.snapshot_interval, rc.full_snapshot_interval,
                rc.journal_dir.empty() ? std::string("off") : rc.journal_dir.string(), rc.patience ? "on" : "off",
-               rc.lead_adjust ? "on" : "off");
+               rc.lead_adjust ? "on" : "off", rc.input_hints ? "on" : "off");
     }
 
     bmmo::room::error_code check_physics_mods(const bmmo::server_room& r) {
@@ -1683,12 +1685,14 @@ public:
     // can now overtake the relayed inputs of earlier ticks; the clients land
     // every frame by its tick and park a frame for a mirror not yet made.
     void on_session_inputs(uint32_t session, uint32_t tick,
-                           const std::vector<bmmo::session::applied_input>& applied) {
+                           const std::vector<bmmo::session::applied_input>& applied,
+                           std::vector<bmmo::session::hint_entry> queued) {
         std::lock_guard lk(state_mutex_);
         auto it = physics_sessions_.find(session);
         if (it == physics_sessions_.end()) return;
         auto& s = it->second;
         s.relay.push(tick, applied);
+        s.relay.set_hints(std::move(queued));   // protocol 37
         // Unreliable, no delay, with the window: a lost datagram costs nothing
         // unless `relay_window` in a row are lost, and no frame ever waits
         // behind a loss.  (Reliable and ordered, 2026-10-19 .. 10-21, a loss
@@ -1765,6 +1769,7 @@ public:
                 }
                 msg.recipes = std::move(datagram.recipes);
                 msg.events = std::move(datagram.events);
+                msg.hints = std::move(datagram.hints);
                 msg.serialize();
                 const bool result = send(m, msg.raw.str().data(), msg.size(), bmmo::net::kSendUnreliableNoDelay);
                 if (!result || msg.held.empty()) continue;

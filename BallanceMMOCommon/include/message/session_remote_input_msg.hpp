@@ -76,6 +76,13 @@ namespace bmmo {
     // Protocol 13 (step R12, late-player design 2.5): wait is the RECIPIENT's
     // wait at the server (lateness.hpp server_wait_meter), which its client
     // sizes its rollback reach with (rollback.hpp reach_meter).
+    //
+    // Protocol 37 (session/input_relay.hpp, the hints): after the events
+    // section, only when there is one to carry: nhints u8 (1..), then per
+    // hint player u32, nticks u8 (1..kHintMaxTicks: the ticks tick + 1 ..
+    // tick + nticks), nruns u8 and per run len u8, keys u8, flags u8 - what
+    // that member's frames queued at the server hold for those ticks.  A
+    // datagram without hints ends with its events section, as before.
     struct session_remote_input_msg : public serializable_message {
         struct entry {
             uint32_t player = 0;
@@ -111,6 +118,7 @@ namespace bmmo {
         std::vector<held_record> held;     // <= kHeldNoticeTicks, the recipient's own
         std::vector<std::pair<uint8_t, session::ball_recipe>> recipes;   // protocol 33: attached
         std::vector<session::relay_event> events;                       // protocol 33, oldest first
+        std::vector<session::hint_entry> hints;                         // protocol 37, of the ticks after `tick`
 
         session_remote_input_msg() : serializable_message(bmmo::SessionRemoteInput) {}
 
@@ -210,6 +218,7 @@ namespace bmmo {
                 else raw.write(reinterpret_cast<const char*>(&r->source), sizeof(r->source));
             }
             write_events();
+            write_hints();
             return raw.good();
         }
 
@@ -300,8 +309,10 @@ namespace bmmo {
                 held.push_back(r);
             }
             if (!read_events()) return false;
-            // Nothing follows the events section: what does is another layout.
-            return raw.peek() == std::stringstream::traits_type::eof();
+            hints.clear();
+            if (raw.peek() == std::stringstream::traits_type::eof()) return true;
+            // Nothing follows the hints: what does is another layout.
+            return read_hints() && raw.peek() == std::stringstream::traits_type::eof();
         }
 
     private:
@@ -437,6 +448,50 @@ namespace bmmo {
                         break;
                 }
                 events.push_back(std::move(e));
+            }
+            return true;
+        }
+        void write_hints() {
+            std::vector<const session::hint_entry*> written;
+            for (const auto& h: hints)
+                if (!h.ticks.empty() && h.ticks.size() <= session::kHintMaxTicks && written.size() < 255)
+                    written.push_back(&h);
+            if (written.empty()) return;
+            put(static_cast<uint8_t>(written.size()));
+            for (const session::hint_entry* h: written) {
+                put(h->player);
+                put(static_cast<uint8_t>(h->ticks.size()));
+                put(static_cast<uint8_t>(session::hint_runs(*h)));
+                for (size_t i = 0; i < h->ticks.size();) {
+                    size_t end = i + 1;
+                    while (end < h->ticks.size() && h->ticks[end] == h->ticks[i]) ++end;
+                    put(static_cast<uint8_t>(end - i));
+                    put(h->ticks[i].keys);
+                    put(h->ticks[i].flags);
+                    i = end;
+                }
+            }
+        }
+        bool read_hints() {
+            uint8_t nhints = 0;
+            if (!message_utils::read_variable(raw, &nhints) || nhints == 0) return false;
+            hints.reserve(nhints);
+            for (uint8_t i = 0; i < nhints; ++i) {
+                session::hint_entry h;
+                uint8_t nticks = 0, nruns = 0;
+                if (!message_utils::read_variable(raw, &h.player)) return false;
+                if (!message_utils::read_variable(raw, &nticks) || nticks == 0 || nticks > session::kHintMaxTicks) return false;
+                if (!message_utils::read_variable(raw, &nruns) || nruns == 0 || nruns > nticks) return false;
+                for (uint8_t r = 0; r < nruns; ++r) {
+                    uint8_t len = 0;
+                    session::input_hint hint;
+                    if (!message_utils::read_variable(raw, &len) || len == 0 || h.ticks.size() + len > nticks) return false;
+                    if (!message_utils::read_variable(raw, &hint.keys)) return false;
+                    if (!message_utils::read_variable(raw, &hint.flags)) return false;
+                    h.ticks.insert(h.ticks.end(), len, hint);
+                }
+                if (h.ticks.size() != nticks) return false;
+                hints.push_back(std::move(h));
             }
             return true;
         }

@@ -240,6 +240,9 @@ namespace bmmo::session {
             pending_birth birth{};
             bool birth_known = false;
             std::map<uint32_t, bmmo::session::input_frame> inputs;   // relayed frames by tick
+            // Protocol 37: what the owner's frames queued at the server hold
+            // for ticks past the newest relayed frame (input_relay.hpp).
+            std::map<uint32_t, bmmo::session::input_hint> hints;
             bmmo::session::body_corrector corrector;
             uint64_t blends = 0, hard_sets = 0;
             // Step BALA (the airship rule): the tick this world first found
@@ -710,6 +713,11 @@ namespace bmmo::session {
         uint64_t relay_bodiless_ = 0;
         // ...and for a mirror's birth tick, which no replay can change.
         uint64_t relay_birth_frozen_ = 0;
+        // Protocol 37: hint ticks taken as news, the replays they asked for,
+        // those the applied frame then contradicted, those for a tick
+        // stepped past the reach (the applied frame's own correction decides
+        // there), and the bytes of every hint section received.
+        uint64_t hint_news_ = 0, hint_rewinds_ = 0, hint_wrong_ = 0, hint_late_ = 0, hint_bytes_ = 0;
         // FULL step SLX (Q-SLOT (a)): mirror steps whose drive pre_step
         // re-chose from the relayed frame for that very tick, which reached
         // the ring after post_step(T - 1) chose another (the drain hits).
@@ -2236,6 +2244,8 @@ namespace bmmo::session {
                                    const bmmo::session::input_frame& relayed);
         // Protocol 29: the acknowledged span (client_core_messages.cpp).
         void note_relay_span(const bmmo::session_remote_input_msg& msg);
+        void take_hints(const bmmo::session_remote_input_msg& msg);
+        bool note_hint(const client_core_state::remote_ball& remote, uint32_t tick);
         bool deliver_relayed_events(const bmmo::session_remote_input_msg& msg);
         // The server's last fresh tick of ours, as its relay header says
         // (protocol 33: what our piggybacked events ride until).

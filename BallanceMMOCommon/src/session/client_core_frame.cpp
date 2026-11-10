@@ -526,17 +526,24 @@ namespace bmmo::session {
     bool session_client_core::recorded_input_at(const std::string& entity, uint32_t tick,
                                                 bmmo::session::input_frame& out) const {
         const std::map<uint32_t, bmmo::session::input_frame>* inputs = nullptr;
+        const std::map<uint32_t, bmmo::session::input_hint>* hints = nullptr;
         if (entity == platform_.own_replica_name()) inputs = &s.own_inputs_;
         else
             for (const auto& [id, remote]: s.remotes_)
-                if (remote.entity == entity) inputs = &remote.inputs;
+                if (remote.entity == entity) {
+                    inputs = &remote.inputs;
+                    hints = &remote.hints;
+                }
         // Gap L, L2 (step EL7): a life whose name is not the player's
         // current one (H names one clone per life) reads that player's
         // ring, found by the life log; frames of an earlier lifetime stay
         // in the ring.
         if (!inputs && !entity.empty() && entity != platform_.own_replica_name())
             if (const uint32_t player = mirror_player_of(entity); player != 0)
-                if (const auto it = s.remotes_.find(player); it != s.remotes_.end()) inputs = &it->second.inputs;
+                if (const auto it = s.remotes_.find(player); it != s.remotes_.end()) {
+                    inputs = &it->second.inputs;
+                    hints = &it->second.hints;
+                }
         if (!inputs) return false;
         if (inputs == &s.own_inputs_) {
             auto it = inputs->find(tick);
@@ -550,7 +557,10 @@ namespace bmmo::session {
         // predictor's (live_drive), step RC1 - so a replay re-predicts the
         // tail instead of keeping the prediction recorded before the change
         // arrived; none before the first relayed frame, where the recorded
-        // prediction stands.
+        // prediction stands.  Protocol 37: in the tail, that newest frame
+        // with the keys the owner's queued frames hold there, where the
+        // server has said (hinted_frame) - live_drive's rule again.
+        if (hints && bmmo::session::hinted_frame(*inputs, *hints, tick, out)) return true;
         const auto* frame = bmmo::session::relay_frame_or_newest(*inputs, tick);
         if (!frame) return false;
         out = *frame;

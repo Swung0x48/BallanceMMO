@@ -1173,11 +1173,15 @@ namespace bmmo::session {
 
     // The frame a live step of `tick` drives a predicted mirror with: the
     // relayed frame for that tick when the ring has it, else the newest
-    // relayed frame (the predictor), else no keys with the navigation off.
+    // relayed frame (the predictor) - with the keys the owner's queued
+    // frames hold at that tick where the server has said (protocol 37,
+    // hinted_frame) - else no keys with the navigation off.
     bmmo::session::input_frame session_client_core::live_drive(const remote_ball& remote, uint32_t tick) {
         const auto exact = remote.inputs.find(tick);
         const bool have = exact != remote.inputs.end() || remote.have_input;
         bmmo::session::input_frame drive = exact != remote.inputs.end() ? exact->second : remote.input;
+        if (exact == remote.inputs.end() && remote.have_input)
+            bmmo::session::hinted_frame(remote.inputs, remote.hints, tick, drive);
         if (!have) drive.keys = 0;
         if (!have || !(drive.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE))
             drive.flags &= static_cast<uint8_t>(~bmmo::session::INPUT_FLAG_NAV_ACTIVE);

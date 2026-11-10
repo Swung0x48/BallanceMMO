@@ -82,6 +82,9 @@ namespace bmmo::sim {
         // is logged and nothing is sent.  Off, the runner does exactly what it
         // did before: the decisions are observed and logged, nothing else.
         bool lead_adjust = false;
+        // Protocol 37 (session/input_relay.hpp, the hints): on_inputs also
+        // gets every member's frames queued past the tick just stepped.
+        bool input_hints = false;
         // FULL step SAXH (protocol 24, session/start_handshake.hpp): the
         // members present at the start confirm one scheduled start instant
         // first, so a session does not start ticking when its last member is
@@ -259,8 +262,12 @@ namespace bmmo::sim {
         // other members so clients predict remote balls with the same input
         // (design 9.1), and the substituted ones back to their owner
         // (late-player design 1.2), whose client is otherwise never told.
+        // `queued` (protocol 37, runner_config::input_hints; empty when off):
+        // per member, what its frames already here hold for the ticks after
+        // `tick`, judged by arrival against the step instant like the take.
         std::function<void(uint32_t session, uint32_t tick,
-                           const std::vector<bmmo::session::applied_input>& applied)> on_inputs;
+                           const std::vector<bmmo::session::applied_input>& applied,
+                           std::vector<bmmo::session::hint_entry> queued)> on_inputs;
         // Simulation thread: a lead decision to send (runner_config::lead_adjust,
         // a client that declared CAP_LEAD).  The server sends it reliably with
         // repeats until the client acknowledges it (acknowledge_lead).

@@ -273,6 +273,15 @@ namespace bmmo::session {
         const std::string n3 = h.manager_unpassed < 0 ? std::string() : textf(
             " n3: manager_unpassed=%lld handed_back=%llu rehold_count=%llu", static_cast<long long>(h.manager_unpassed),
             static_cast<unsigned long long>(h.manager_unpassed_handed_back), static_cast<unsigned long long>(h.checkpoint_reholds));
+        // Protocol 37: hints=news/rewinds/wrong/late/bytes - hint ticks taken
+        // as news, the replays they asked for, hints the applied frame then
+        // contradicted, hints for a tick stepped past the reach, and the
+        // bytes of the hint sections received.  Only once the server sent
+        // one.
+        const std::string hints = s.hint_bytes_ == 0 ? std::string() : textf(
+            " hints=%llu/%llu/%llu/%llu/%llu", static_cast<unsigned long long>(s.hint_news_),
+            static_cast<unsigned long long>(s.hint_rewinds_), static_cast<unsigned long long>(s.hint_wrong_),
+            static_cast<unsigned long long>(s.hint_late_), static_cast<unsigned long long>(s.hint_bytes_));
         const std::string sparse = s.rollback_.sparse_capture() <= 1 ? std::string() : textf(
             " sparse=%u%s light=%llu/%.0f whole=%llu/%.0f rebased=%llu+%llu unanch=%llu verify=%llu/%llu/%llu/%llu",
             s.rollback_.sparse_capture(), s.rollback_.sparse_capture_verify() ? "v" : "",
@@ -523,7 +532,7 @@ namespace bmmo::session {
                      // starved reports now, the longest run, and the resyncs
                      // the starved rule asked for.
                      s.starved_run_, s.starved_run_max_, static_cast<unsigned long long>(s.starved_resyncs_),
-                     trafo.c_str(), probes.c_str(), arrays.c_str(), outside.c_str(), drain.c_str(), coalesced.c_str(), ccache.c_str()) + sparse + n3;
+                     trafo.c_str(), probes.c_str(), arrays.c_str(), outside.c_str(), drain.c_str(), coalesced.c_str(), ccache.c_str()) + sparse + n3 + hints;
     }
 
 }

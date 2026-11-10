@@ -284,7 +284,14 @@ namespace bmmo::session {
     //      (wake_mode::wake_moving: the release used to leave it at ~18% of
     //      its speed).  No wire change, no journal version: worlds of 35 and
     //      36 step differently, which the build id refuses anyway.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 36;
+    //  37  The relay's hints (session/input_relay.hpp, relay-protocol design
+    //      4.10; the server's physics.input_hints): a SessionRemoteInput may
+    //      end with what the other members' frames queued at the server hold
+    //      for the ticks after its newest one, and a client predicts those
+    //      mirrors with them instead of hold-last.  With the option off the
+    //      datagrams are byte for byte 36's.  No journal version (a hint is
+    //      a prediction: no world's inputs change).
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 37;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
     // The protocol whose SessionStart carries `mechanism_slots` (step Q7).

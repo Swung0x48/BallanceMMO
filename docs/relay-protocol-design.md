@@ -244,6 +244,58 @@ Measured (headless twins on the worktree build, RLD Arch server):
 - Retail L11 (both flags on, the worktree x86 build): own/mirror/body 784/1000/46385 compared, 0 different, 0
   missing, replay 2568/2568.
 
+### 4.10 Hints: the frames queued at the server (protocol 37, 2026-11-09)
+
+**Why.** The server steps tick T when the last member's frame for T is in, and relays the applied frames after the
+step. Every client runs the same schedule shifted by its own latency, so the last frame to arrive is the highest-ping
+member's: a relayed frame reaches a client about the room's worst round trip (plus ~4 ticks) after that client
+stepped T, whoever sent it. Measured on the public test's Level 6 recording (13 players, K = 20, each client at its
+own public-test ping, 0-114 ms round trip, the coordinator's virtual clock): every client's rewinds are 11.5-11.7
+ticks deep (p50 11-12, p90 15), the one at 0 ms like the one at 114 ms; 23 rewinds a second, 4 replayed ticks per
+live tick. The same with every latency at 0: 1 tick deep. A member made late mid-session (+150 ms each way) adds only
+~2 ticks for the others (patience stops the wait), and an input delay of 40 ticks instead of 7 changes nothing: the
+depth is the worst round trip, not the delay and not a slow member. Meanwhile the frames of the other twelve sit in
+the server's buffers for ticks.
+
+**What.** Every relay datagram also says what the other members' frames already queued at the server hold for the
+ticks after its newest: per member, the keys and flags of the consecutive ticks from the cursor on that had arrived
+by the step instant (the take's own cutoff, so a replayed inbound capture builds the same hints), at most 64 ticks,
+run-length coded (4 + 1 + 1 + 3 B per run), and only for a member with some queued tick that differs from the frame
+just applied for it - the rest hold-last already predicts. They ride the datagram's spare room, never open one, and
+are not acknowledged: the next tick's datagram carries what is queued then. A member whose cursor a lead reset or a
+re-anchor holds ahead gets none. The server's world and journal do not change; `physics.input_hints` (default off)
+switches the section, and without it a datagram is byte for byte protocol 36's.
+
+**The client.** A hint is a prediction, the applied frame stays the only truth: nothing is journalled or counted as
+relayed. Per mirror, a map of hinted ticks; past the newest relayed frame the mirror is driven with that frame and
+the hinted keys and flags (the hint of the tick, else the newest hint before it), in the live step (`live_drive`)
+and in every replay (`recorded_input_at`) - one rule, `hinted_frame`. A hint for a tick already stepped on another
+frame asks for the input replay from that tick, by `note_input_correction`'s rule (reach, body, birth tick); out of
+reach it is only counted. When the applied frame arrives the hints up to it go; equal to what the tick ran on, no
+replay follows. So a key change costs one rewind as before, as deep as the sender's own trip instead of the room's
+worst. The camera is not hinted (a turn is still corrected by the applied frame).
+
+**As built.** `session/input_relay.hpp` (input_hint, hint_entry, relay_ring::set_hints and the placement in
+build_datagrams, hint_store / hints_confirmed / hinted_frame), `timeline.hpp` input_buffer::queued,
+session_remote_input_msg (the trailing section), session_runner (on_inputs gets the queued frames), server.cpp,
+the client core (take_hints, note_hint; status field ` hints=news/rewinds/wrong/late/bytes` once one arrived),
+arena_map_test.py `--input-hints`, lbm_fast.sh `HARNESS=`. 835 tests.
+
+**Measured** (the recording above, one build, the option off / on, 6270 ticks): depth mean 11.5 -> 5.6 (p50 11 -> 5,
+p90 15 -> 11: the high-ping members' own key changes stay late), replayed ticks per live tick 3.97 -> 1.92 (-52 %),
+rewinds 22.8 -> 22.6 a second; the two server journals byte-identical, replayed 6248/6248, every client's FINAL rows
+exact; per client ~15 k hinted ticks taken, ~2.3 k replays asked by hints, 0 contradicted by the applied frame, 0
+out of reach. Fast LBM with the option on: 38/38 twins FINAL exact, criteria equal to pt16 arm by arm (uniform
+latency: few hints); again with the four clients at 15 / 30 / 45 / 70 ms one way: 38/38 FINAL exact, 17.6 k hinted
+ticks, 1.6 k replays, 0 contradicted, 0 out of reach. The whole recording (33224 ticks, every link 15 ms longer
+each way so the coordinator runs near real time: round trips 30-144 ms): depth 13.8 -> 8.7 (p50 14 -> 8), replayed
+ticks per live tick 4.60 -> 2.86 (-38 %), server journals byte-identical, 0 contradicted, 0 out of reach, no resync;
+the hint sections cost each recipient 1.3-1.4 KB/s (650-690 KB in 505 s; the status field's fifth number).
+Time, the 6270-tick pair run alone, one after the other (headless x64, medians over the 13 clients): a rewind
+10.2 -> 6.7 ms (restore 1.95 the same, replay 8.2 -> 4.8), rewind work 234 -> 152 ms per second, frame p99
+16.2 -> 14.2, p999 24.5 -> 18.8 ms. (A recipe with a 0 ms link runs at 0.2x on the coordinator;
+with the smallest latency at 15 ms the same arms run at 6x.)
+
 ## 5. Interactions to handle
 
 - **Numbering and re-anchors.** The acknowledgement is in the recipient's numbering; a resync, rejoin or late join resets `acked` to the base (as `held_notice` does); the camera dictionary and the per-member base frames are re-sent after it.
