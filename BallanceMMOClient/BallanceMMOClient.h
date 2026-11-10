@@ -446,7 +446,8 @@ private:
 	struct pending_room_request {
 		bmmo::room::action action{};
 		bool ready = false;            // Ready / Unready: which one we sent
-		bmmo::room::mode mode{};       // Start: the session kind we asked for
+		bmmo::room::mode mode{};       // Start / SetMode: the session kind we asked for
+		bool cleared = false;          // SetMap: we were in no level, so the room's map was cleared
 		bool announce = true;          // false: do not print the roster after Create / Join or print a command's room list
 		std::chrono::steady_clock::time_point sent{};
 	};
@@ -475,11 +476,13 @@ private:
 	void send_room_request(bmmo::room::action action, uint32_t room = 0, uint32_t target = 0,
 	                       bmmo::room::mode mode = bmmo::room::mode::Physics, std::string name = {},
 	                       bool announce = true);
-	void room_panel_toggle();      // "/mmo panel"
+	// The kind of session our room is set to start (its SetMode setting).
+	bmmo::room::mode own_room_mode();
+	void room_panel_toggle();      // "/mmo panel": unfold / fold, as its tab does
 	void room_panel_on_login(const std::optional<bmmo::login_server_info>& server_info);
 	// OnProcess, every frame: the panel draws into BML+'s ImGui frame (the one
 	// wrapped around OnProcess - never a frame of our own), its action goes
-	// out and the game's keyboard stays blocked exactly while it is open.
+	// out and the game's keyboard stays blocked exactly while it is unfolded.
 	void room_panel_frame();
 	std::string dispatch_automation_command(const std::string& line);
 	bool automation_ask_server(const std::string& verb, const std::string& rest);

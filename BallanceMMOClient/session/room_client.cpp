@@ -29,6 +29,11 @@ namespace {
             case action_type::Start: return "start";
             case action_type::Kick: return "kick";
             case action_type::Close: return "close";
+            case action_type::SetMap: return "setmap";
+            case action_type::SetMode: return "setmode";
+            case action_type::VoteRestart: return "vote";
+            case action_type::UnvoteRestart: return "unvote";
+            case action_type::Restart: return "restart";
         }
         return "?";
     }
@@ -37,9 +42,10 @@ namespace {
     // (the note at apply_pending_ping_text).  The panel guards all of its UI
     // state with its own mutex, so the network thread's notify / reset and
     // the game thread's draw need nothing from here; the block flag below is
-    // game-thread only (room_panel_frame).
+    // game-thread only (room_panel_frame), like the dock's load flag.
     bmmo::retail::room_panel room_panel_ui;
     bool room_panel_input_blocked = false;
+    bool room_panel_dock_loaded = false;
 }
 
 // Called right after a room_request goes out, so its outcome can name the
@@ -67,19 +73,31 @@ void BallanceMMOClient::send_room_request(bmmo::room::action action, uint32_t ro
     msg.target = target;
     msg.mode = mode;
     msg.name = std::move(name);
+    // SetMap sets the map this game is in right now.  Not current_map_ alone:
+    // that is the last level loaded and stays so in the menus, where the
+    // answer is "none".
+    if (action == bmmo::room::action::SetMap && m_bml->IsIngame())
+        msg.map = current_map_;
     msg.serialize();
     send(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
     push_room_request(pending_room_request{
         .action = action,
         .ready = (action == bmmo::room::action::Ready),
         .mode = mode,
+        .cleared = !bmmo::room::map_set(msg.map),
         .announce = announce,
     });
 }
 
-// "/mmo panel".  The keyboard block follows the visibility change in
-// room_panel_frame, so every open / close path blocks and unblocks exactly
-// once, there.
+bmmo::room::mode BallanceMMOClient::own_room_mode() {
+    std::lock_guard lk(room_state_mtx_);
+    const auto room = std::ranges::find(last_room_state_.rooms, last_room_state_.own_room, &bmmo::room::room_info::id);
+    return room != last_room_state_.rooms.end() ? room->room_mode : bmmo::room::mode::Physics;
+}
+
+// "/mmo panel": unfolds / folds the panel, as a click on its tab does.  The
+// keyboard block follows the visibility change in room_panel_frame, so every
+// open / close path blocks and unblocks exactly once, there.
 void BallanceMMOClient::room_panel_toggle() {
     room_panel_ui.toggle();
     SendIngameMessage(room_panel_ui.visible() ? "Room panel opened." : "Room panel closed.");
@@ -111,8 +129,18 @@ void BallanceMMOClient::room_panel_on_login(const std::optional<bmmo::login_serv
 // OnProcess, every frame (before its not-connected return: a disconnect's
 // reset must still unblock the keyboard).  Draws the panel into BML+'s ImGui
 // frame, sends the one action a click produced and keeps the game's keyboard
-// blocked exactly while the panel is open.
+// blocked exactly while the panel is open (unfolded; its tab alone blocks
+// nothing).  The tab's dock is the player's: read from the extra config
+// once, written back after each drag.
 void BallanceMMOClient::room_panel_frame() {
+    if (!room_panel_dock_loaded) {
+        room_panel_dock_loaded = true;
+        bmmo::retail::room_panel::dock dock;
+        bool right = dock.right;
+        double position = dock.position;
+        config_manager_.get_room_panel_dock(right, position);
+        room_panel_ui.set_dock({right, static_cast<float>(position)});
+    }
     bmmo::room_state_msg state;   // field-wise: the message's stream member makes it move-only
     std::vector<bmmo::room::action> pending;
     {
@@ -120,6 +148,7 @@ void BallanceMMOClient::room_panel_frame() {
         state.own_room = last_room_state_.own_room;
         state.rooms = last_room_state_.rooms;
         state.members = last_room_state_.members;
+        state.own_map = last_room_state_.own_map;
         pending.reserve(pending_room_requests_.size());
         for (const auto& request: pending_room_requests_)
             pending.push_back(request.action);
@@ -128,10 +157,23 @@ void BallanceMMOClient::room_panel_frame() {
     {
         Bui::ImGuiContextScope scope;
         if (ImGui::GetCurrentContext())
-            act = room_panel_ui.draw(state, db_.get_client_id(), pending, connected(), core_host_running());
+            act = room_panel_ui.draw(state, db_.get_client_id(), pending, connected(), core_host_running(),
+                                     db_.player_count() + 1);
     }
     if (act.valid)
         send_room_request(act.type, act.room, act.target, act.mode, act.name, false);
+    if (act.connect)
+        connect_to_server("");   // no address: the server list, as "/mmo connect" alone
+    if (act.connect)
+        connect_to_server("");   // no address: the server list, as "/mmo connect" alone
+    if (act.connect)
+        connect_to_server("");   // no address: the server list, as "/mmo connect" alone
+    if (act.connect)
+        connect_to_server("");   // no address: the server list, as "/mmo connect" alone
+    if (act.connect)
+        connect_to_server("");   // no address: the server list, as "/mmo connect" alone
+    if (const auto dock = room_panel_ui.take_moved_dock())
+        config_manager_.set_room_panel_dock(dock->right, dock->position);
     // The block is BML+'s one global switch, which the server list also
     // drives: its deferred unblock after a connect (server_list::exit_gui,
     // 500 ms after the click, once Return is up) can land after a fast login
@@ -293,6 +335,10 @@ void BallanceMMOClient::handle_room_request_outcome(const bmmo::room_event_msg& 
             break;
         case action::Leave:
             SendIngameMessage(std::format("Left room #{}.", msg.room), bmmo::ansi::BrightYellow);
+            // A session is its room's: the server took this member out of it
+            // with the room, and it ends here too (already over when the
+            // leave was the level exit's own, core_host_pre_exit_level).
+            utils_.run_on_game_thread([this] { core_host_end_local("left the room"); });
             break;
         case action::Ready:
         case action::Unready: {
@@ -306,7 +352,7 @@ void BallanceMMOClient::handle_room_request_outcome(const bmmo::room_event_msg& 
             SendIngameMessage(std::format("Starting a {} session in room #{}.",
                     request->mode == bmmo::room::mode::Physics ? "physics" : "shadow", msg.room),
                     bmmo::ansi::BrightGreen);
-            room_panel_ui.close();   // the session starts; the panel goes away
+            room_panel_ui.close();   // the session starts; the panel folds away
             break;
         case action::Kick:
             SendIngameMessage(std::format("Removed {} from room #{}.",
@@ -314,6 +360,25 @@ void BallanceMMOClient::handle_room_request_outcome(const bmmo::room_event_msg& 
             break;
         case action::Close:
             SendIngameMessage(std::format("Closed room #{}.", msg.room), bmmo::ansi::BrightYellow);
+            break;
+        case action::SetMap:
+            SendIngameMessage(request->cleared
+                    ? std::format("Room #{} has no map now (you are not in a level).", msg.room)
+                    : std::format("Room #{} will start on the map you are in.", msg.room), bmmo::ansi::BrightGreen);
+            break;
+        case action::SetMode:
+            SendIngameMessage(std::format("Room #{} will start a {} session.", msg.room,
+                    request->mode == bmmo::room::mode::Physics ? "physics" : "shadow"), bmmo::ansi::BrightGreen);
+            break;
+        case action::VoteRestart:
+            SendIngameMessage("You voted to restart the session.", bmmo::ansi::BrightGreen);
+            break;
+        case action::UnvoteRestart:
+            SendIngameMessage("You withdrew your vote to restart.", bmmo::ansi::BrightGreen);
+            break;
+        case action::Restart:
+            SendIngameMessage(std::format("Restarting the session in room #{}.", msg.room), bmmo::ansi::BrightGreen);
+            room_panel_ui.close();   // the session starts; the panel folds away
             break;
     }
 }
@@ -361,6 +426,7 @@ void BallanceMMOClient::handle_room_event(const bmmo::room_event_msg& msg) {
             const auto text = std::format("You were removed from room #{} by {}.",
                     msg.room, get_username(msg.actor));
             SendIngameMessage(text, bmmo::ansi::BrightRed);
+            utils_.run_on_game_thread([this] { core_host_end_local("removed from the room"); });   // as a Leave
             break;
         }
         case event_type::RoomClosed:
@@ -384,7 +450,7 @@ void BallanceMMOClient::handle_room_event(const bmmo::room_event_msg& msg) {
                 const auto text = std::format("{} started the room session.", get_username(msg.actor));
                 SendIngameMessage(text, bmmo::ansi::BrightGreen);
             }
-            room_panel_ui.close();   // the session starts; the panel goes away
+            room_panel_ui.close();   // the session starts; the panel folds away
             break;
         case event_type::SessionEnded: {
             const auto text = std::format("The room session ended{}{}.",

@@ -18,11 +18,15 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 1. 房主 `Create`（可带名字，≤ 32 字节；空则服务端生成）。创建者自动成为成员与房主。
 2. 其他玩家 `List` 查看，`Join <id>` 加入。房间人数上限由服务端配置（默认 8）。
 3. 成员 `Ready` / `Unready`。房主本人也需要 `Ready`。
-4. 房主 `Start`，可带 `mode`：`Shadow`（影子球，旧逻辑）或 `Physics`（物理会话）。服务端校验：全员 Ready、全员在同一张地图（`current_map` 一致）、物理会话时 Mod 白名单通过且服务端物理模拟可用。校验失败返回 `RequestDenied` 与错误码。
-5. 会话进行中房间 phase 为 `Running`；会话结束（房主 `Close`、房主发起 `End`、所有成员离开或服务端失败）回到 `Lobby` 或销毁。
-6. 房主断线：按加入顺序把房主转给下一名成员（`HostChanged`）。最后一名成员离开时销毁房间（`RoomClosed`）。
-7. `Kick <player>` 仅房主可用。被踢者收到 `Kicked`。
-8. 断线即视为 `Leave`。
+4. 房间有两项由房主设定的设置，只能在等待阶段（`Lobby`）改，会话运行中改会被拒绝（`SessionRunning`）：
+   - 地图：房主 `SetMap`，把**房主的游戏此刻所在的关卡**设为房间地图（请求里带这张地图）；房主不在关卡内时带一张全零的地图，表示清除。未设置时房间"在大厅"。
+   - 模式：房主 `SetMode`，`Shadow`（影子球，旧逻辑）或 `Physics`（物理会话）。新房间在服务端提供物理会话时默认 `Physics`，否则 `Shadow`。
+5. 房主 `Start`，带 `mode`（客户端不指定时用房间的模式）。会话的地图是房间地图；房间没有设置地图时沿用旧规则，取房主的 `current_map`；这张图只属于这一次会话（运行期间作为房间地图显示），会话结束后房间回到未设置。服务端校验：全员 Ready、每个成员的 `current_map` 都等于会话的地图（否则 `MapMismatch`，设置过房间地图时 reason 列出不在这张图上的成员）、物理会话时 Mod 白名单通过且服务端物理模拟可用。校验失败返回 `RequestDenied` 与错误码。
+6. 会话进行中可以投票重开：**会话内的**成员 `VoteRestart` / `UnvoteRestart`（没有会话在跑，或自己不在会话里——中途进房间还没加入、已通关——时拒绝，`NoSession`）。会话内的成员都投了之后，房主 `Restart`：服务端把每个成员记为 Ready，然后按房间的模式和地图执行一次 `Start`（结束当前会话、开新会话，`Start` 的其余校验照常，结果作为 `Restart` 的回复）。会话内还有人没投时拒绝（`NotReady`，reason 列出没投的成员）；会话外的成员不计票，但会被带进新会话。票在每次会话开始和结束时清零，成员离开会话时他的票也清掉。
+7. 会话进行中房间 phase 为 `Running`；会话结束（房主 `Close`、房主发起 `End`、所有成员离开或服务端失败）回到 `Lobby` 或销毁。`SetMap` 设置的地图和模式保留到下一次开始。
+8. 房主断线：按加入顺序把房主转给下一名成员（`HostChanged`）。最后一名成员离开时销毁房间（`RoomClosed`）。
+9. `Kick <player>` 仅房主可用。被踢者收到 `Kicked`。
+10. 断线即视为 `Leave`。
 
 ### 1.2 可见性
 
@@ -36,11 +40,12 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| action | u8 | `List=0, Create=1, Join=2, Leave=3, Ready=4, Unready=5, Start=6, Kick=7, Close=8` |
+| action | u8 | `List=0, Create=1, Join=2, Leave=3, Ready=4, Unready=5, Start=6, Kick=7, Close=8, SetMap=9, SetMode=10, VoteRestart=11, UnvoteRestart=12, Restart=13` |
 | room | u32 | 目标房间；`Create`/`List` 时为 0 |
 | name | string ≤ 32 | 仅 `Create` |
 | target | u32 | 仅 `Kick`：被踢玩家 id |
-| mode | u8 | 仅 `Start`：`Shadow=0, Physics=1` |
+| mode | u8 | `Start` / `SetMode`：`Shadow=0, Physics=1` |
+| map | type u8、level i32、md5[16] | 仅 `SetMap`：要设置的地图，全零 = 清除。消息的最后一个字段；更早的客户端不发，服务端读作全零 |
 
 `room_state_msg`（server → client，reliable；房间列表或本房间变化时推送给相关玩家）
 
@@ -48,14 +53,17 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 | --- | --- |
 | own_room | u32（0 = 不在房间） |
 | rooms | u16 count，每项：id u32、name string、host u32、member_count u16、capacity u16、phase u8（`Lobby=0, Running=1`）、mode u8 |
-| members | u16 count（仅本房间），每项：id u32、name string ≤ 64、ready u8、is_host u8、map（type u8、level i32、md5[16]） |
+| members | u16 count（仅本房间），每项：id u32、name string ≤ 64、flags u8（bit 0 = ready，bit 1 = 已投票重开，bit 2 = 在正在运行的会话里；更早的对端只写、只认 0/1）、is_host u8、map（type u8、level i32、md5[16]） |
+| own_map | 本房间的地图（type u8、level i32、md5[16]），全零 = 未设置或不在房间。消息的最后一个字段；更早的服务端不发，客户端读作全零 |
+
+成员的 `current_map` 变化（进入关卡）、成员加入或离开正在运行的会话，也会把 `room_state` 推给同房间的成员。
 
 `room_event_msg`（server → client，reliable）
 
 | 字段 | 类型 |
 | --- | --- |
 | type | u8：`RequestAccepted=0, RequestDenied=1, PlayerJoined=2, PlayerLeft=3, HostChanged=4, Kicked=5, RoomClosed=6, ReadyChanged=7, SessionStarting=8, SessionEnded=9` |
-| error | u8：`None=0, NotFound, Full, AlreadyInRoom, NotInRoom, NotHost, NotReady, MapMismatch, ModMismatch, PhysicsUnavailable, InvalidName, ServerBusy, Unsupported` |
+| error | u8：`None=0, NotFound, Full, AlreadyInRoom, NotInRoom, NotHost, NotReady, MapMismatch, ModMismatch, PhysicsUnavailable, InvalidName, ServerBusy, Unsupported, SessionRunning, NoSession` |
 | room | u32 |
 | actor | u32（发起者） |
 | subject | u32（被操作者，可为 0） |
@@ -65,7 +73,7 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 
 一次操作可能同时产生广播事件：服务端先发给发起者结果，再把 `PlayerJoined` / `PlayerLeft` / `HostChanged` / `RoomClosed` / `SessionStarting` 发给其他成员，最后推送 `room_state`。`Ready`/`Unready` 相反——先推 `room_state`（其中已带新的 ready 标记），再发 `ReadyChanged`，最后回结果，这样收到事件的客户端可以直接从名单里读出新状态与人数。客户端对自己发起的操作只显示结果那一条，不重复显示随之而来的广播事件。
 
-客户端命令：`/mmo room list|create [name]|join <id>|leave|ready [on|off]|start [physics|shadow]|kick <player>|close|status|session`。
+客户端命令：`/mmo room list|create [name]|join <id>|leave|ready [on|off]|setmap|setmode <physics|shadow>|start [physics|shadow]|vote|unvote|restart|kick <player>|close|status|session`。`setmap` 不带参数：设的是自己此刻所在的关卡。
 
 ## 2. 会话（物理模式）
 

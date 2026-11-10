@@ -7,6 +7,8 @@ namespace {
         {"servers", picojson::value{picojson::array{}}},
         {"selected_server", picojson::value{0ll}},
         {"player_list_visible", picojson::value{false}},
+        {"room_panel_right", picojson::value{true}},
+        {"room_panel_position", picojson::value{0.3}},
     };
 }
 
@@ -236,5 +238,17 @@ bool config_manager::get_player_list_visible() {
 
 void config_manager::set_player_list_visible(bool visible) {
     extra_config_["player_list_visible"] = picojson::value{visible};
+    save_extra_config();
+}
+
+void config_manager::get_room_panel_dock(bool& right, double& position) {
+    // A hand-edited file may hold anything: a wrong type leaves the caller's value.
+    if (auto& v = extra_config_["room_panel_right"]; v.is<bool>()) right = v.get<bool>();
+    if (auto& v = extra_config_["room_panel_position"]; v.is<double>()) position = v.get<double>();
+}
+
+void config_manager::set_room_panel_dock(bool right, double position) {
+    extra_config_["room_panel_right"] = picojson::value{right};
+    extra_config_["room_panel_position"] = picojson::value{position};
     save_extra_config();
 }
