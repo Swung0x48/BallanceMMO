@@ -1266,8 +1266,12 @@ verify run (`work/S0/run_lc.sh`), E-core retail, K = 8, one-way lag 150, us:
 So a rewind of the ~6 ticks a hinted member replays is ~1.3 ms shorter (L12_h: 2.3 + 6.2 x 0.75 -> 0.54), one of
 24 ticks ~5 ms. Verify: 1.26 M hits over the three verify sessions, 0 mismatches, no shared name. The journals'
 FINAL rows of off, on and verify, client by client: the balls and the 14 / 23 bodies bit-equal; ctl_h's 32 trafo
-pieces differ between any two sessions, two off runs and two runs of 381dbd4d alike (the comparison keys pieces
-across sessions; not this change). The restore is unchanged: it is the next fixed part (restore_scripts 1.4-1.5 ms
+pieces differ between any two sessions, two off runs and two runs of 381dbd4d alike, and they must: an explosion's
+Random seed is trafo_seed(session seed, player id, applied tick, type), and a player id is the server's
+GameNetworkingSockets connection handle, a random number of each connection (c2off_ctl_h runs 1 and 2: the same
+explosions at ticks 458 / 498 / 908, ids 484592829 / 508092805 vs 2462173594 / 109078206, seeds 1547941638 /
+75651449 / 1829446291 vs 2051120431 / 347687379 / 1593814566). Within a session every client and the server agree;
+across sessions only the balls and bodies are comparable. The restore is unchanged: it is the next fixed part (restore_scripts 1.4-1.5 ms
 on L12, set_savestate 1.2 ms on L11), with the whole records' scripts (~0.2 ms a replayed tick).
 
 ## Measured (step A2: a remote correction cadence, 2026-11-10)
