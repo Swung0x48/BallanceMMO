@@ -447,6 +447,11 @@ namespace {
     // every SessionStart and applied to a running core at once (the core
     // reads the field at each restore).  Host-local: nothing on the wire.
     std::atomic<bool> own_births_parked_next{false};
+    // Step A2: core_config::remote_cadence_frames ('session cadence N'): 0 =
+    // a remote's correction waits only while the pacer is behind.  Read at
+    // every SessionStart, applied to a running core at once, kept in the
+    // capture's header.  Host-local: nothing on the wire.
+    std::atomic<uint32_t> remote_cadence_next{0};
 
     // ------------------------------------------------------------ the mailbox
     // Design 3.2 "Receive": every Session* opcode's bytes, in arrival order.  A
@@ -2298,6 +2303,7 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     // FULL step R6B: 'session own-births parked' keeps the in-window
     // scripted own birth on the parking path (the control arm).
     config.own_births_parked = own_births_parked_next.load();
+    config.remote_cadence_frames = remote_cadence_next.load();   // step A2
     // RC3 (step B5RX, the user: work as if snapshots did not exist): with
     // the session's snapshots off, a body-set change's full snapshot is no
     // correction, only names and rows.
@@ -2838,11 +2844,11 @@ void BallanceMMOClient::core_host_start_capture(const std::string& start_bytes) 
     for (const auto byte: msg.map.md5) md5 += std::format("{:02x}", static_cast<unsigned>(static_cast<uint8_t>(byte)));
     const std::string header = std::format(
         "bmmo-retail-capture 1 build={} session={} level={} map={} own={} snapshots={} cache={} parked={} trace={} "
-        "rollback={} nonblocking={} final_checkpoints={} checkpoint_ticks={}",
+        "rollback={} nonblocking={} final_checkpoints={} checkpoint_ticks={} cadence={}",
         physics_view_.build_id(), msg.session, msg.map.level, md5, db_.get_client_id(), snapshots_next.load() ? 1 : 0,
         static_cast<int>(capture_cache_next.load()), own_births_parked_next.load() ? 1 : 0, core_trace ? 1 : 0,
         core_rollback ? 1 : 0, anchor_freeze.nonblocking ? 1 : 0, diag_final_checkpoints() ? 1 : 0,
-        journal_checkpoint_ticks())
+        journal_checkpoint_ticks(), remote_cadence_next.load())
         + core_host_capture_players() + core_host_capture_requests();
     std::string error;
     auto prune = [directory] { bmmo::retail::session_capture::prune(directory, bmmo::retail::journal_files::kKeepCaptures - 1); };
@@ -3012,6 +3018,7 @@ std::string BallanceMMOClient::core_host_capture_verb(const std::string& rest) {
     snapshots_next.store(number("snapshots") != 0);
     capture_cache_next.store(static_cast<uint8_t>(number("cache")));
     own_births_parked_next.store(number("parked") != 0);
+    remote_cadence_next.store(static_cast<uint32_t>(std::max(0LL, number("cadence"))));   // older captures: 0
     core_trace = number("trace") != 0;
     core_rollback = number("rollback") != 0;
     anchor_freeze.nonblocking = number("nonblocking") != 0;
@@ -5966,6 +5973,20 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
                            host.sound_skipped_queued, host.sound_reset_failed, host.sound_checks, host.sound_bound,
                            host.sound_unbound);
     }
+    if (what == "cadence") {
+        // Step A2: 'session cadence N|status' (core_config::
+        // remote_cadence_frames, 0-16): for the next session and, at once,
+        // for a running core.
+        if (!value.empty() && value != "status") {
+            char* end = nullptr;
+            const long n = std::strtol(value.c_str(), &end, 10);
+            if (end == value.c_str() || *end || n < 0 || n > 16) return "error usage: session cadence <0-16>|status";
+            remote_cadence_next.store(static_cast<uint32_t>(n));
+            if (core_session_running()) host.core->config.remote_cadence_frames = static_cast<uint32_t>(n);
+        }
+        return std::format("ok cadence next={} running={}", remote_cadence_next.load(),
+                           core_session_running() ? std::to_string(host.core->config.remote_cadence_frames) : "none");
+    }
     if (what == "drop-birth") {
         // A testing tool (R1 (c)): the next own Physicalize of this core
         // session never reaches the server (hooks.filter_event).
@@ -5979,7 +6000,7 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
            "session drop-birth | session hold-event TYPE:N:MS|TYPE:N:drop|off | session force-own-move <n> [after <k>] | "
            "session placement | session probes | session activate <script> at b+<n>|<tick> | "
            "session cache off|on|verify|status | session snapshots on|off|status | "
-           "session own-births parked|remade|status | "
+           "session own-births parked|remade|status | session cadence <0-16>|status | "
            "session hold blocking|nonblocking|status | session hold shots DIR|off";
 }
 

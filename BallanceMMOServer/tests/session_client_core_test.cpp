@@ -9822,6 +9822,36 @@ namespace {
         EXPECT_FALSE(s.input_rewind_pending_);
     }
 
+    // Step A2: config.remote_cadence_frames puts a remote's correction off
+    // on schedule too, for that many frames after the last input replay;
+    // the reach still bounds the wait.
+    TEST(SessionClientCoreTrafo, OnTheCadenceARemoteCorrectionWaitsOnSchedule) {
+        flow_fake fake;
+        trafo_fake t;
+        session_client_core core(trafo_rewind_platform(fake, t), trafo_caps());
+        trafo_tick_125(core, fake);
+        core.config.rollback = true;
+        core.config.remote_cadence_frames = 4;
+        trafo_record_ticks(core, 110, 125);
+        auto& s = state_of(core);
+        const auto late = [&](uint32_t seq, uint32_t tick) {
+            core.on_session_event(trafo_message(4, seq, bmmo::session::TRAFO_RESET | bmmo::session::TRAFO_SERVER
+                                                            | bmmo::session::TRAFO_FINAL, tick, tick));
+            ASSERT_TRUE(s.input_rewind_pending_);
+        };
+        late(1, 120);
+        steps{core}.replay_corrected_inputs();
+        EXPECT_EQ(s.input_rewinds_, 1u) << "nothing ran before it: at once";
+        late(2, 121);
+        for (int i = 0; i < 3; ++i) steps{core}.replay_corrected_inputs();
+        EXPECT_EQ(s.input_rewinds_deferred_, 3u) << "on schedule (no note_pacer_behind)";
+        EXPECT_TRUE(s.input_rewind_pending_);
+        steps{core}.replay_corrected_inputs();
+        EXPECT_EQ(s.input_rewinds_, 2u) << "the fourth frame after the last replay";
+        EXPECT_FALSE(s.input_rewind_pending_);
+        EXPECT_EQ(s.input_rewinds_deadline_, 0u);
+    }
+
     TEST(SessionClientCoreTrafo, AnInputPastTheHistoryAsksForAResync) {
         flow_fake fake;
         trafo_fake t;

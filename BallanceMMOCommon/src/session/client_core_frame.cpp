@@ -56,10 +56,24 @@ namespace bmmo::session {
             ++s.subst_deferred_;
             return;
         }
-        if (s.pacer_behind_ >= bmmo::session::kRemoteCoalesceBehind
-                && !s.remote_replay_pacer_.due(current_tick(), s.input_rewind_tick_, reach, true)) {
-            ++s.input_rewinds_deferred_;
-            return;
+        // Step A2: with config.remote_cadence_frames a remote's correction
+        // waits on schedule too - but not a pending own one, nor one of a
+        // ball near the own ball (kRemoteCadenceNearMeters).
+        const bool behind = s.pacer_behind_ >= bmmo::session::kRemoteCoalesceBehind;
+        const bool cadence = config.remote_cadence_frames != 0 && !s.input_rewind_own_ && !s.input_rewind_has_own_;
+        if (behind || cadence) {
+            const uint32_t standard_frames = s.remote_replay_pacer_.coalesce();
+            const uint32_t frames = !cadence ? standard_frames
+                : behind ? std::max(config.remote_cadence_frames, standard_frames) : config.remote_cadence_frames;
+            if (!s.remote_replay_pacer_.due(current_tick(), s.input_rewind_tick_, reach, true, frames)) {
+                if (behind || !correction_near_own_ball()) {
+                    ++s.input_rewinds_deferred_;
+                    return;
+                }
+                ++s.input_rewinds_near_;
+            } else if (cadence && s.remote_replay_pacer_.recent(frames)) {
+                ++s.input_rewinds_deadline_;   // the reach bound the wait
+            }
         }
         const uint32_t anchor = s.input_rewind_tick_;
         const std::string entity = s.input_rewind_entity_;
@@ -124,6 +138,22 @@ namespace bmmo::session {
                  static_cast<unsigned long long>(s.trafo_missed_));
             if (!s.resync_pending_) request_resync("a trafo input could not be replayed", true);
         }
+    }
+
+    // Step A2: whether a ball the pending replay corrects is within
+    // kRemoteCadenceNearMeters of the own ball in the newest record.
+    bool session_client_core::correction_near_own_ball() const {
+        const uint32_t now = current_tick();
+        bmmo_physics_body_state own{}, other{};
+        if (!s.rollback_.recorded_body_state(platform_.own_replica_name(), now, own)) return false;
+        constexpr double r2 = bmmo::session::kRemoteCadenceNearMeters * bmmo::session::kRemoteCadenceNearMeters;
+        for (const auto& entity: s.input_rewind_entities_) {
+            if (!s.rollback_.recorded_body_state(entity, now, other)) continue;
+            double d2 = 0.0;
+            for (int i = 0; i < 3; ++i) d2 += (own.position[i] - other.position[i]) * (own.position[i] - other.position[i]);
+            if (d2 < r2) return true;
+        }
+        return false;
     }
 
     // The reach's cap from a measured rewind before the session needs a

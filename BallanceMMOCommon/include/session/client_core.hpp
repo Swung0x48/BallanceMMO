@@ -815,6 +815,8 @@ namespace bmmo::session {
         bmmo::session::own_replay_pacer remote_replay_pacer_{bmmo::session::kRemoteReplayCoalesceFrames};
         double pacer_behind_ = 0.0;
         uint64_t input_rewinds_deferred_ = 0;
+        uint64_t input_rewinds_deadline_ = 0;   // step A2: cadence waits the reach cut short
+        uint64_t input_rewinds_near_ = 0;       // step A2: not held, a corrected ball near the own one
         uint32_t subst_late_logs_ = 0, subst_unresolved_logs_ = 0;
         // The frames each uplink datagram carried (remember_sent), and the
         // notices of ticks not simulated yet with whether to correct them
@@ -1275,6 +1277,16 @@ namespace bmmo::session {
         // them its behaviour is today's `rollback` alone.
         bool input_rewind = true;
         bool own_corrections = true;
+        // Step A2 (the rewind cadence): 0 = a remote's correction is put
+        // off only while the pacer is behind (kRemoteCoalesceBehind, up to
+        // kRemoteReplayCoalesceFrames frames); N = always, up to N frames
+        // after the last input replay, under the same reach deadline - the
+        // replay that runs carries every correction of the frames it
+        // waited.  Not held by it: a pending own correction (the own
+        // pacer's rule), and on schedule one of a ball within
+        // kRemoteCadenceNearMeters of the own ball.  Headless
+        // --remote-cadence N; retail 'session cadence N'.
+        uint32_t remote_cadence_frames = 0;
         // Design 1.2 feature switch (R1): `lifecycle_rewind` - a remote birth
         // stamped in the past is made inside a replay at its tick
         // (make_remote_birth's pending path) and a late body change rewinds
@@ -2124,6 +2136,7 @@ namespace bmmo::session {
         // One replay for every input correction the frame collected (the
         // relay's and our own substituted frames').
         void replay_corrected_inputs();
+        bool correction_near_own_ball() const;   // step A2
         void calibrate_rewind_cost();
         void retry_owed_resync();
         // Every rewind the core asks of the engine outside a snapshot

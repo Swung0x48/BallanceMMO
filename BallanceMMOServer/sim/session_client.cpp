@@ -328,6 +328,8 @@ namespace {
         // SessionReady - the joiner-side stall that takes a base's budget,
         // which a stall of the server's runner does not).
         uint32_t starved_resync_reports = bmmo::session::kStarvedResyncReports;
+        // Step A2: --remote-cadence N (the core's remote_cadence_frames).
+        uint32_t remote_cadence_frames = 0;
         int stall_after_ready_ms = 0;
         bool correct = true;
         bool rollback = true;         // design 9.6; --no-rollback falls back to blending
@@ -625,6 +627,7 @@ namespace {
                   "       [--reach N]   (the rollback's reach pinned at N ticks, 48..120; default: per client, from the relay lag)\n"
                   "       [--rewind-cost R:P]   (the reach's cap from a fixed rewind cost: R ms of restore, P ms a tick; default measured)\n"
                   "       [--starved-resync-reports N]   (N starved input reports in a row ask for a resync; 0 = never; default 330)\n"
+                  "       [--remote-cadence N]   (a remote's correction waits up to N frames after the last input replay; 0 = only while behind)\n"
                   "       [--stall-after-ready MS]   (test: sleep MS ms right after sending SessionReady)\n"
                   "       [--body-set-corrections]   (snapshots off: a body-set change's full snapshot still corrects, as before RC3; the control arm)\n"
                   "       [--accept-protocol N]      (test only: also take a SessionStart of physics protocol N - a reference capture's replay)\n"
@@ -864,6 +867,10 @@ namespace {
             else if (arg == "--starved-resync-reports") {
                 if (!(v = next())) return false;
                 out.starved_resync_reports = static_cast<uint32_t>(std::max(0, std::atoi(v)));
+            }
+            else if (arg == "--remote-cadence") {
+                if (!(v = next())) return false;
+                out.remote_cadence_frames = static_cast<uint32_t>(std::max(0, std::atoi(v)));
             }
             else if (arg == "--stall-after-ready") {
                 if (!(v = next())) return false;
@@ -2529,6 +2536,7 @@ namespace {
             c.own_births_parked = args_.own_births_parked;
             c.own_birth_move = args_.own_birth_move;
             c.starved_resync_reports = args_.starved_resync_reports;
+            c.remote_cadence_frames = args_.remote_cadence_frames;
             c.rollback = args_.rollback;
             c.correct = args_.correct;
             c.trace = args_.trace;

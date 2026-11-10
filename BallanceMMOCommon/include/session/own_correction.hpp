@@ -81,6 +81,11 @@ namespace bmmo::session {
     // in frames a catch-up mostly does not render.
     constexpr uint32_t kRemoteReplayCoalesceFrames = 3;
     constexpr double kRemoteCoalesceBehind = 2.0;
+    // Step A2: on the cadence (core_config::remote_cadence_frames) a
+    // correction of a remote ball within this distance of the own ball in
+    // the newest record is not held - the own ball may be about to touch it
+    // (SRTJ f2's 'near' radius, docs/realtime-design.md).
+    constexpr double kRemoteCadenceNearMeters = 8.0;
 
     class own_replay_pacer {
     public:
@@ -98,12 +103,22 @@ namespace bmmo::session {
         // still substituting our ticks (its newest header of our epoch has
         // acked < tick); false runs the replay now - nothing will join it.
         bool due(uint32_t now, uint32_t earliest, uint32_t reach, bool notices_coming) const {
+            return due(now, earliest, reach, notices_coming, coalesce_);
+        }
+        // The same with `coalesce` frames in place of the constructor's
+        // (step A2: the remote cadence).
+        bool due(uint32_t now, uint32_t earliest, uint32_t reach, bool notices_coming, uint32_t coalesce) const {
             if (!notices_coming) return true;
-            if (!ran_any_ || frames_ - last_ >= coalesce_) return true;
+            if (!recent(coalesce)) return true;
             const int64_t depth_next = static_cast<int64_t>(static_cast<int32_t>(now - earliest)) + 2;   // now + 1 - (earliest - 1)
             if (depth_next <= 1) return true;
             return depth_next > static_cast<int64_t>(reach);
         }
+
+        // Whether a replay ran fewer than `coalesce` frames ago (due's hold,
+        // before the reach deadline).
+        bool recent(uint32_t coalesce) const { return ran_any_ && frames_ - last_ < coalesce; }
+        uint32_t coalesce() const { return coalesce_; }
 
         // An own replay ran (alone or with a remote's), this frame - or
         // another rewind made it redundant (replay_subsumes).

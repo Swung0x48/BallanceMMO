@@ -1213,3 +1213,47 @@ live core 3088 -> 2724 (L12_h), 2751 -> 2521 (ctl_h), 3117 -> 2828 us (L12). An 
 lookups saved only ~50 us (its table is built from every 3D entity once per scope). Next by size: the union's probe
 placement (grows with K), the per-frame GetScriptByName("Gameplay_Ingame") in core_host_frame, the event drain's
 256 KiB buffer.
+
+## Measured (step A2: a remote correction cadence, 2026-11-10)
+
+The architecture review of 2026-11-09 (after public test 1) proposed a cadence for the remote corrections: in a
+13-player room every remote's key change is a rewind, ~23 a second, and kRemoteReplayCoalesceFrames (own_correction.hpp)
+coalesced them only while the pacer was 2 ticks behind. As built: `core_config::remote_cadence_frames` (headless
+`--remote-cadence N`, retail `session cadence N`, kept in the capture's header; default 0 = the rule as it was). N > 0
+holds a remote's correction on schedule too, up to N frames after the last input replay, under the reach deadline
+(own_replay_pacer::due with the cadence's frame count); the replay that runs carries every correction of the frames
+it waited, from the earliest. Not held: a pending own correction (the own pacer's rule), and - on schedule - a
+correction of a ball within kRemoteCadenceNearMeters (8 m, SRTJ f2's 'near') of the own ball in the newest record. A
+lifecycle rewind that carries the pending replay counts as the replay's frame. Status: ` coalesced: ... deferred=N`
+as before, plus ` deadline=D near=M` once either is non-zero. The world is the same either way: only the frame a
+mirror's correction is shown in moves.
+
+Measured on the public test's Level 6 recording (13 players, K = 20, each client at its public-test ping, 0-114 ms
+round trip, virtual clock, hints on (A1), 6270 ticks, headless x64 on the dev machine, medians over the 13 clients;
+two series run alone one after the other, `a2t_*` without the near rule and `a2u_*` with it):
+
+| | cadence 0 | cadence 3 | cadence 4 |
+|---|---|---|---|
+| rewinds a second | 22.6 | 16.9 | 14.4 / 14.6 |
+| depth mean, p90, max | 5.6, 11, 16 | 6.8, 12, 18 | 7.5, 13, 19 |
+| replayed ticks | 12069 | 10851 | 10406 / 10386 |
+| a rewind (restore + replay) ms | 7.1 / 6.7 | 8.2 | 8.6 / 7.7 |
+| rewind work ms a second | 160 / 151 | 139 | 123 / 112 |
+| frame p99 ms | 15.9 / 14.0 | 17.8 | 17.6 / 14.8 |
+| frame p999 ms | 21.4 / 18.4 | 24.3 | 24.0 / 19.6 |
+| frame max ms | 27.3 / 28.3 | 31.0 | 29.1 / 27.3 |
+
+(a / b: the two series; the two cadence-0 arms run the same rule and differ by 1.9 ms at p99: the machine.) Every
+arm 13/13 FINAL rows exact, the server journals byte-identical across the arms; no wait reached the reach's deadline;
+on the near rule 18-123 corrections per client ran at once (1-6 % of the deferred). The physics-free model
+(`.local-tools/work/ARCH/batch_model.py` on a1t_on's logs) had predicted 23.9 -> 13.6 rewinds a second and 160 -> 109
+ms a second at cadence 4.
+
+So the cadence does what SRTJ found for f2 (above, "What f2 would still buy"): it cuts the rewind work a quarter
+(-23 to -26 %) and the rewind frames a third, and makes each remaining one deeper - the frame tail does not improve
+(p99 +0.8 / +1.7 ms, p999 +1.2 / +2.6 ms, the max unchanged). It is a CPU lever (a client that cannot keep up), not
+a stutter lever on a machine that can; the 2-ticks-behind rule already applies it where the CPU is short. Default
+left 0. Gate: 840/840; fast LBM with the default 38/38 twins FINAL exact, every criteria row equal to A1's merged
+tree (a1g); with cadence 4 38/38 FINAL exact, the only rows that moved already failing (A6M's late ball: input
+rollbacks in D 3 -> 2, its mirror 0.85 -> 1.11 m off from T_off+60); x64 and x86 builds. Not run: retail with the
+cadence on (own_replica_name matching the recorded own-ball name is verified headless only).
