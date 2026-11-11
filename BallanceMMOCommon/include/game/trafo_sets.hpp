@@ -53,6 +53,8 @@
 
 #include "CKAll.h"
 
+#include "ck_object_ids.hpp"
+
 #include "material_initial_state.hpp"
 #include "menu_driver.hpp"
 #include "script_replay.hpp"
@@ -554,13 +556,6 @@ namespace bmmo::game {
             deps.ModifyOptions(CKCID_GROUP, CK_DEPENDENCIES_COPY_GROUP_OBJECTS, 0);
             deps.m_Flags = CK_DEPENDENCIES_CUSTOM;
         }
-        inline std::set<CK_ID> all_object_ids(CKContext* context) {
-            std::set<CK_ID> ids;
-            const XObjectPointerArray& all = context->GetObjectListByType(CKCID_OBJECT, TRUE);
-            for (int i = 0; i < all.Size(); ++i)
-                if (CKObject* o = all[i]) ids.insert(o->GetID());
-            return ids;
-        }
         inline const char* kind_of(CKObject* o) {
             if (!o) return "?";
             if (o->GetClassID() == CKCID_BEHAVIOR) return "script";
@@ -808,7 +803,7 @@ namespace bmmo::game {
         }
 
         // ---- the copy
-        const std::set<CK_ID> before = all_object_ids(context);
+        const ck_object_ids before = all_object_ids(context);
         XObjectArray sources;
         for (CKObject* o: list) sources.PushBack(o->GetID());
         CKDependencies deps;

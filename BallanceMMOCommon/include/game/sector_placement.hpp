@@ -27,6 +27,7 @@
 #include <physics/physics_rt_api.h>
 #include <session/placement_plan.hpp>
 
+#include "ck_object_ids.hpp"
 #include "host_backend.hpp"
 #include "menu_driver.hpp"
 #include "script_replay.hpp"
@@ -284,13 +285,6 @@ namespace bmmo::game {
             return out;
         }
 
-        inline std::set<CK_ID> all_object_ids(CKContext* context) {
-            std::set<CK_ID> ids;
-            const XObjectPointerArray& all = context->GetObjectListByType(CKCID_OBJECT, TRUE);
-            for (int i = 0; i < all.Size(); ++i)
-                if (CKObject* o = all[i]) ids.insert(o->GetID());
-            return ids;
-        }
 
         template <typename F> void walk_blocks(CKBehavior* beh, F&& fn) {
             if (!beh) return;
@@ -738,7 +732,7 @@ namespace bmmo::game {
             // (the Virtools SDK's containers are inline templates, VX_MALLOC
             // off): an access violation in the second copy of the first
             // retail anchor.
-            const std::set<CK_ID> before = all_object_ids(context);
+            const ck_object_ids before = all_object_ids(context);
             std::vector<CK3dEntity*> hc;
             {
                 XObjectArray sources;

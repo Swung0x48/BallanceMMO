@@ -1376,3 +1376,30 @@ skipped; x64 and x86 builds. Retail, the census at K = 20, off / on interleaved,
 Verify in retail: 69 k copies walked, 0 mismatches. FINAL rows of off, on and verify, client by client: balls, bodies
 and (ctl_h) the 32 trafo pieces bit-equal - the first cross-session check that includes the pieces (protocol 39). The
 restore's other parts are next: the selected scripts' walk (0.5-0.9 ms) and set_savestate (1.1 ms on L11).
+
+## Measured (the cost of a join, 2026-11-11)
+
+The public test's server journals, replayed by SimTool with `--write-journal` (a replay journal's TICK records stamp
+the replay's own wall clock as each tick ends; SimTool's stdout through a pipe is block-buffered, so timestamps of its
+lines are wrong), found every tick over 15 ms on a P-core of the i7-14700KF to be a member's join: 50-66 ms there,
+110-150 ms on an E-core, 24-31 ms on an Apple M6. The server's runner steps every room's world on one thread, so a join
+stalls every room on it; a client builds the same set for each joining member. Timed by parts (L7 session 2, 46 joins,
+P-core): `build_trafo_set` 46 ms, of it CopyObjects 3.7 ms and 39 ms in three snapshots of every CK object id (a level
+context holds ~101 k objects; CK's list costs 0.19 ms, the `std::set<CK_ID>` built from it ~8 ms, and step 0's two
+scans look every id up in it). Step 0 found no extra object in any of the 46 joins.
+
+Built: `game/ck_object_ids.hpp`, a bitmap indexed by id with the ids in ascending order (the set's order, so every
+loop and log reads as before), used by `build_trafo_set` and the placement copies (`sector_placement.hpp`). Same
+checks, same order. P-core, the two heaviest sessions:
+
+| | before | after |
+|---|---|---|
+| L7 s2 (21 players): slowest tick, ticks over 15 ms, worst 100-tick window | 53 ms, 35, 1.77 ms | 13 ms, 0, 0.94 ms |
+| L8 s1 (20 players): slowest tick, ticks over 15 ms | 49 ms, 26 | 21 ms (no event in it), 1 |
+| a join | ~46 ms | 11-13 ms |
+
+The replays' world and pose hashes are identical tick by tick (44114 / 103762 ticks). Gate: 844/844; fast LBM 38/38
+twins FINAL exact, every criteria row equal to the restore skip's run; x64 and x86 builds, the Arch server; a retail
+L11 session at human key rates (K = 20, one-way 150): both clients' FINAL rows bit-equal to the restore skip's run,
+balls, bodies and the 32 trafo pieces. What a join still costs: CopyObjects 3.7 ms, the 124 copies' name checks 0.9 ms,
+the digests 0.7 ms.
