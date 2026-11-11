@@ -2379,6 +2379,13 @@ namespace bmmo::game {
             // more than one object (or script) here - the local value is kept
             // rather than a creation-order pick.
             uint32_t unnamed = 0, ambiguous = 0, server_private = 0;
+            // capture: whether each reference's name is looked up again for
+            // `ambiguous` (and `ambiguous_list`).  A look-up scans every
+            // object of the level by name, ~12 us each: a level's record has
+            // ~1800 references, ~20 ms of a resync state.  capture_portable
+            // called without a report (the server's resync and join states)
+            // skips them; the record's bytes do not depend on them.
+            bool lookups = true;
             // capture: values copied as bytes whose type is an index into a
             // process-local table or carries ids (a class id, a parameter
             // type, an ID, a structure - whose data is its members' CK_IDs):
@@ -2446,6 +2453,7 @@ namespace bmmo::game {
             if (!context) return fail(error, "no context");
             if (!sel.satellites.empty()) return fail(error, "satellite blocks are not portable");
             portable_report scratch;
+            scratch.lookups = false;
             portable_report& r = report ? *report : scratch;
             // Version 2 whenever a trafo part is passed (the world option is
             // on), an empty one included: a world without a selected set says
@@ -3394,7 +3402,7 @@ namespace bmmo::game {
                         note(r, r.server_private_list, parameter_place(block, output, index, parameter) + " -> " + owner + "/" + name);
                     }
                     int matches = 0;
-                    if (find_script(context, owner, name, &matches) != script || matches != 1) {
+                    if (r.lookups && (find_script(context, owner, name, &matches) != script || matches != 1)) {
                         ++r.ambiguous;
                         note(r, r.ambiguous_list, parameter_place(block, output, index, parameter) + " -> script " + owner + "/" + name);
                     }
@@ -3412,7 +3420,7 @@ namespace bmmo::game {
                         ++r.server_private;
                         note(r, r.server_private_list, parameter_place(block, output, index, parameter) + " -> " + name);
                     }
-                    if (find_by_name(context, name, parameter_class, object->GetClassID()) != object) {   // null unless unique
+                    if (r.lookups && find_by_name(context, name, parameter_class, object->GetClassID()) != object) {   // null unless unique
                         ++r.ambiguous;
                         note(r, r.ambiguous_list, parameter_place(block, output, index, parameter) + " -> " + name);
                     }

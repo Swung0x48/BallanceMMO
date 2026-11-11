@@ -1403,3 +1403,29 @@ twins FINAL exact, every criteria row equal to the restore skip's run; x64 and x
 L11 session at human key rates (K = 20, one-way 150): both clients' FINAL rows bit-equal to the restore skip's run,
 balls, bodies and the 32 trafo pieces. What a join still costs: CopyObjects 3.7 ms, the 124 copies' name checks 0.9 ms,
 the digests 0.7 ms.
+
+## Measured (the cost of a resync state, 2026-11-11)
+
+A resync state (and a late joiner's state, the same capture) is built on the runner's thread, which steps every
+room: the public test's server built 2211 of them, p50 30.6 ms, max 49 ms. On the public L6 re-drive (13 players,
+K = 20, hints on, six clients forced into a resync with `--resync-at` at 1045 / 1215 / 2030 / 2490 / 4000 / 5500,
+the first four just after trafo explosions), timed by parts on the i7-14700KF: `physics_world::capture_resync_state`
+22.8-46.4 ms, of it the portable script record 22-37 ms and the trafo ledger 0.4-9 ms (5-9 ms unless the name
+cache was warm); the zstd coding 0.8-2.2 ms apart; rows, navigations, union and the IVP savestate together under
+0.6 ms.
+
+- The script record's ~1800 object and script references were each looked up again by name (`find_by_name` /
+  `find_script`, a scan of every object of the level, ~12 us each): 19-32 ms. The look-ups only count `ambiguous`
+  for the SimTool check's report; the record's bytes never depended on them. `capture_portable` without a report
+  (the server's states, the trafo tool) now skips them (`portable_report::lookups`); a caller with a report
+  (`--portable-scripts-check`) still gets every one.
+- The ledger asked, piece by piece, whether a body exists by the piece's name (a scan of every 3D entity unless
+  the name cache holds it). It now asks by the piece's id where the backend can (`has_body_id`, as the sets'
+  effect check does); the same answer, since every copy's name is its own (`<original>_Trafo<player/life>`, I4).
+
+Both checked byte for byte: an FNV-1a hash of each of the six states' raw bodies is the same before and after, and
+both ledger answers were taken for every piece (663 pieces x 6 states): 32 pieces with a body, 0 that differ. After,
+same recipe and ticks: capture 3.9-7.4 ms, coding 0.8-2.2 ms. Gate: 844/844; fast LBM 38/38 twins FINAL exact,
+every criteria row equal to the join fix's run; x64 and x86 builds, the Arch server; L6's
+`--portable-scripts-check` (a report: every look-up) prints what HEAD prints; two serial reviews, no defects. What
+a state still costs: the record's walk ~3.5-7 ms (its ~375 KB of parameter values), the coding ~1 ms.

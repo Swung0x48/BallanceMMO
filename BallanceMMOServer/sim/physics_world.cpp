@@ -1569,9 +1569,15 @@ namespace bmmo::sim {
                 e.life = set.life;
                 e.type = type;
                 e.join_order = join_order_of(set.player, set.life);
+                // A piece by its id where the backend can (a name lookup
+                // scans every 3D entity: ~5 ms for a room's sets), as the
+                // sets' effect check does.  The same answer: every copy's
+                // name is its own, "<original>_Trafo<player/life>" (I4).
                 for (CK_ID piece: set.types[type].pieces) {
                     CKObject* o = context->GetObject(piece);
-                    if (o && o->GetName() && trafo_hooks_.has_body(o->GetName())) {
+                    const bool body = trafo_hooks_.has_body_id ? o && trafo_hooks_.has_body_id(piece)
+                                                               : o && o->GetName() && trafo_hooks_.has_body(o->GetName());
+                    if (body) {
                         e.has_bodies = true;
                         break;
                     }
