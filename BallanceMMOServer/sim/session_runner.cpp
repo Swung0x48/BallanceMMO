@@ -426,6 +426,7 @@ namespace bmmo::sim {
             options.mechanism_slots = s->mechanism_slots;
             // Step RK3: the Level 1 tutorial's exit at frame 10 (physics_world::tick).
             options.session_clock = (world_option_bits & bmmo::session::WORLD_SESSION_CLOCK) != 0;
+            options.trafo_seed_join_order = (world_option_bits & bmmo::session::WORLD_TRAFO_SEED_JOIN_ORDER) != 0;
             options.log = [this, session](const std::string& text) {
                 log("[session " + std::to_string(session) + "] " + text);
             };
@@ -1103,6 +1104,7 @@ namespace bmmo::sim {
                     a.token = token;
                     a.intake = arrival;
                     a.life = life_of(s, player);
+                    a.join_order = s.world->join_order_of(player, a.life);
                     timing(a);
                     callbacks_.on_event_accepted(a);
                 };

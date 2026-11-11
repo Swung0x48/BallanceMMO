@@ -9808,6 +9808,41 @@ namespace {
                                             bmmo::session::rollback_tracked{}, {});
     }
 
+    // Design 2.6 (protocol 38): under WORLD_TRAFO_SEED_JOIN_ORDER an
+    // explosion's seed mixes the life's join order, not the id - the own
+    // (SessionStart's entry: 2) and a remote (player 4: 0, then a test life
+    // of player 5 with 7) - so two sessions of a recipe seed alike.
+    TEST(SessionClientCoreTrafo, SeedsByJoinOrderUnderTheWorldOption) {
+        flow_fake fake;
+        trafo_fake t;
+        session_client_core core(trafo_rewind_platform(fake, t), trafo_caps());
+        trafo_tick_125(core, fake);
+        auto& s = state_of(core);
+        s.world_options_ |= bmmo::session::WORLD_TRAFO_SEED_JOIN_ORDER;
+        core.on_session_event(trafo_message(4, 1, 0, 126, 124));
+        set_test_life(core, 5, 7);
+        core.on_session_event(trafo_message(5, 2, 0, 126, 124));
+        // The server's stamp wins, the life's announcement not needed (a
+        // Trafo event is never parked): player 6, never announced, order 9.
+        auto stamped = trafo_message(6, 0, 0, 126, 124);
+        stamped.join_order = 9;
+        core.on_session_event(std::move(stamped));
+        bmmo::session::trafo_report wood;
+        wood.flags = bmmo::session::TRAFO_EXPLODE;
+        wood.type = 0;
+        wood.source = "activation";
+        t.next_poll.reports.push_back(wood);
+        steps{core}.poll_own_trafo(125);
+        ASSERT_EQ(s.trafo_log_.at(126).size(), 3u);
+        EXPECT_EQ(s.trafo_log_.at(126)[0].seed, bmmo::session::trafo_seed(11u, 0u, 126u, 1));
+        EXPECT_EQ(s.trafo_log_.at(126)[1].seed, bmmo::session::trafo_seed(11u, 7u, 126u, 2));
+        EXPECT_EQ(s.trafo_log_.at(126)[2].seed, bmmo::session::trafo_seed(11u, 9u, 126u, 0));
+        const bmmo::session::trafo_input* own = s.trafo_log_.newest(3, 1, 0, false, 1000);
+        ASSERT_NE(own, nullptr);
+        EXPECT_TRUE(own->own);
+        EXPECT_EQ(own->seed, bmmo::session::trafo_seed(11u, 2u, own->applied, 0));
+    }
+
     TEST(SessionClientCoreTrafo, InputsAppliedLiveAndInTheReplayOfALateOne) {
         for (const bool retail: {false, true}) {
             flow_fake fake;

@@ -688,6 +688,25 @@ and reset.
 - Seed: `trafo_seed(session seed, p, applied tick, T)`, an integer-only mix
   (FNV-1a over the four values, folded to a nonzero int32) in
   `session/trafo_input.hpp`, CK-free like `spawn_direction_index`.
+- Since protocol 39 (world option `WORLD_TRAFO_SEED_JOIN_ORDER`, set in every
+  session) `p` is the exploding life's join order, not the player id. An id is
+  the server's GameNetworkingSockets connection handle, random per
+  connection, so two sessions of one recipe exploded different pieces; a join
+  order is handed out by arrival and is the same. The server's world takes the
+  join order its `add_player` got (not the slot a taken order fell back to);
+  the server relays it in every Trafo event (`session_event_msg::join_order`,
+  filled at acceptance) and in every resync ledger entry, because a Trafo event
+  is never parked and a late joiner can receive a leaver's explosion whose life
+  it was never told of. A client core takes the relayed order for a remote
+  explosion, SessionStart's own entry for its own, the ledger's at a
+  reconcile. Two lives never hold one order at
+  once, so a tick's explosions keep distinct seeds within a session. A journal
+  without the bit replays with the id.
+- Verified (2026-11-10): two retail sessions of RT1's L11 recipe at human key rates (two x86 copies, the Arch
+  server, one-way 150) handed out other player ids and gave the three explosions the same seeds; the FINAL rows of
+  each client across the sessions, the 32 trafo pieces included, are bit-equal (before: 0/32), and the two clients
+  of each session agree on every row. SimTool replays a server journal with the bit 4333/4333 ticks and one from
+  before it (player-id seeds) 4324/4324. The fast LBM's arms explode nothing: 38/38 FINAL exact, rows unchanged.
 - The wrapped `Set Position` (`explosion_set_position`, PS:2260-2263) runs
   first in every explosion. When the registry has a seed for its target frame,
   it calls `random_reset(seed)` after the per-set restore. The originals have

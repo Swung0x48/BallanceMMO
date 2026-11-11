@@ -790,6 +790,7 @@ namespace {
             else if (name == "PROXIMITY_UNION") out |= bmmo::session::WORLD_PROXIMITY_UNION;
             else if (name == "PLAYER_MECHANISMS") out |= bmmo::session::WORLD_PLAYER_MECHANISMS;   // step Q7
             else if (name == "SESSION_CLOCK") out |= bmmo::session::WORLD_SESSION_CLOCK;   // step RK3
+            else if (name == "TRAFO_SEED_JOIN_ORDER") out |= bmmo::session::WORLD_TRAFO_SEED_JOIN_ORDER;
             else return false;
             if (stop == std::string::npos) break;
             start = stop + 1;
@@ -2294,6 +2295,7 @@ namespace {
         options.mechanism_slots = args.drop_entity.empty() ? 0 : static_cast<uint8_t>(args.mechanism_slots);
         // Step RK3: the Level 1 tutorial's exit (physics_world::tick).
         options.session_clock = (args.world_options & bmmo::session::WORLD_SESSION_CLOCK) != 0;
+        options.trafo_seed_join_order = (args.world_options & bmmo::session::WORLD_TRAFO_SEED_JOIN_ORDER) != 0;
         options.tutorial_exit_frame = args.tutorial_exit_frame;
         options.pin_checkpoint_deactivation = args.n2_pin;   // step B2SW: --n2-pin off is the A/B
         options.depth_test_rule = args.depth_test_rule;   // FULL step PRX: --depth-test-rule off is the A/B
@@ -6308,12 +6310,15 @@ namespace {
         // frame after their anchor, so a server or a client journal replays
         // with it.
         options.session_clock = (header.world_options & bmmo::session::WORLD_SESSION_CLOCK) != 0;
-        if (header.world_options != 0) std::printf("journal world options %08x%s%s%s%s%s\n", header.world_options,
+        // Protocol 38: explosions seeded by join order; an older journal by id.
+        options.trafo_seed_join_order = (header.world_options & bmmo::session::WORLD_TRAFO_SEED_JOIN_ORDER) != 0;
+        if (header.world_options != 0) std::printf("journal world options %08x%s%s%s%s%s%s\n", header.world_options,
                                                    options.trafo_inputs ? " (trafo inputs)" : "",
                                                    options.placement_clones ? " (placement clones)" : "",
                                                    header_union ? " (proximity union)" : "",
                                                    options.mechanism_slots ? " (player mechanisms)" : "",
-                                                   options.session_clock ? " (session clock)" : "");
+                                                   options.session_clock ? " (session clock)" : "",
+                                                   options.trafo_seed_join_order ? " (trafo seed by join order)" : "");
         if (options.mechanism_slots) std::printf("journal mechanism slots %u\n", static_cast<unsigned>(options.mechanism_slots));
         if (!header_union)
             std::printf("journal world options without PROXIMITY_UNION: replayed under the union anyway (step UOFF: "
@@ -9597,9 +9602,11 @@ namespace {
         else if (args.world_options_given
                  && (args.world_options & ~(bmmo::session::WORLD_PLACEMENT_CLONES | bmmo::session::WORLD_TRAFO_INPUTS
                                             | bmmo::session::WORLD_PROXIMITY_UNION | bmmo::session::WORLD_SESSION_CLOCK
-                                            | bmmo::session::WORLD_PLAYER_MECHANISMS)))
+                                            | bmmo::session::WORLD_PLAYER_MECHANISMS
+                                            | bmmo::session::WORLD_TRAFO_SEED_JOIN_ORDER)))
             why = "--world-options: only bit 0 (PLACEMENT_CLONES), bit 1 (TRAFO_INPUTS), bit 2 (PROXIMITY_UNION), bit 3 "
-                  "(SESSION_CLOCK, step RK3) and bit 4 (PLAYER_MECHANISMS, with --player-mechanisms K) exist";
+                  "(SESSION_CLOCK, step RK3), bit 4 (PLAYER_MECHANISMS, with --player-mechanisms K) and bit 5 "
+                  "(TRAFO_SEED_JOIN_ORDER) exist";
         else if (args.tutorial_exit_frame_given && !(args.world_options & bmmo::session::WORLD_SESSION_CLOCK))
             why = "--tutorial-exit-frame N goes with --world-options SESSION_CLOCK (the exit runs on --level 1 only)";
         else if (args.mechanism_slots && !(args.probe_census && args.probe_release_check)

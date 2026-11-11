@@ -370,6 +370,7 @@ namespace bmmo {
                         put(e.ball_type);
                         put(e.flags);
                         raw.write(reinterpret_cast<const char*>(e.position), sizeof(e.position));
+                        put(e.join_order);   // protocol 39
                         break;
                     default:
                         break;
@@ -443,6 +444,7 @@ namespace bmmo {
                         if (!message_utils::read_variable(raw, &e.ball_type)) return false;
                         if (!message_utils::read_variable(raw, &e.flags)) return false;
                         if (!raw.read(reinterpret_cast<char*>(e.position), sizeof(e.position))) return false;
+                        if (!message_utils::read_variable(raw, &e.join_order)) return false;   // protocol 39
                         break;
                     default:
                         break;

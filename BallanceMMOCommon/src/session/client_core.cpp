@@ -554,6 +554,7 @@ namespace bmmo::session {
         s.trafo_log_.clear();
         s.trafo_sets_.clear();
         s.trafo_retired_sets_.clear();
+        s.trafo_ledger_orders_.clear();
         s.trafo_pieces_.clear();
         s.trafo_pending_.clear();
         s.input_rewind_trafo_ = false;

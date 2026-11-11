@@ -1271,7 +1271,8 @@ Random seed is trafo_seed(session seed, player id, applied tick, type), and a pl
 GameNetworkingSockets connection handle, a random number of each connection (c2off_ctl_h runs 1 and 2: the same
 explosions at ticks 458 / 498 / 908, ids 484592829 / 508092805 vs 2462173594 / 109078206, seeds 1547941638 /
 75651449 / 1829446291 vs 2051120431 / 347687379 / 1593814566). Within a session every client and the server agree;
-across sessions only the balls and bodies are comparable. The restore is unchanged: it is the next fixed part (restore_scripts 1.4-1.5 ms
+across sessions only the balls and bodies are comparable. (Superseded by protocol 39: under WORLD_TRAFO_SEED_JOIN_ORDER
+the seed mixes the life's join order, the same in every session of a recipe - trafo-replication design 2.6.) The restore is unchanged: it is the next fixed part (restore_scripts 1.4-1.5 ms
 on L12, set_savestate 1.2 ms on L11), with the whole records' scripts (~0.2 ms a replayed tick).
 
 ## Measured (step A2: a remote correction cadence, 2026-11-10)

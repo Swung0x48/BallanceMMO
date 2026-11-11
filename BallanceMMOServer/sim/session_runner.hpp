@@ -121,6 +121,9 @@ namespace bmmo::sim {
         // world option is off), REJECTED to its owner only, never applied.
         uint8_t ball_type = 0, flags = 0;
         float position[3] = {};
+        // Protocol 39: the join order of (player, life) in the world - the
+        // explosion seed's member term the server relays (255: none).
+        uint8_t join_order = 255;
         bool rejected = false;
         // Not accepted at all: the session or the player was gone when the
         // event reached the runner.  Nothing is sent; the server only lets go

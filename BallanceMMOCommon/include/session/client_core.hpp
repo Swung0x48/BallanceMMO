@@ -1200,6 +1200,9 @@ namespace bmmo::session {
         // a retired life is gone ('no resume'); only a resync ledger that
         // still names it does (the server's state at S holds it).
         std::set<bmmo::session::trafo_key> trafo_retired_sets_;
+        // Protocol 38: the join orders resync ledgers gave, for lives this
+        // world was never told of (trafo_seed_of).
+        std::map<std::pair<uint32_t, uint16_t>, uint8_t> trafo_ledger_orders_;
         // Their pieces' entities and sets (the host's trafo_type_set at the
         // make): a snapshot row of one restores it only on a breach
         // (rollback_world::row_on_breach_only).
@@ -2424,6 +2427,12 @@ namespace bmmo::session {
         // The own player's life (SessionStart's own entry; 1 before
         // protocol 18).
         uint16_t own_trafo_life() const { return s.own_member_life_ ? s.own_member_life_ : uint16_t{1}; }
+        // The seed of an explosion of (player, life) applied at `applied`
+        // (design 2.6): its member term is the life's join order under
+        // WORLD_TRAFO_SEED_JOIN_ORDER, else the player id; 0 for a reset.
+        // `stamped`: the join order the relayed event carried (255: none).
+        int32_t trafo_seed_of(uint32_t player, uint16_t life, uint32_t applied, uint8_t type, uint8_t flags,
+                              uint8_t stamped = 255);
         // The hold's report of an own activation, stamped for `due` (sent,
         // logged as an own input); before the assignment it waits.
         void hold_trafo(const trafo_report& report, uint32_t due, const char* why);

@@ -1370,6 +1370,9 @@ public:
             Printf("Room %u: the Level 1 tutorial is switched off in every world of this session (world option "
                    "session clock).", r.id);
         }
+        // Trafo-replication design 2.6: every session seeds its explosions by
+        // join order, so a recipe's pieces are the same in every session.
+        s.world_options |= bmmo::session::WORLD_TRAFO_SEED_JOIN_ORDER;
         room_session_[r.id] = s.id;
         const uint32_t id = s.id;
         std::vector<std::pair<uint32_t, uint8_t>> players;
@@ -3481,6 +3484,7 @@ public:
         msg.tick = a.applied;
         msg.origin_tick = a.origin;
         msg.life = a.life;   // step M1: the life the runner accepted it for
+        if (a.type == bmmo::session::event_type::Trafo) msg.join_order = a.join_order;   // protocol 39
         msg.state = static_cast<uint8_t>((a.applied != a.origin ? bmmo::session::EVENT_STATE_MOVED : 0)
                                          | (a.superseded ? bmmo::session::EVENT_STATE_SUPERSEDED : 0)
                                          | (a.rejected ? bmmo::session::EVENT_STATE_REJECTED : 0));

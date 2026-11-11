@@ -138,6 +138,9 @@ namespace bmmo::sim {
         // tutorial_exit_frame: SimTool's --tutorial-exit-frame (a
         // measurement switch); every session world uses the shared constant.
         bool session_clock = false;
+        // session::WORLD_TRAFO_SEED_JOIN_ORDER: an explosion's seed mixes the
+        // join order the player was added with, not its id (design 2.6).
+        bool trafo_seed_join_order = false;
         int tutorial_exit_frame = bmmo::game::kTutorialExitFrame;
         // N2 (step B2SW, game/sector_deactivate_pin.hpp): the checkpoint's and
         // the level reset's IngameParameter[0][2] Set Cell pinned to 0 at the
@@ -292,6 +295,12 @@ namespace bmmo::sim {
         uint16_t life_of(uint32_t id) const {
             const auto it = lives_.find(id);
             return it == lives_.end() ? 0 : it->second;
+        }
+        // The join order (id, life) was added with (the clients' entry, even
+        // where a taken slot fell back); 63 if never added.
+        uint8_t join_order_of(uint32_t id, uint16_t life) const {
+            const auto it = join_orders_.find({id, life});
+            return it == join_orders_.end() ? uint8_t{63} : it->second;
         }
         // Step M1: how many adds found their join order taken (J2: 0).
         uint64_t join_orders_taken() const { return join_orders_taken_; }
@@ -624,6 +633,7 @@ namespace bmmo::sim {
         // life numbered here when add_player is not told one).
         std::map<uint32_t, uint16_t> lives_;
         std::map<uint32_t, uint16_t> adds_;
+        std::map<std::pair<uint32_t, uint16_t>, uint8_t> join_orders_;   // join_order_of
         uint64_t trafo_missing_sets_ = 0;   // Trafo events whose life had no set here (never built for one)
         bool trafo_failed_ = false;
         uint64_t trafo_hold_reports_ = 0, trafo_leaks_ = 0;
