@@ -251,3 +251,60 @@ TEST(ScriptSlots, RestoreSkipArmsOnlyRootsStillQuiet) {
     slots.clear();
     EXPECT_FALSE(slots.restore_armed()) << "a clear disarms";
 }
+
+// The kept source: a record a capture left or a restore wrote serves a later
+// capture only under its generation and for a root quiet at every observation
+// since - a root that ran on a light tick between is walked.
+TEST(ScriptSlots, KeptSourceServesARootQuietAtEveryObservationSince) {
+    using bmmo::game::script_root_words;
+    using bmmo::game::script_slots;
+    constexpr uint32_t kActive = 1;
+    script_slots slots;
+    slots.track(7);
+    slots.track(8);
+    slots.track(7);
+    EXPECT_EQ(slots.roots().size(), 2u);
+    script_root_words quiet7, quiet8;
+    quiet7.id = 7;
+    quiet8.id = 8;
+    script_root_words ran8 = quiet8;
+    ran8.flags = kActive;
+    const auto observe = [&](uint32_t tick, const script_root_words& w8) {
+        slots.begin_observation();
+        slots.observe(7, tick, true, quiet7, kActive);
+        slots.observe(8, tick, true, w8, kActive);
+    };
+    const std::vector<uint8_t> record{1, 2, 3};
+    EXPECT_EQ(slots.kept_source(5), nullptr) << "none yet";
+    observe(100, quiet8);
+    slots.keep_source(record.data(), 2, 5);
+    ASSERT_NE(slots.kept_source(5), nullptr);
+    EXPECT_EQ(*slots.kept_source(5), (std::vector<uint8_t>{1, 2})) << "the script list alone";
+    EXPECT_EQ(slots.kept_source(6), nullptr) << "a host write since";
+    observe(101, ran8);       // a light tick: 8 runs
+    observe(102, quiet8);     // and is quiet again with its old words
+    EXPECT_TRUE(slots.quiet_since_kept(7));
+    EXPECT_FALSE(slots.quiet_since_kept(8)) << "it ran between";
+    // A restore to tick 90 wrote 7 exactly and not 8; it skipped a copy
+    // under each.
+    slots.add(10, 2, {1}, 7);
+    slots.add(11, 2, {1}, 8);
+    for (uint32_t id: {10u, 11u}) {
+        script_slots::copy* c = slots.find(id);
+        c->m.valid = true;
+        c->m.writes = 5;
+        slots.keep_memo(id);
+    }
+    slots.restored(90, {quiet7}, record.data(), record.size(), 6);
+    EXPECT_TRUE(slots.kept_restored());
+    EXPECT_EQ(slots.memo_refused(*slots.find(10), 6), nullptr) << "a copy the restore left keeps its memo";
+    EXPECT_STREQ(slots.memo_refused(*slots.find(11), 6), "run") << "not under a root the restore did not write exactly";
+    observe(91, quiet8);
+    EXPECT_TRUE(slots.quiet_since_kept(7)) << "the replay goes on from the record's tick";
+    EXPECT_FALSE(slots.quiet_since_kept(8));
+    EXPECT_EQ(slots.memo_refused(*slots.find(10), 6), nullptr);
+    observe(93, quiet8);
+    EXPECT_FALSE(slots.quiet_since_kept(7)) << "a gap";
+    slots.forget();
+    EXPECT_EQ(slots.kept_source(6), nullptr) << "a failed restore";
+}

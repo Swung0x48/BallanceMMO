@@ -474,6 +474,11 @@ namespace bmmo::game {
             // Step RLC's review: core lists whose constraints the restore put
             // back in the record's order (a constraint made again lands last).
             uint32_t joints_reordered = 0;
+            // The kept source (script_slots.hpp): places where a written
+            // block was left with a byte other than the record's - a
+            // parameter of another size or with no bytes in the record, a
+            // delayed link re-armed or left at its live countdown.
+            uint32_t inexact = 0;
         };
         static restore_counters& last_restore() {
             static restore_counters counters;
@@ -1274,17 +1279,42 @@ namespace bmmo::game {
                             const reuse_request* reuse = nullptr) {
             out.clear();
             if (!context) return false;
-            // Step OPC: the previous record's script list, indexed by id.
             const bool reusing = reuse && reuse->mode != script_reuse_mode::off;
             script_reuse_stats& reuse_stats = script_reuse_totals();
+            const bool with_slots = hooks.slots != nullptr;
+            // T3C e3: this capture observes the roots (the memo's ledger)
+            // before any block is walked, and only it may use a memo.
+            struct observing_scope {
+                script_slots* slots;
+                ~observing_scope() { if (slots) slots->set_observing(false); }
+            } observing{nullptr};
+            if (with_slots && reuse) {
+                observe_roots(context, sel, *hooks.slots, reuse->tick);
+                hooks.slots->set_observing(true);
+                observing.slots = hooks.slots;
+            }
+            // Step OPC: the reuse source's script list, indexed by id - the
+            // record of t - 1 the engine offers, else the kept source
+            // (script_slots.hpp: the last record these scripts held), under
+            // the host-write generation this capture starts with.
+            const uint64_t writes = script_write_generation();
+            const bool keeping = reusing && with_slots && reuse_kept_from_env();
+            const std::vector<uint8_t>* source = reusing ? reuse->previous : nullptr;
+            bool from_kept = false;
+            if (keeping && !source) {
+                source = hooks.slots->kept_source(writes);
+                from_kept = source != nullptr;
+            }
             record_index previous_index;
             bool have_previous = false;
             if (reusing) {
                 ++reuse_stats.captures;
-                if (reuse->previous) {
-                    have_previous = index_record(*reuse->previous, previous_index);
-                    if (have_previous) ++reuse_stats.with_previous;
-                    else ++reuse_stats.index_failed;
+                if (source) {
+                    have_previous = index_record(*source, previous_index);
+                    if (!have_previous) ++reuse_stats.index_failed;
+                    else if (!from_kept) ++reuse_stats.with_previous;
+                    else if (hooks.slots->kept_restored()) ++reuse_stats.kept_restored;
+                    else ++reuse_stats.kept_captured;
                 }
             }
             // The block of `id` in the previous record (present), or null.
@@ -1299,9 +1329,9 @@ namespace bmmo::game {
                         if (e.id == id) { s = &e; break; }
                 }
                 // id (4) and present (1), then the block.
-                if (!s || s->end < s->begin + 5 || (*reuse->previous)[s->begin + 4] != 1) return nullptr;
+                if (!s || s->end < s->begin + 5 || (*source)[s->begin + 4] != 1) return nullptr;
                 size = s->end - s->begin - 5;
-                return reuse->previous->data() + s->begin + 5;
+                return source->data() + s->begin + 5;
             };
             // Sized like this thread's previous record (a tick's scripts are
             // the last tick's): the bytes are appended without the vector
@@ -1318,18 +1348,6 @@ namespace bmmo::game {
             const bool with_hold = hold && hold->capture;   // step G3: record v6
             const bool with_cells = cells && !cells->empty();   // step RK2: record v6
             put_u32(out, kMagic);
-            const bool with_slots = hooks.slots != nullptr;
-            // T3C e3: this capture observes the slot roots (the memo's ledger)
-            // before any block is walked, and only it may use a memo.
-            struct observing_scope {
-                script_slots* slots;
-                ~observing_scope() { if (slots) slots->set_observing(false); }
-            } observing{nullptr};
-            if (with_slots && reuse) {
-                observe_slot_roots(context, *hooks.slots, reuse->tick);
-                hooks.slots->set_observing(true);
-                observing.slots = hooks.slots;
-            }
             if (with_hold || with_cells || with_slots) {
                 put_u32(out, kVersionSections);
                 put_u32(out, (v3 ? kSectionTrafo : 0u) | (with_queue ? kSectionQueue : 0u) | (with_hold ? kSectionHold : 0u)
@@ -1341,7 +1359,9 @@ namespace bmmo::game {
             } else {
                 put_u32(out, with_queue ? (v3 ? kVersionTrafoQueue : kVersionQueue) : (v3 ? kVersionTrafo : kVersion));
             }
+            size_t scripts_end = 0;   // where the script list ends: what a kept source holds
             for (const auto* list: {&sel.scripts, &sel.satellites}) {
+                if (list == &sel.satellites) scripts_end = out.size();
                 put_u32(out, static_cast<uint32_t>(list->size()));
                 const bool roots = list == &sel.scripts;
                 for (size_t k = 0; k < list->size(); ++k) {
@@ -1365,7 +1385,10 @@ namespace bmmo::game {
                         capture_behavior(beh, hooks, out, with_slots);
                         continue;
                     }
-                    if (!reusable_root(recorded, root_words_of(beh), static_cast<uint32_t>(kFrameFlags))) {
+                    // A kept source is older than t - 1: the root must have
+                    // been quiet at every observation since (the ledger).
+                    if (!reusable_root(recorded, root_words_of(beh), static_cast<uint32_t>(kFrameFlags))
+                            || (from_kept && !hooks.slots->quiet_since_kept(static_cast<uint32_t>(id)))) {
                         ++reuse_stats.walked;
                         capture_behavior(beh, hooks, out, with_slots);
                         continue;
@@ -1377,10 +1400,10 @@ namespace bmmo::game {
                     const size_t at = out.size();
                     const uint64_t imaged_before = joint_stats().imaged;
                     const slot_memo_stats memo_before = slot_memo_totals();
-                    size_t pos = static_cast<size_t>(block - reuse->previous->data());
+                    size_t pos = static_cast<size_t>(block - source->data());
                     const size_t end = pos + size;
                     uint64_t tails = 0;
-                    if (!copy_with_fresh_tails(beh, hooks, *reuse->previous, pos, out, tails, with_slots) || pos != end) {
+                    if (!copy_with_fresh_tails(beh, hooks, *source, pos, out, tails, with_slots) || pos != end) {
                         out.resize(at);
                         joint_stats().imaged = imaged_before;   // the walk below images them again
                         // T3C e3: the walk below is the slot memo's one counted
@@ -1392,6 +1415,7 @@ namespace bmmo::game {
                         continue;
                     }
                     ++reuse_stats.reused;
+                    if (from_kept) ++reuse_stats.kept_reused;
                     reuse_stats.tails += tails;
                     if (reuse->mode == script_reuse_mode::verify) {
                         // Walked as well and compared with the copy; the copy
@@ -1417,7 +1441,8 @@ namespace bmmo::game {
                             reuse_stats.note("script_reuse mismatch: " + owner_name(beh) + " / "
                                              + (beh->GetName() ? beh->GetName() : "") + " (#" + std::to_string(id)
                                              + ") at tick " + std::to_string(reuse->tick) + ": a fresh walk ("
-                                             + std::to_string(fresh) + " bytes) differs from the copy of record t - 1's block ("
+                                             + std::to_string(fresh) + " bytes) differs from the copy of "
+                                             + (from_kept ? "the kept source's" : "record t - 1's") + " block ("
                                              + std::to_string(copied) + " bytes, " + std::to_string(tails)
                                              + " physics tails fresh) at byte " + std::to_string(where) + "; recorded the copy");
                         }
@@ -1501,6 +1526,8 @@ namespace bmmo::game {
             }
             // Step RK2: the written-cell section (decision Q4).
             if (with_cells) put_written(context, *cells, out);
+            // The kept source: what the scripts hold as of this observation.
+            if (keeping) hooks.slots->keep_source(out.data(), scripts_end, writes);
             return true;
         }
 
@@ -1526,8 +1553,11 @@ namespace bmmo::game {
         // root's activation words after this tick's frame (script_slots.hpp
         // observe).  Every capture of a tick makes one: a whole record's
         // inside capture, a light record's through rollback_world
-        // observe_scripts.
-        static void observe_slot_roots(CKContext* context, script_slots& slots, uint32_t tick) {
+        // observe_scripts.  With the kept source on, every selected root is
+        // observed as well.
+        static void observe_roots(CKContext* context, const selection& sel, script_slots& slots, uint32_t tick) {
+            if (reuse_kept_from_env())
+                for (CK_ID id: sel.scripts) slots.track(static_cast<uint32_t>(id));
             slots.begin_observation();
             for (uint32_t root: slots.roots()) {
                 auto* beh = context ? CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(root))) : nullptr;
@@ -1721,11 +1751,15 @@ namespace bmmo::game {
         // again, with the reset, and it re-makes its bodies, joints and forces
         // the live way.  Without it the v14 rule holds: such a script keeps its
         // live state and is not executed.
+        // A restore writes the scripts: it bumps the host-write generation
+        // (step OPC), whoever calls it.  `tick` (the kept source,
+        // script_slots.hpp): the tick `in` is the record of; null: no source
+        // is kept.
         static bool restore(CKContext* context, const selection& sel, const script_replay_hooks& hooks,
                             const std::vector<uint8_t>& in, std::string* error, std::vector<CK_ID>* replayed = nullptr,
                             const std::vector<CK_ID>* kept_live = nullptr, bool replay_activation = false,
                             const trafo_part* trafo = nullptr, const queue_hooks* queue = nullptr,
-                            const hold_hooks* hold = nullptr) {
+                            const hold_hooks* hold = nullptr, const uint32_t* tick = nullptr) {
             if (error) error->clear();
             if (replayed) replayed->clear();
             last_restore() = restore_counters{};
@@ -1763,6 +1797,21 @@ namespace bmmo::game {
                 hooks.slots->arm_restore(std::move(quiet), script_write_generation());
                 armed.slots = hooks.slots;
             }
+            // After the skip has read the generation its memos were walked
+            // under; no capture or observation runs before the restore ends.
+            note_script_write();
+            const uint64_t writes = script_write_generation();
+            // The kept source: from here on (the first write) forgotten
+            // unless this restore ends well.  `exact`: the roots written back
+            // byte for byte, with the record's words; `scripts_end`: where
+            // its script list ends.
+            const bool keeping = hooks.slots && reuse_kept_from_env();
+            struct forget_unless_kept {
+                script_slots* slots;
+                ~forget_unless_kept() { if (slots) slots->forget(); }
+            } forgetting{keeping ? hooks.slots : nullptr};
+            std::vector<script_root_words> exact;
+            size_t scripts_end = 0;
             std::vector<CKBehavior*> written;   // the root scripts written back (G1, live_membership)
             // Gap Q (design 2.2.3): a selected script the record has no
             // state for that exists now runs in the replay too; it has no
@@ -1790,10 +1839,15 @@ namespace bmmo::game {
                     const bool was_active = (flags & (CKBEHAVIOR_ACTIVE | CKBEHAVIOR_ACTIVATENEXTFRAME)) != 0;
                     const bool reset_since = kept_live && std::find(kept_live->begin(), kept_live->end(), id) != kept_live->end();
                     const bool write = !scripts || replay_activation || (was_active && !reset_since);
+                    script_root_words words;
+                    const bool held = keeping && write && scripts && read_script_root_words(in.data() + pos, in.size() - pos, words);
+                    const uint32_t inexact = last_restore().inexact;
                     if (!restore_behavior(beh, hooks, in, pos, error, write, images)) return false;
+                    if (held && last_restore().inexact == inexact) exact.push_back(words);
                     if (write && scripts && replayed) replayed->push_back(id);
                     if (write && scripts) written.push_back(beh);
                 }
+                if (scripts) scripts_end = pos;
             }
             for (int c = 0; c < kCellCount; ++c) {
                 uint8_t present = 0;
@@ -1964,6 +2018,21 @@ namespace bmmo::game {
                 membership().unregistered += take_back_registrations(context, written);
                 for (CKBehavior* beh: written)
                     if (reregister(context, beh)) ++membership().reregistered;
+            }
+            // The kept source: `in`'s script list is what the scripts hold now,
+            // at `tick` - for the roots written exactly whose words still read
+            // as the record's (membership above may have changed them).  Not a
+            // record of another layout, nor when a part of this restore wrote
+            // a script on its own account (the generation moved).
+            if (keeping && tick && images && script_write_generation() == writes) {
+                std::erase_if(exact, [context](const script_root_words& words) {
+                    auto* beh = CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(words.id)));
+                    if (!beh) return true;
+                    const script_root_words now = root_words_of(beh);
+                    return now.flags != words.flags || now.in_mask != words.in_mask || now.out_mask != words.out_mask;
+                });
+                hooks.slots->restored(*tick, exact, in.data(), scripts_end, writes);
+                forgetting.slots = nullptr;
             }
             return true;
         }
@@ -2979,7 +3048,13 @@ namespace bmmo::game {
         static bool restore_parameter(CKParameter* parameter, const std::vector<uint8_t>& in, size_t& pos, std::string* error) {
             uint8_t kind = 0;
             if (!get_u8(in, pos, kind)) return fail(error, "truncated parameter");
-            if (kind == 0) return true;
+            if (kind == 0) {
+                // No bytes in the record: exact only when a capture would
+                // write none now either.
+                if (parameter && !is_opaque(parameter) && parameter->GetDataSize() > 0 && parameter->GetReadDataPtr(FALSE))
+                    ++last_restore().inexact;
+                return true;
+            }
             uint32_t size = 0;
             if (!get_u32(in, pos, size) || pos + size > in.size()) return fail(error, "truncated parameter bytes");
             // A size the parameter does not have now is a graph the capture
@@ -2999,11 +3074,20 @@ namespace bmmo::game {
             // the Identity block's parked output, and never lifted the paper
             // ball again).  The live frame propagates only when the block
             // executes, and the replayed frames do that themselves.
-            if (parameter && !is_opaque(parameter)) {
-                if (parameter->GetDataSize() == static_cast<int>(size)) {
-                    if (void* buffer = parameter->GetWriteDataPtr()) std::memcpy(buffer, in.data() + pos, size);
+            if (parameter) {
+                bool wrote = false;
+                if (is_opaque(parameter)) {
+                } else if (parameter->GetDataSize() == static_cast<int>(size)) {
+                    if (void* buffer = parameter->GetWriteDataPtr()) { std::memcpy(buffer, in.data() + pos, size); wrote = true; }
                 } else if (size > 0 && resize_strings() && parameter->GetGUID() == CKPGUID_STRING) {
-                    if (resize_parameter(parameter, in.data() + pos, static_cast<int>(size))) ++last_restore().strings_resized;
+                    if (resize_parameter(parameter, in.data() + pos, static_cast<int>(size))) { ++last_restore().strings_resized; wrote = true; }
+                }
+                // Left alone (a parameter with no write buffer - a "this" -,
+                // another size): exact only if it holds the record's bytes.
+                if (!wrote) {
+                    const void* live = !is_opaque(parameter) && parameter->GetDataSize() == static_cast<int>(size)
+                                           ? parameter->GetReadDataPtr(FALSE) : nullptr;
+                    if (!live || std::memcmp(live, in.data() + pos, size) != 0) ++last_restore().inexact;
                 }
             }
             pos += size;
@@ -3218,6 +3302,7 @@ namespace bmmo::game {
                 same = false;
             }
             ++(same ? stats.restore_skipped : stats.restore_written);
+            if (same && reuse_kept_from_env()) slots.keep_memo(static_cast<uint32_t>(child->GetID()));
             return same;
         }
 
@@ -3946,6 +4031,7 @@ namespace bmmo::game {
                         link->SetActivationDelay(recorded);
                         owner->ActivateOutput(index, TRUE);
                         ++last_restore().links_rearmed;
+                        ++last_restore().inexact;   // the source's output is on, the record's is not
                         last_rearmed_outputs().emplace_back(owner->GetID(), index);   // step B2SX (Q5)
                     } else {
                         ++last_restore().links_unrestorable;
@@ -3955,6 +4041,8 @@ namespace bmmo::game {
                     // not reachable through the SDK, so it fires anyway.
                     ++last_restore().links_live_pending;
                 }
+                // A countdown nothing wrote stays the live one.
+                if (link->GetActivationDelay() != recorded) ++last_restore().inexact;
             }
             return true;
         }

@@ -35,6 +35,25 @@
 // names, and the copy has no delayed link (whose re-arm a write performs).
 // Verify walks each such copy, compares it with the image and writes it
 // anyway, so a verify run is the off run.
+//
+// The kept source (BMMO_REUSE_KEPT = off | on, off when unset): a rewind
+// left every whole record after it a full walk - the replay's own (the record
+// of t - 1 is a light one, or the restore's barrier is in the way) and the
+// live one of the same frame (the engine's barrier at the rewind's end) -,
+// and in a room of 13 a third of the frames rewind.  The kept source is the
+// script list of the last record these scripts are known to hold: the one a
+// capture left, or the one a restore wrote.  The ledger covers every
+// selected root then (track), and a capture with no record of t - 1 copies a
+// root's block from the kept source when the host-write generation is the
+// source's and the root has been quiet at every observation since it was
+// kept (OPC's rule, tick by tick: the light records observe).  A restore is
+// an observation of its own (restored): a root it wrote byte for byte, whose
+// words then read as the record's, has a run from the record's tick; no
+// other root has one; a copy the restore skip left as it was keeps its memo
+// (keep_memo).  A restore that fails after its first write forgets the
+// source and every run.
+// BMMO_SCRIPT_REUSE's and BMMO_SLOT_MEMO's verify walk every such copy and
+// memo hit too.
 
 #include <algorithm>
 #include <cstddef>
@@ -45,6 +64,7 @@
 #include <limits>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -61,6 +81,12 @@ namespace bmmo::game {
     inline script_reuse_mode restore_skip_mode_from_env() {
         static const script_reuse_mode mode = parse_script_reuse_mode(std::getenv("BMMO_RESTORE_SKIP"), script_reuse_mode::on);
         return mode;
+    }
+    // BMMO_REUSE_KEPT, read once per process (off when unset).
+    inline bool reuse_kept_from_env() {
+        static const bool on = parse_script_reuse_mode(std::getenv("BMMO_REUSE_KEPT"), script_reuse_mode::off)
+                               != script_reuse_mode::off;
+        return on;
     }
 
     // What the memo did in this process (diagnostic: nothing decides on it).
@@ -122,8 +148,9 @@ namespace bmmo::game {
         };
 
         void clear() {
-            blocks_.clear(); bound_ = ~uint64_t{0}; learned_ = 0; roots_.clear(); runs_.clear();
+            blocks_.clear(); bound_ = ~uint64_t{0}; learned_ = 0; roots_.clear(); tracked_.clear();
             disarm_restore();
+            forget();
         }
         // A re-copy of the same block id (another rewire) replaces its base
         // (and so its memo).
@@ -191,8 +218,60 @@ namespace bmmo::game {
             restore_writes_ = writes;
             restore_armed_ = true;
         }
-        void disarm_restore() { restore_armed_ = false; restore_quiet_.clear(); }
+        void disarm_restore() { restore_armed_ = false; restore_quiet_.clear(); kept_.clear(); }
         bool restore_armed() const { return restore_armed_; }
+
+        // The kept source.  A root the ledger observes besides the copies'.
+        void track(uint32_t root) {
+            if (root && tracked_.insert(root).second && std::find(roots_.begin(), roots_.end(), root) == roots_.end())
+                roots_.push_back(root);
+        }
+        // `record[0, size)` (a record up to the end of its script list) is
+        // what the scripts hold as of this observation, under the
+        // host-write generation `writes`.
+        void keep_source(const uint8_t* record, size_t size, uint64_t writes, bool restored = false) {
+            source_.assign(record, record + size);
+            source_seq_ = seq_;
+            source_writes_ = writes;
+            source_restored_ = restored;
+            have_source_ = true;
+        }
+        // The kept source a capture under `writes_now` may copy from, or
+        // null; whether a restore wrote it; whether `root` has been quiet
+        // since it was kept.
+        const std::vector<uint8_t>* kept_source(uint64_t writes_now) const {
+            return have_source_ && source_writes_ == writes_now ? &source_ : nullptr;
+        }
+        bool kept_restored() const { return source_restored_; }
+        bool quiet_since_kept(uint32_t root) const { return have_source_ && quiet_since(root) <= source_seq_; }
+        // Nothing is known of any root (a restore failed part-way, or one
+        // whose record's tick the caller does not say).
+        void forget() { runs_.clear(); have_source_ = false; }
+        // A copy the restore skip left as it was (it holds its memo's image).
+        void keep_memo(uint32_t id) { kept_.push_back(id); }
+        // A restore that ended well, as one observation: `holding` are the
+        // roots that now hold exactly the record's block, with the record's
+        // words - each has a run from `tick`; no other root has one.  The
+        // copies kept are as good as walked now.
+        void restored(uint32_t tick, const std::vector<script_root_words>& holding, const uint8_t* record, size_t size,
+                      uint64_t writes) {
+            ++seq_;
+            runs_.clear();
+            for (const script_root_words& words: holding) {
+                run& r = runs_[words.id];
+                r.from = seq_;
+                r.seen = true;
+                r.tick = tick;
+                r.words = words;
+            }
+            for (uint32_t id: kept_)
+                if (copy* c = find(id); c && c->m.valid) {
+                    c->m.seq = seq_;
+                    c->m.writes = writes;
+                }
+            kept_.clear();
+            keep_source(record, size, writes, true);
+        }
         uint64_t restore_writes() const { return restore_writes_; }
         bool restore_quiet(uint32_t root) const {
             return restore_armed_ && std::binary_search(restore_quiet_.begin(), restore_quiet_.end(), root);
@@ -342,5 +421,10 @@ namespace bmmo::game {
         std::vector<uint32_t> restore_quiet_;
         uint64_t restore_writes_ = 0;
         bool restore_armed_ = false;
+        std::vector<uint32_t> kept_;
+        std::unordered_set<uint32_t> tracked_;
+        std::vector<uint8_t> source_;
+        uint64_t source_seq_ = 0, source_writes_ = 0;
+        bool have_source_ = false, source_restored_ = false;
     };
 }

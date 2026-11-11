@@ -1359,8 +1359,9 @@ capture's rule (`memo_refused` with the host-write generation at the restore's s
 is the image the record names, and the copy has no delayed link (a write re-arms it). Copies with a joint block are never
 memoized, so they are always written. Verify walks each copy it would skip, compares it with the image and writes it
 anyway, so a verify run is the off run. The restore's binding bumped the host-write generation before restoring, which
-refused every memo (the review's finding: the first build never skipped); the bump now follows the restore, and no
-capture or observation runs in between. Counters on the `slot_memo` line (` restore_skip: mode=... skipped written
+refused every memo (the review's finding: the first build never skipped); the bump now comes after the skip has read
+the generation (since the kept source, below: inside `script_replay::restore`, before its first write), and no capture
+or observation runs in between. Counters on the `slot_memo` line (` restore_skip: mode=... skipped written
 verified mismatches`).
 
 Gate: 844/844 (a ledger test); fast LBM with verify 38/38 twins FINAL exact, every criteria row equal to the protocol 39
@@ -1429,3 +1430,76 @@ same recipe and ticks: capture 3.9-7.4 ms, coding 0.8-2.2 ms. Gate: 844/844; fas
 every criteria row equal to the join fix's run; x64 and x86 builds, the Arch server; L6's
 `--portable-scripts-check` (a report: every look-up) prints what HEAD prints; two serial reviews, no defects. What
 a state still costs: the record's walk ~3.5-7 ms (its ~375 KB of parameter values), the coding ~1 ms.
+
+## Built (the kept source: script reuse across a rewind, 2026-11-11)
+
+**Where a whole record's time goes in a full room.** The public L6 re-drive (13 players, K = 20, the players' own
+pings, `work/PERF/run_pt.sh`) with the census buckets printed by the headless client (`work/PERF/cap_split.py`,
+`cap_scripts.py`; taken while another job held 25 of the machine's 28 threads, so the times are ~1.3 times a quiet
+machine's and only the shares count): a live whole record 2.37 ms, of it the scripts 2.06 ms (87 %; the omitted
+copies' images 0.36 ms of that), the IVP blob 0.27 ms, bodies, extras and navigation 0.03 ms. A replayed whole
+record 3.03 ms (scripts 2.72). By script, of the 1.68 ms a record spends walking the selected scripts: L6's fans
+(`P_Modul_18_MF Script`, 8 of the level and 5 placement copies, 36 behaviours and 194 local parameters a copy)
+82 %, the fans' particle scripts 6 %, `P_Modul_29` 6 %, the balloon 3.7 %, the sector manager 2.1 %. A restore's
+script write is 2.5 ms of ~3.1; a replayed light tick is ~0.5 ms, 0.27 of it the probes' placement.
+
+**Why the walks.** 12 of the 13 fan scripts are quiet all session and are copied whenever a capture has a reuse
+source (step OPC), but a rewind takes the source away: the replay's whole records come after a light record of
+t - 1 (SRT4), and the live record of the same frame is behind the engine's barrier at the rewind's end. Counted
+on one client (8232 frames, 2835 rewinds): 2825 of the live captures without a source, each for the engine's write
+generation; 4205 of the 4707 replayed whole captures, each for a light t - 1; host writes 16 in all. So 55 % of the
+captures walked every script, and the restore's bump of the host-write generation refused every slot memo once per
+rewind (385 k of the 455 k omitted copies that client walked).
+
+**What was built** (`game/script_slots.hpp`, `game/script_replay.hpp`, `session/rollback_binding_scripts.hpp`;
+`BMMO_REUSE_KEPT` = off | on, off when unset). The slots keep the script list of the last record these scripts are
+known to hold - the one a capture left, or the one a restore wrote - with the observation it was kept at and the
+host-write generation then. The quiet-run ledger (step e3) observes every selected root, light records included.
+A capture the engine offers no record of t - 1 copies a root's block from the kept source (step OPC2's copy: force
+and joint tails and the slot image sections read fresh) when the generation is the source's and the root has been
+quiet at every observation since; anything else walks, as before. A restore is one observation: a root it wrote
+byte for byte, whose words read as the record's after it, has a run from the record's tick, and no other root has
+one; a copy the restore skip left as it was keeps its memo under such a root. "Byte for byte" is counted where the
+restore leaves a live byte in place (`restore_counters::inexact`): a parameter it cannot write that does not hold
+the record's bytes, a delayed link re-armed (its source's output is on, the record's is not) or left at another
+countdown. A restore that fails after its first write, or is not told its record's tick (the tools), forgets the
+source and every run. `script_replay::restore` now bumps the host-write generation itself, after the skip has read
+it and before its first write (the binding did, after the restore).
+
+**What it gives up.** The replay's last record was a full walk, so the engine's comparison of the replayed world
+with the live record of that tick set two independent walks side by side. With the kept source a quiet root's block
+in both is a copy from one source, and that comparison no longer covers it; `BMMO_SCRIPT_REUSE=verify` and
+`BMMO_SLOT_MEMO=verify` walk every copy and every memo hit and compare, which is the check to run for it.
+
+**Counted** (the same recipe, 8000 ticks, the 13 clients summed; 5.18 M script records, 22.2 M omitted copies):
+
+| | off | on |
+|---|---|---|
+| scripts walked | 67.8 % | 29.5 % |
+| of them for want of a source | 2.82 M | 0.03 M |
+| scripts copied | 1.67 M | 3.65 M (1.98 M from the kept source: 54 k captures from a captured one, 36 k from a restored one) |
+| omitted copies walked | 26.1 % | 5.9 % |
+
+Not timed: another job held the machine through the whole step, and what the fewer walks are worth in a frame is
+not known (a copy still walks the graph for its structure, every capture now copies its script list aside, a light
+record observes every selected root). The off / on runs are owed, in the full room and in retail's rooms of two,
+where 6-15 % of the copies came from the kept source.
+
+**Gate.** Unit tests 845/845 (one new: the ledger's rules for the kept source and a restore). Verify
+(`BMMO_REUSE_KEPT=on BMMO_SCRIPT_REUSE=verify BMMO_SLOT_MEMO=verify`), the L6 re-drive: 3.65 M copies and 20.9 M memo
+hits walked again, 0 mismatches. Fast LBM with the same three: 38/38 twins FINAL exact, every criteria row equal to
+the resync cut's run; over 140 client sessions 6.37 M copies (96 k from the kept source) and 1.66 M memo hits walked
+again, 0 mismatches. Fast LBM with `BMMO_REUSE_KEPT=on`: 38/38, the same rows, the same counts. Fast LBM with the
+switch unset: 37 of 38 with their rows equal; `a11u_on` left no summary (its server did not exit within the
+harness's 60 s after the session ended, seen once before under load) and was exact with an equal row when run
+again with its control. Retail at K = 20, one-way 150 (`work/PERF/run_rkept.sh`), L12 and L11 at human key rates,
+two clients each: verify 618 k copies (53 k from the kept source) and 3.55 M memo hits walked again, 0 mismatches;
+FINAL rows of the on and the verify sessions bit-equal, client by client, to the restore skip's run - balls, bodies
+and L11's 32 trafo pieces. x64 and x86 builds, the Arch server; SimTool's `--portable-scripts-check` on L6 and L11
+(its restores now bump the generation). Review: two serial reviews found the restore not byte-faithful below a root
+in three branches (a re-armed link, a countdown left live, a parameter left alone), which the exactness count
+closes; a third confirmed that and asked for the comparison of an unwritten parameter's bytes. No verify run met
+one of those branches, before the count or after (the kept source served the same 95 997 copies over the fast LBM
+both times): the count has been read, not exercised.
+
+**Why the switch is off.** It is not timed, and the exactness count has never decided anything.

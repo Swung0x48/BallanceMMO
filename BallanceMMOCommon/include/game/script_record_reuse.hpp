@@ -118,7 +118,8 @@ namespace bmmo::game {
     // Captures with a record of t - 1 to reuse from, and without one (the
     // first record, after a barrier or a host write); scripts copied from it,
     // walked though it had their block (not reusable: active, a flag, words
-    // changed), walked without one and walked because the in-step copy met
+    // changed, or not quiet since a kept source was taken), walked without
+    // one and walked because the in-step copy met
     // a structure unlike the graph; the force and joint tails the copies
     // emitted fresh (step OPC2; blocks, not scripts); verify's re-walks,
     // mismatches and the first notes naming them.
@@ -131,6 +132,11 @@ namespace bmmo::game {
         // emitted fresh (blocks counted, whether or not the hook wrote one).
         uint64_t walked_structure = 0, tails = 0;
         uint64_t verified = 0, mismatches = 0;
+        // The kept source (script_slots.hpp): captures with no record of
+        // t - 1 whose source was the kept one - a record a capture left, one
+        // a restore wrote - and the scripts copied from it (verify walks
+        // every one of them, as it does any copy).
+        uint64_t kept_captured = 0, kept_restored = 0, kept_reused = 0;
         std::vector<std::string> notes;
         static constexpr size_t kNotes = 16;
         void note(const std::string& what) {
@@ -139,10 +145,11 @@ namespace bmmo::game {
         }
         std::string line(script_reuse_mode mode) const {
             const uint64_t scripts = reused + walked + walked_unrecorded + walked_structure;
-            char buf[460];
+            char buf[640];
             std::snprintf(buf, sizeof buf,
                           "script_reuse: mode=%s captures=%llu with_previous=%llu index_failed=%llu scripts=%llu reused=%llu "
-                          "(%.1f%%) tails=%llu walked=%llu unrecorded=%llu structure=%llu verified=%llu mismatches=%llu",
+                          "(%.1f%%) tails=%llu walked=%llu unrecorded=%llu structure=%llu verified=%llu mismatches=%llu "
+                          "kept: captured=%llu restored=%llu reused=%llu",
                           script_reuse_mode_name(mode), static_cast<unsigned long long>(captures),
                           static_cast<unsigned long long>(with_previous), static_cast<unsigned long long>(index_failed),
                           static_cast<unsigned long long>(scripts), static_cast<unsigned long long>(reused),
@@ -150,7 +157,9 @@ namespace bmmo::game {
                           static_cast<unsigned long long>(tails),
                           static_cast<unsigned long long>(walked), static_cast<unsigned long long>(walked_unrecorded),
                           static_cast<unsigned long long>(walked_structure),
-                          static_cast<unsigned long long>(verified), static_cast<unsigned long long>(mismatches));
+                          static_cast<unsigned long long>(verified), static_cast<unsigned long long>(mismatches),
+                          static_cast<unsigned long long>(kept_captured), static_cast<unsigned long long>(kept_restored),
+                          static_cast<unsigned long long>(kept_reused));
             return buf;
         }
     };

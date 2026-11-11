@@ -250,8 +250,8 @@ namespace bmmo::session {
         }
         // T3C e3: a light record's observation of the slot memo's ledger.
         if (hooks->slots)
-            world.observe_scripts = [context, hooks](uint32_t tick) {
-                bmmo::game::script_replay::observe_slot_roots(context, *hooks->slots, tick);
+            world.observe_scripts = [context, selection, hooks](uint32_t tick) {
+                bmmo::game::script_replay::observe_roots(context, *selection, *hooks->slots, tick);
             };
         world.restore_scripts = [o, context, selection, hooks, trafo, queue, queue_ptr, hold, hold_ptr](
                                     const std::vector<uint8_t>& bytes, uint32_t anchor) {
@@ -265,13 +265,13 @@ namespace bmmo::session {
             resize = o.resize_strings;
             bool& membership = bmmo::game::script_replay::live_membership();
             membership = o.live_membership;
+            // Step OPC: the restore bumps the host-write generation itself
+            // (the engine's own restore is behind its barrier as well).  The
+            // record is the one of tick `anchor` (script_slots.hpp, the kept
+            // source).
             const bool ok = bmmo::game::script_replay::restore(context, *selection, *hooks, bytes, &error, o.scripts_replayed,
-                                                               &kept_live, o.replay_activation, trafo, queue_ptr, hold_ptr);
-            // Step OPC: a script restore writes the scripts, whoever calls it
-            // (the engine's own restore is behind its barrier as well).  After
-            // it, not before: the restore skip reads the generation its memos
-            // were walked under (script_slots.hpp), and no capture runs between.
-            bmmo::game::note_script_write();
+                                                               &kept_live, o.replay_activation, trafo, queue_ptr, hold_ptr,
+                                                               &anchor);
             resize = false;
             membership = false;
             if (!ok && o.on_restore_failed) o.on_restore_failed(error);
