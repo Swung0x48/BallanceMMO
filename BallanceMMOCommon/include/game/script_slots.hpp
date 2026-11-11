@@ -35,6 +35,18 @@
 // names, and the copy has no delayed link (whose re-arm a write performs).
 // Verify walks each such copy, compares it with the image and writes it
 // anyway, so a verify run is the off run.
+// The same switch spares two more writes (script_replay restore), each of
+// bytes the script holds already: a selected root that has been quiet since
+// the kept source (below; so only with BMMO_REUSE_KEPT on) was taken and
+// whose block there is the record's - its parameters and activation words
+// are the record's; and, on every host with a trafo part, a trafo script the
+// dormant ledger knows to hold its built state when the record says built
+// (the capture's own rule and guard).  Everything else a restore does for
+// such a script it still does: the force and joint tails (physics_RT's
+// state), the omitted copies, the delayed links (a pending one is re-armed
+// as ever).  On the public L6 re-drive with 13 players the roots' parameters
+// and flags were 2.3 ms of a 4.2 ms script restore and the 104 trafo scripts
+// 1.6 ms.
 //
 // The kept source (BMMO_REUSE_KEPT = off | on, on when unset): a rewind
 // left every whole record after it a full walk - the replay's own (the record
@@ -96,6 +108,9 @@ namespace bmmo::game {
         // The restore skip: omitted copies a restore left as they were, wrote,
         // and (verify) walked and found unlike the image.
         uint64_t restore_skipped = 0, restore_written = 0, restore_verified = 0, restore_mismatches = 0;
+        // The roots a restore left (their tails apart) and wrote though it
+        // had a kept source to judge by, and the dormant trafo scripts left.
+        uint64_t restore_roots_skipped = 0, restore_roots_written = 0, restore_trafo_skipped = 0;
         std::vector<std::string> notes;
         void note(const std::string& what) {
             ++mismatches;
@@ -106,11 +121,11 @@ namespace bmmo::game {
             if (notes.size() < 16) notes.push_back(what);
         }
         std::string line(script_reuse_mode mode) const {
-            char buf[448];
+            char buf[560];
             std::snprintf(buf, sizeof buf,
                           "slot_memo: mode=%s walked=%llu hits=%llu misses none=%llu gen=%llu run=%llu tail=%llu joint=%llu "
                           "verified=%llu mismatches=%llu restore_skip: mode=%s skipped=%llu written=%llu verified=%llu "
-                          "mismatches=%llu",
+                          "mismatches=%llu roots=%llu/%llu trafo=%llu",
                           script_reuse_mode_name(mode), static_cast<unsigned long long>(walked),
                           static_cast<unsigned long long>(hits), static_cast<unsigned long long>(miss_none),
                           static_cast<unsigned long long>(miss_gen), static_cast<unsigned long long>(miss_run),
@@ -118,7 +133,10 @@ namespace bmmo::game {
                           static_cast<unsigned long long>(verified), static_cast<unsigned long long>(mismatches),
                           script_reuse_mode_name(restore_skip_mode_from_env()), static_cast<unsigned long long>(restore_skipped),
                           static_cast<unsigned long long>(restore_written), static_cast<unsigned long long>(restore_verified),
-                          static_cast<unsigned long long>(restore_mismatches));
+                          static_cast<unsigned long long>(restore_mismatches),
+                          static_cast<unsigned long long>(restore_roots_skipped),
+                          static_cast<unsigned long long>(restore_roots_written),
+                          static_cast<unsigned long long>(restore_trafo_skipped));
             return buf;
         }
     };

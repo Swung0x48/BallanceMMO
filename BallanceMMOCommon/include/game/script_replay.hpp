@@ -391,11 +391,15 @@ namespace bmmo::game {
             // next-frame flags (execute_trafo), a trafo input's flags
             // (run_trafo), a remake's execution, a restore of other bytes -
             // clears it, and an entry nobody set is unknown (the script is
-            // walked).  Rebuilding the part (a set added, removed or
-            // reselected) starts it empty.  A wrong "unknown" costs a walk; a
-            // wrong "known" would restore the built state over a changed
-            // script, so the capture also checks the root's activation words
-            // against the built bytes (dormant_guard_trips counts the misses).
+            // walked).  A script that runs takes its whole set out
+            // (touch_set).  Rebuilding the part (a set added, removed or
+            // reselected) starts it empty.  Two readers: the capture, which
+            // records a known script as one byte, and the restore skip, which
+            // leaves a known script's parameters as they are.  A wrong
+            // "unknown" costs a walk; a wrong "known" would record a changed
+            // script as built and leave it changed, so both also check the
+            // root's activation words against the built bytes
+            // (dormant_guard_trips counts the capture's misses).
             mutable std::vector<uint8_t> dormant;
             size_t index_of(CK_ID id) const {
                 for (size_t i = 0; i < scripts.size(); ++i)
@@ -408,6 +412,21 @@ namespace bmmo::game {
                 if (i < dormant.size()) dormant[i] = known ? 1 : 0;
             }
             void touch(CK_ID id) const { set_dormant(index_of(id), false); }
+            // A script that runs can write another script of its set through
+            // a parameter the two share - the explosion script's "actual
+            // Group" came out of a set's frame with a group in it, the script
+            // itself never active - so the whole set (the scripts of one
+            // owner) leaves the ledger with it.
+            void touch_set(CKContext* context, CK_ID id) const { touch_set(context, index_of(id)); }
+            void touch_set(CKContext* context, size_t i) const {
+                auto* beh = i < scripts.size() ? CKBehavior::Cast(context->GetObject(scripts[i])) : nullptr;
+                CKBeObject* owner = beh ? beh->GetOwner() : nullptr;
+                set_dormant(i, false);
+                if (!owner) return;
+                for (size_t j = 0; j < scripts.size(); ++j)
+                    if (auto* other = CKBehavior::Cast(context->GetObject(scripts[j])); other && other->GetOwner() == owner)
+                        set_dormant(j, false);
+            }
             void forget_all() const { dormant.clear(); }
         };
         // Record v3's per-script byte for a trafo script in its set's built
@@ -1317,22 +1336,6 @@ namespace bmmo::game {
                     else ++reuse_stats.kept_captured;
                 }
             }
-            // The block of `id` in the previous record (present), or null.
-            // Same order as the selection unless scripts joined it: the same
-            // position first, then a search.
-            const auto previous_block = [&](size_t k, CK_ID id, size_t& size) -> const uint8_t* {
-                const record_index::script* s = nullptr;
-                if (k < previous_index.scripts.size() && previous_index.scripts[k].id == id) {
-                    s = &previous_index.scripts[k];
-                } else {
-                    for (const record_index::script& e: previous_index.scripts)
-                        if (e.id == id) { s = &e; break; }
-                }
-                // id (4) and present (1), then the block.
-                if (!s || s->end < s->begin + 5 || (*source)[s->begin + 4] != 1) return nullptr;
-                size = s->end - s->begin - 5;
-                return source->data() + s->begin + 5;
-            };
             // Sized like this thread's previous record (a tick's scripts are
             // the last tick's): the bytes are appended without the vector
             // moving them as it grows (step TR3: every member's trafo set
@@ -1378,7 +1381,7 @@ namespace bmmo::game {
                     // record t - 1's takes that record's block - step OPC2:
                     // with its force and joint tails emitted fresh.
                     size_t size = 0;
-                    const uint8_t* block = have_previous ? previous_block(k, id, size) : nullptr;
+                    const uint8_t* block = have_previous ? recorded_block(*source, previous_index, k, id, size) : nullptr;
                     script_root_words recorded;
                     if (!block || !read_script_root_words(block, size, recorded)) {
                         ++reuse_stats.walked_unrecorded;
@@ -1696,11 +1699,11 @@ namespace bmmo::game {
         // recorded script.  Fails, naming the place, when they do not match
         // the graph.
         static bool restore_script_block(CKBehavior* script, const script_replay_hooks& hooks,
-                                         const std::vector<uint8_t>& bytes, std::string* error) {
+                                         const std::vector<uint8_t>& bytes, std::string* error, bool same = false) {
             if (error) error->clear();
             if (!script) return fail(error, "no script");
             size_t pos = 0;
-            if (!restore_behavior(script, hooks, bytes, pos, error, true)) return false;
+            if (!restore_behavior(script, hooks, bytes, pos, error, true, false, same)) return false;
             return pos == bytes.size() || fail(error, "trailing bytes in a script block");
         }
 
@@ -1797,6 +1800,13 @@ namespace bmmo::game {
                 hooks.slots->arm_restore(std::move(quiet), script_write_generation());
                 armed.slots = hooks.slots;
             }
+            // The restore skip, roots: the kept source under the generation
+            // this restore starts with.
+            const script_reuse_mode skip_mode = restore_skip_mode_from_env();
+            const std::vector<uint8_t>* kept =
+                armed.slots && reuse_kept_from_env() ? hooks.slots->kept_source(script_write_generation()) : nullptr;
+            record_index kept_index;
+            if (kept && !index_record(*kept, kept_index)) kept = nullptr;
             // After the skip has read the generation its memos were walked
             // under; no capture or observation runs before the restore ends.
             note_script_write();
@@ -1821,7 +1831,8 @@ namespace bmmo::game {
                 const bool scripts = list == &sel.scripts;
                 uint32_t count = 0;
                 if (!get_u32(in, pos, count) || count != list->size()) return fail(error, "script count");
-                for (CK_ID id: *list) {
+                for (size_t k = 0; k < list->size(); ++k) {
+                    const CK_ID id = (*list)[k];
                     uint32_t recorded = 0;
                     uint8_t present = 0;
                     if (!get_u32(in, pos, recorded) || recorded != static_cast<uint32_t>(id)) return fail(error, "script id");
@@ -1842,7 +1853,8 @@ namespace bmmo::game {
                     script_root_words words;
                     const bool held = keeping && write && scripts && read_script_root_words(in.data() + pos, in.size() - pos, words);
                     const uint32_t inexact = last_restore().inexact;
-                    if (!restore_behavior(beh, hooks, in, pos, error, write, images)) return false;
+                    const bool same = kept && scripts && write && root_unchanged(beh, hooks, *kept, kept_index, k, in, pos, skip_mode);
+                    if (!restore_behavior(beh, hooks, in, pos, error, write, images, same)) return false;
                     if (held) ++held_roots;
                     if (held && last_restore().inexact == inexact) exact.push_back(words);
                     if (write && scripts && replayed) replayed->push_back(id);
@@ -1875,19 +1887,27 @@ namespace bmmo::game {
                     if (trafo)
                         if (const auto b = trafo->built.find(static_cast<CK_ID>(id)); b != trafo->built.end()) built = &b->second;
                     if (present == kTrafoDormant) {
-                        // RC4: the set's built state, as the capture found it.
+                        // RC4: the set's built state, as the capture found it;
+                        // a script known to hold it (the restore skip) gets
+                        // its tails only.
                         if (!built) return fail(error, "a dormant trafo script without a built state");
-                        if (!restore_script_block(beh, hooks, *built, error)) return false;
-                        trafo->set_dormant(trafo->index_of(static_cast<CK_ID>(id)), true);
+                        const size_t index = trafo->index_of(static_cast<CK_ID>(id));
+                        const bool same = trafo_built_already(beh, hooks, *trafo, index, *built, skip_mode);
+                        if (!same) trafo->set_dormant(index, false);   // unknown while it is written
+                        const uint32_t inexact = last_restore().inexact;
+                        if (!restore_script_block(beh, hooks, *built, error, same)) return false;
+                        trafo->set_dormant(index, last_restore().inexact == inexact);   // known when written exactly
                         ++dormancy().restored_built;
                         continue;
                     }
                     if (present != 1) return fail(error, "trafo script presence");
                     const size_t at = pos;
+                    if (trafo) trafo->touch(static_cast<CK_ID>(id));   // unknown while it is written
+                    const uint32_t inexact = last_restore().inexact;
                     if (!restore_behavior(beh, hooks, in, pos, error, true)) return false;
                     if (trafo)
                         trafo->set_dormant(trafo->index_of(static_cast<CK_ID>(id)),
-                                           built && pos - at == built->size()
+                                           last_restore().inexact == inexact && built && pos - at == built->size()
                                                && std::equal(built->begin(), built->end(), in.begin() + static_cast<std::ptrdiff_t>(at)));
                 }
             }
@@ -1929,8 +1949,9 @@ namespace bmmo::game {
                     const auto built = trafo->built.find(static_cast<CK_ID>(id));
                     auto* beh = CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(id)));
                     if (built == trafo->built.end() || !beh) return fail(error, "a trafo script without a built state");
+                    const uint32_t inexact = last_restore().inexact;
                     if (!restore_script_block(beh, hooks, built->second, error)) return false;
-                    trafo->set_dormant(trafo->index_of(static_cast<CK_ID>(id)), true);
+                    trafo->set_dormant(trafo->index_of(static_cast<CK_ID>(id)), last_restore().inexact == inexact);
                     ++last_restore().trafo_built;
                 }
             }
@@ -2091,8 +2112,8 @@ namespace bmmo::game {
         // frame (a replayed activation, a restore's re-registration); without
         // a recorded order, the list as it is now (owner_in_frame).
         // `ledger` (RC4, execute_trafo only: `scripts` is ledger->scripts):
-        // every script whose flags the frame processed or that it executed
-        // leaves the dormant ledger.
+        // every script whose flags the frame processed leaves the dormant
+        // ledger, and one it executed takes its whole set out (touch_set).
         static int execute_scripts(CKContext* context, const std::vector<CK_ID>& scripts, float delta_ms,
                                    bool live_flags = false, const std::vector<uint32_t>* live_members = nullptr,
                                    const trafo_part* ledger = nullptr) {
@@ -2122,7 +2143,7 @@ namespace bmmo::game {
             for (size_t i = 0; i < scripts.size(); ++i) {
                 auto* beh = CKBehavior::Cast(context->GetObject(scripts[i]));
                 if (!beh || !beh->IsActive()) continue;
-                if (ledger) ledger->set_dormant(i, false);
+                if (ledger) ledger->touch_set(context, i);
                 if (live_flags) note_ran(beh);   // step RLM: the registration ledger
                 beh->Execute(delta_ms);
                 ++executed;
@@ -2493,6 +2514,23 @@ namespace bmmo::game {
             size_t tail = 0;
             uint32_t sections = 0;
         };
+        // The block of `id` in `record` (present), or null.  Same order as the
+        // selection unless scripts joined it: position `k` first, then a
+        // search.
+        static const uint8_t* recorded_block(const std::vector<uint8_t>& record, const record_index& index, size_t k, CK_ID id,
+                                             size_t& size) {
+            const record_index::script* s = nullptr;
+            if (k < index.scripts.size() && index.scripts[k].id == id) {
+                s = &index.scripts[k];
+            } else {
+                for (const record_index::script& e: index.scripts)
+                    if (e.id == id) { s = &e; break; }
+            }
+            // id (4) and present (1), then the block.
+            if (!s || s->end < s->begin + 5 || record[s->begin + 4] != 1) return nullptr;
+            size = s->end - s->begin - 5;
+            return record.data() + s->begin + 5;
+        }
         static bool index_record(const std::vector<uint8_t>& record, record_index& index) {
             index = {};
             size_t a = 0;
@@ -3278,6 +3316,71 @@ namespace bmmo::game {
                 if (has_delayed_links(beh->GetSubBehavior(i))) return true;
             return false;
         }
+        // The restore skip (script_slots.hpp): whether the selected root
+        // `beh`, whose block of the record starts at `in[pos]`, holds that
+        // block's parameters and activation words already - it has been
+        // quiet since the kept source was taken (and is now: the armed set),
+        // and its block there is this one byte for byte.  Counts what it
+        // decides; verify compares the record's block, copied in step with
+        // the live graph (step OPC2's copy), with a walk, and says no.
+        static bool root_unchanged(CKBehavior* beh, const script_replay_hooks& hooks, const std::vector<uint8_t>& kept,
+                                   const record_index& kept_index, size_t k, const std::vector<uint8_t>& in, size_t pos,
+                                   script_reuse_mode mode) {
+            const uint32_t id = static_cast<uint32_t>(beh->GetID());
+            slot_memo_stats& stats = slot_memo_totals();
+            size_t size = 0;
+            const uint8_t* block = recorded_block(kept, kept_index, k, static_cast<CK_ID>(id), size);
+            bool same = mode != script_reuse_mode::off && block && hooks.slots->restore_quiet(id)
+                        && hooks.slots->quiet_since_kept(id) && pos + size <= in.size()
+                        && std::memcmp(in.data() + pos, block, size) == 0;
+            if (same && mode == script_reuse_mode::verify) {
+                ++stats.restore_verified;
+                const uint64_t imaged = joint_stats().imaged;
+                std::vector<uint8_t> copied, walked;
+                uint64_t tails = 0;
+                size_t at = pos;
+                const bool copies = copy_with_fresh_tails(beh, hooks, in, at, copied, tails, true);
+                capture_behavior(beh, hooks, walked, true);
+                joint_stats().imaged = imaged;
+                if (!copies || copied != walked)
+                    stats.restore_note("restore_skip mismatch: root " + owner_name(beh) + " / " + (beh->GetName() ? beh->GetName() : "")
+                                       + " (#" + std::to_string(id) + "): the live walk (" + std::to_string(walked.size())
+                                       + " bytes) differs from the record's block at byte "
+                                       + std::to_string(first_difference(walked.data(), walked.size(), copied.data(), copied.size())));
+                same = false;
+            }
+            ++(same ? stats.restore_roots_skipped : stats.restore_roots_written);
+            return same;
+        }
+        // The restore skip: whether a trafo script the record has in its
+        // built state holds it already - the dormant ledger says so and the
+        // root's activation words are the built ones (the capture's rule and
+        // guard).  Verify compares the built bytes, copied in step with the
+        // live graph (the tails fresh: the caller still puts those back),
+        // with a walk, and says no.
+        static bool trafo_built_already(CKBehavior* beh, const script_replay_hooks& hooks, const trafo_part& trafo, size_t index,
+                                        const std::vector<uint8_t>& built, script_reuse_mode mode) {
+            slot_memo_stats& stats = slot_memo_totals();
+            bool same = mode != script_reuse_mode::off && trafo.is_dormant(index) && root_activation_is(beh, built);
+            if (same && mode == script_reuse_mode::verify) {
+                ++stats.restore_verified;
+                const uint64_t imaged = joint_stats().imaged;
+                std::vector<uint8_t> copied, walked;
+                uint64_t tails = 0;
+                size_t at = 0;
+                const bool copies = copy_with_fresh_tails(beh, hooks, built, at, copied, tails);
+                capture_behavior(beh, hooks, walked);
+                joint_stats().imaged = imaged;
+                if (!copies || copied != walked)
+                    stats.restore_note("restore_skip mismatch: trafo script " + owner_name(beh) + " (#" + std::to_string(beh->GetID())
+                                       + "): the live walk (" + std::to_string(walked.size())
+                                       + " bytes) differs from its built state, the tails apart, at byte "
+                                       + std::to_string(first_difference(walked.data(), walked.size(), copied.data(), copied.size())));
+                same = false;
+            }
+            if (same) ++stats.restore_trafo_skipped;
+            return same;
+        }
         // The restore skip (script_slots.hpp): whether an omitted copy that a
         // restore is about to write already holds `image`.  Counts what it
         // decides; verify walks a copy it would skip, compares and says no.
@@ -3910,14 +4013,19 @@ namespace bmmo::game {
             }
         }
 
+        // `same` (the restore skip): the block and every block under it hold
+        // the record's parameters and activation words already, so those are
+        // not written; the force and joint tails, the omitted copies and the
+        // delayed links are handled as in any write.
         static bool restore_behavior(CKBehavior* beh, const script_replay_hooks& hooks, const std::vector<uint8_t>& in,
-                                     size_t& pos, std::string* error, bool write = true, bool images = false) {
+                                     size_t& pos, std::string* error, bool write = true, bool images = false, bool same = false) {
             uint32_t id = 0, flags = 0, in_mask = 0, out_mask = 0;
             if (!get_u32(in, pos, id) || id != static_cast<uint32_t>(beh->GetID())) return fail(error, "block id");
             if (!get_u32(in, pos, flags) || !get_u32(in, pos, in_mask) || !get_u32(in, pos, out_mask))
                 return fail(error, "truncated block");
             const int inputs = beh->GetInputCount(), outputs = beh->GetOutputCount();
-            if (write) {
+            const bool words = write && !same;   // the activation words and the parameters are written
+            if (words) {
                 beh->ModifyFlags(flags & kRuntimeFlags, kRuntimeFlags & ~flags);
                 for (int i = 0; i < inputs && i < 32; ++i) beh->ActivateInput(i, ((in_mask >> i) & 1u) != 0);
                 for (int i = 0; i < outputs && i < 32; ++i) beh->ActivateOutput(i, ((out_mask >> i) & 1u) != 0);
@@ -3925,10 +4033,10 @@ namespace bmmo::game {
             uint16_t locals = 0, outs = 0, children = 0;
             if (!get_u16(in, pos, locals) || locals != beh->GetLocalParameterCount()) return fail(error, "local parameter count");
             for (int i = 0; i < locals; ++i)
-                if (!restore_parameter(write ? beh->GetLocalParameter(i) : nullptr, in, pos, error)) return false;
+                if (!restore_parameter(words ? beh->GetLocalParameter(i) : nullptr, in, pos, error)) return false;
             if (!get_u16(in, pos, outs) || outs != beh->GetOutputParameterCount()) return fail(error, "output parameter count");
             for (int i = 0; i < outs; ++i)
-                if (!restore_parameter(write ? beh->GetOutputParameter(i) : nullptr, in, pos, error)) return false;
+                if (!restore_parameter(words ? beh->GetOutputParameter(i) : nullptr, in, pos, error)) return false;
             uint8_t has_force = 0;
             if (!get_u8(in, pos, has_force)) return fail(error, "truncated force");
             if (has_force) {
@@ -4003,7 +4111,7 @@ namespace bmmo::game {
                 if (!get_u8(in, pos, present)) return fail(error, "truncated child");
                 CKBehavior* child = live_children[static_cast<size_t>(i)];
                 if (present != (child ? 1 : 0)) return fail(error, "sub-behaviour presence");
-                if (child && !restore_behavior(child, hooks, in, pos, error, write, images)) return false;
+                if (child && !restore_behavior(child, hooks, in, pos, error, write, images, same)) return false;
             }
             uint16_t delayed = 0;
             if (!get_u16(in, pos, delayed)) return fail(error, "truncated links");

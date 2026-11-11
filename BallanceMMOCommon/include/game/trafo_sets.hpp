@@ -1670,7 +1670,7 @@ namespace bmmo::game {
             return false;
         const trafo_set* set = registry.find(player, life);
         script_replay::execute_scripts(context, {set->types[type].explosion}, delta_ms);
-        registry.part().touch(set->types[type].explosion);   // RC4
+        registry.part().touch_set(context, set->types[type].explosion);   // RC4: it ran, its set leaves the ledger
         return true;
     }
 

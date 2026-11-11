@@ -1584,3 +1584,51 @@ Gate (the id lists): 845/845; fast LBM 38/38 twins FINAL exact, every criteria r
 rows bit-equal to the kept source's sessions with L11's 32 trafo pieces, the same `I0: copied 120 objects` lines
 and the same 53 placement copies object for object; two serial reviews, no defects (the ids once each and the
 interface's leftovers are theirs).
+
+## Built (the restore skip for roots and dormant trafo scripts, and the dormant ledger's fault, 2026-11-11)
+
+**A script restore by parts** on the public server's machine (the public L6 re-drive, 13 players, K = 20;
+`work/PERF/apply_rs_diag.py`, the client's `rs_split:` line; ~4.2 ms a restore with the timers in): the selected
+roots 2.46 ms - their parameters 1.65 (15.8 k parameters, 168 KB a restore), their activation flags and IO 0.67,
+the force tails 0.06, the omitted copies 0.18, the links 0.10 - the trafo section 1.61 ms (13 members x 8 scripts,
+each rewritten with its built bytes at every rewind though almost always dormant), the hold, cells and queue 0.17.
+
+**Built** (`game/script_replay.hpp` restore, `game/script_slots.hpp`; under `BMMO_RESTORE_SKIP`, with its verify).
+Two writes of bytes a script holds already are spared. A selected root that has been quiet since the kept source
+was taken, and is at the restore's start, whose block in the kept source is the record's byte for byte
+(`root_unchanged`): its parameters and activation words are not written (`restore_behavior(..., same)`). A trafo
+script the record holds as built that the dormant ledger knows to hold its built state, with the capture's own
+guard on the root's words (`trafo_built_already`): likewise. Everything else a restore does for such a script it
+still does - the force and joint tails, the omitted copies, the delayed links (a pending one re-armed, and counted
+inexact, as ever). Counters on the `slot_memo` line (`roots=skipped/written trafo=skipped`).
+
+**The ledger's fault, found by verify.** Over the fast LBM in verify, 16 trafo candidates (the arms with a ball
+transformation and a death) differed from their built bytes though the ledger said built and the root's words were
+the built ones: `Ball_Explosion_Wood`'s local "actual Group" held a group's id. A script of a set that runs
+writes a sibling through a parameter the two share, and the ledger left only the script that ran. The capture
+trusted the same ledger, so the records had claimed "built" for such a script, and every rewind wrote the built
+bytes over it - a fault that predates the skip and that the unskipped restore hid. Now a script that runs takes its
+whole set (the scripts of its owner) out of the ledger (`trafo_part::touch_set`: the trafo frame and a remake), an
+entry is cleared before its script is written and set only when the restore wrote it exactly
+(`restore_counters::inexact`). The same arms then verify at 0.
+
+**Measured** on the 8845HS (idle; HEAD against this, both built from one tree by one toolchain, two interleaved
+pairs that agree; 13 clients on its 16 threads): a restore 4.68 -> 3.41 ms; but the replay outside its captures
+0.54 -> 0.61 ms a tick (a rewind's replay 8.0 -> 8.7 ms), so rewind work 308 -> 292 ms a second, frame p99
+24.0 -> 23.3, p999 28.8 -> 28.1 ms, the max unchanged (44-46). Per restore 71 % of the roots and 59 % of the trafo
+scripts are left. Why the replay costs more after a restore that wrote less is not known yet (the first reading,
+the earlier build against an older binary, showed the same); it is the next thing to split.
+
+**Owed, from the review.** Every reuse here - step OPC, the kept source, the slot memo, this skip - rests on "a
+root that is not executed keeps its bytes"; the ledger's fault is that premise failing inside a trafo set. Nothing
+checks that no other root's output or operation feeds a parameter of a selected root (the trafo sets have I2 for
+their own links); the verify runs have met none in the game's levels. A scan at selection that takes such a root
+out of every reuse is the next step.
+
+Gate: 845/845; the L6 re-drive in verify (the three switches), 7.51 M skip candidates, 3.65 M copies and 16.4 M
+memo hits walked again, 0 mismatches; fast LBM verify 38/38 twins FINAL exact, every criteria row equal to the
+resync cut's run, 80 k skip candidates and 6.37 M copies, 0 mismatches; fast LBM 38/38, the same rows; retail at
+K = 20 (L12, L11 at human key rates): verify 84 k skip candidates, 0 mismatches, FINAL rows of the shipped and the
+verify sessions bit-equal to the kept source's sessions with L11's 32 trafo pieces; x64 and x86 builds, the Arch
+server; two serial reviews and a re-review (the link re-arm under the skip, the trafo tails, the entry cleared
+before a write, the remake and the exactness of an entry are theirs).
