@@ -1661,3 +1661,57 @@ fast LBM in verify 38/38 twins FINAL exact, every criteria row equal to the resy
 again, 0 mismatches; fast LBM 38/38, the same rows (comments only changed in `proximity_union.hpp` after these
 runs; the retail log line was added after them); retail at K = 20 (L12, L11 at human key rates) in verify: 28.7 k hits of the two games each scanned again against 90 scans, 0 mismatches, and FINAL rows of the shipped and the verify sessions bit-equal to the restore skip's sessions with L11's 32 trafo pieces; x64 and x86 builds, the Arch server; two serial reviews,
 no defects (the comments' wording and the retail run are theirs).
+
+## Built (the fed roots: the reuse premise checked, 2026-11-11)
+
+**The premise.** Step OPC, the kept source, the slot memo and the restore skip all take a record's bytes for a
+root script that did not run: "a root that is not executed keeps its bytes". The dormant ledger's fault (above) was
+that premise failing inside a trafo set. The engine has one way around it that a graph shows: a `CKParameterOut`
+copies its value into its destinations whenever it is written. A block's output is written when its script runs,
+so a destination in a block of another root script changes that script without its running; a parameter
+operation's output is written whenever anything reads it, so its destination changes its script without its
+running even when that script owns the operation (the review's case).
+
+**Built** (`game/script_feeds.hpp`; `script_replay::selection::fed`). `script_feeds` lists every such link;
+`select` keeps the selected roots that are a target. A fed root is walked by every capture (`fed=` on the
+`script_reuse` line counts the walks), is observed by the quiet-run ledger as absent - so it has no run, no memo
+under it serves and the restore skip never spares it - and a restore never counts it as held exactly. The trafo
+part's scripts are not in it: their links stay inside a set (I2) and a set leaves its ledger together
+(`touch_set`). Not seen by a graph, and so not covered: a building block that writes through an input's source at
+run time. SimTool `--script-feeds` prints the links of a level; the harness has `--trafo-inputs off` (the sessions
+before the trafo sets, where the original trafo scripts are selected).
+
+**Found.** In each of the 13 levels the same 20 links: 17 among the gameplay scripts (none selected) and three
+among the original trafo scripts - `Ball_Explosion_Paper` and `Ball_Explosion_Stone` write `Ball_Explosion_Wood`'s
+"actual Group" (the write the dormant ledger's fault came from, in the sets' copies), `Ball_ResetPieces_Paper`
+writes `Ball_Explosion_Paper`'s wind switch. No operation's output has a destination. No mechanism script and no
+sector manager is fed, so in a session with trafo inputs (the default) the set is empty and nothing changes; with
+them off two selected roots are fed and are walked.
+
+**The restore skip's replay cost, closed.** The restore skip had left "the replay outside its captures 0.54 ->
+0.61 ms a tick" unexplained. Numbering the trafo sets once per part instead of asking every script's owner per
+executed script (`touch_set`) changed nothing measurable (0.335 against 0.333 ms a tick, two pairs) and was
+dropped. One binary with `BMMO_RESTORE_SKIP` off and on (two interleaved pairs on the 8845HS) settles it: with the
+skip a restore is 5.09 -> 3.40 ms, a replayed whole record 2.14 -> 1.94 ms, the replay outside its captures
+0.305 -> 0.340 ms a tick, a rewind's replay unchanged (6.48 ms); rewind work 277 -> 238 ms a second, frame p99
+21.1 -> 18.9, p999 27.6 -> 25.0 ms. The extra 0.035 ms a tick is the skip's own - memory the restore no longer
+touches is first touched by the replay - and is paid back by the cheaper records.
+
+**Where the frames over 15.15 ms are now** (the 8845HS, client 0 alone on a core, 33 232 frames, this build): 1606
+frames (4.8 %; 14.7 % at the baseline), p50 4.6 / p99 17.9 / p999 22.0 / max 37.7 ms. 1596 of them hold one
+rewind: work 17.0 ms = restore 3.4 + replay 10.2 (11.5 ticks) + capture 1.8 + rest 1.5; by depth 4-7: 110, 8-11:
+783, 12-15: 508, 16-19: 193. Ten hold two rewinds (a birth's and an input's), 24.8 ms on average and four of the
+five slowest after the start. The slowest three are the start's (ticks 232-235, 33-38 ms, 3 ms a replayed tick:
+the births); then the frames after a birth or a trafo explosion (27-31 ms, 1.2-2 ms a replayed tick while the
+window holds the birth).
+
+Gate: 845/845; with trafo inputs off (two LBM arms with a ball transformation, in verify) ~7960 fed walks a client,
+0 mismatches, 4/4 twins FINAL exact; the L6 re-drive in verify (the four switches), 7.02 M copies, 31.1 M memo
+hits, 15.1 M skip candidates and 10.6 M lookups checked again, 0 mismatches, every session's `mism` 0; fast LBM in
+verify 38/38 twins FINAL exact, every criteria row equal to the resync cut's run, 6.37 M copies, 0 mismatches; fast
+LBM 37 of 38 with equal rows - `a6m_superseded_on` left no summary (its server did not exit within the harness's 60
+s, its four clients at `mism` 0; the second such exit today) and was exact with an equal row when run again; retail
+at K = 20 (L12, L11 at human key rates) in verify, 619 k copies and 3.48 M memo hits checked again, 0 mismatches,
+`fed=0`, FINAL rows of the shipped and the verify sessions bit-equal to the restore skip's sessions with L11's 32
+trafo pieces; x64 and x86 builds, the Arch server; two serial reviews (the operation's case, the comments, the tool
+printing the selection's own set are theirs).

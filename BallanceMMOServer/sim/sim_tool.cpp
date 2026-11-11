@@ -61,6 +61,7 @@
 #include "probe_census.hpp"   // step WG0
 #include <entity/session.hpp>
 #include <game/hull_template.hpp>
+#include <game/script_feeds.hpp>
 #include <game/script_replay.hpp>
 #include <game/session_host_support.hpp>
 #include <physics/physics_savestate.hpp>
@@ -166,6 +167,7 @@ namespace {
         std::string ivp_trace_path;
         long long exact_to = -1;
         std::string dump_array;        // --dump-array NAME: print every cell of a CKDataArray
+        bool script_feeds = false;     // --script-feeds: the parameter links that cross root scripts (game/script_feeds.hpp)
         std::string dump_entity;       // --dump-entity NAME: world matrix of a 3D entity at --dump-at (replay: before and after that frame)
         // --beam X Y Z FRAME: put the current ball there at rest before that
         // replay frame, mirroring the client automation verb "beam", so a
@@ -809,6 +811,7 @@ namespace {
             for (float& k: out.drop_second_at) { if (!(v = next())) return false; k = static_cast<float>(std::atof(v)); }
         }
         else if (arg == "--probe-trace") out.probe_trace = true;
+        else if (arg == "--script-feeds") out.script_feeds = true;
         else if (arg == "--depth-test-rule") {   // FULL step PRX (parse()'s chain is full: C1061)
             if (!(v = next())) return false;
             const std::string mode = v;
@@ -1335,6 +1338,34 @@ namespace {
             start = comma + 1;
         }
         return out;
+    }
+
+    // --script-feeds: one line per pair of root scripts with a link from the first into the second, and whether
+    // the second travels with the records (the session core's selection).
+    void dump_script_feeds(const bmmo::sim::headless_engine& engine) {
+        CKContext* context = engine.context();
+        const auto name = [](CKObject* o) { return std::string(o && o->GetName() ? o->GetName() : "?"); };
+        const auto script = [&](CK_ID id) {
+            auto* beh = CKBehavior::Cast(context->GetObject(id));
+            return beh ? name(beh) + " of " + name(beh->GetOwner()) : std::string("no script");
+        };
+        const bmmo::game::script_replay::selection sel = bmmo::game::script_replay::select(context, true);
+        const std::set<CK_ID> selected(sel.scripts.begin(), sel.scripts.end());
+        const std::vector<bmmo::game::script_feed> feeds = bmmo::game::script_feeds(context);
+        std::map<std::pair<CK_ID, CK_ID>, std::vector<const bmmo::game::script_feed*>> pairs;
+        for (const auto& f: feeds) pairs[{f.source, f.target}].push_back(&f);
+        for (const auto& [key, links]: pairs) {
+            const bool target = selected.count(key.second) != 0;
+            int operations = 0;
+            for (const auto* f: links) operations += f->operation ? 1 : 0;
+            std::printf("[feeds] %s%s -> %s%s: %zu links (%d of operations), first %s -> %s\n", script(key.first).c_str(),
+                        selected.count(key.first) ? " [selected]" : "", script(key.second).c_str(), target ? " [selected]" : "",
+                        links.size(), operations, name(context->GetObject(links.front()->out)).c_str(),
+                        name(context->GetObject(links.front()->destination)).c_str());
+        }
+        std::printf("summary: script-feeds links=%zu pairs=%zu selected=%zu fed_selected=%zu\n", feeds.size(), pairs.size(),
+                    selected.size(), sel.fed.size());
+        std::fflush(stdout);
     }
 
     void dump_array(const bmmo::sim::headless_engine& engine, const std::string& name) {
@@ -1982,6 +2013,7 @@ namespace {
         if (!args.list_scripts.empty() && args.dump_at < 0) list_scripts(engine, args.list_scripts);
         if (args.list_callback_blocks && args.dump_at < 0) eg0::list_callback_blocks(engine);   // step EG0
         if (!args.dump_array.empty() && args.dump_at < 0) dump_array(engine, args.dump_array);
+        if (args.script_feeds) dump_script_feeds(engine);
         if (args.list_trafos && args.dump_at < 0) list_trafos(engine);
         if (trafo) return trafo->finish();
         return 0;
@@ -2673,6 +2705,7 @@ namespace {
         report_sector(world, 1, args.drop_sector);
         if (!settle_scene(args, world)) return 1;   // settle_world plus the S3 switches (step S3)
         if (!args.dump_array.empty()) dump_array(world.engine(), args.dump_array);
+        if (args.script_feeds) dump_script_feeds(world.engine());
         return 0;
     }
 

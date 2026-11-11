@@ -71,6 +71,7 @@
 #include <utility>
 #include <vector>
 
+#include <game/script_feeds.hpp>
 #include <game/script_record_reuse.hpp>
 #include <game/script_slots.hpp>
 #include <physics/callback_queue_plan.hpp>
@@ -367,8 +368,19 @@ namespace bmmo::game {
         struct selection {
             std::vector<CK_ID> scripts;
             std::vector<CK_ID> satellites;
+            // The scripts of `scripts` written through a parameter link
+            // without their running (game/script_feeds.hpp), sorted.  No
+            // reuse of a record's bytes takes them: every capture walks
+            // them, the quiet-run ledger has no run for them (so no memo
+            // under them serves and the restore skip never spares them), and
+            // a restore never counts them as held exactly.  The trafo part's
+            // scripts are not here: their links stay inside a set
+            // (trafo_sets.hpp I2) and a set leaves its ledger together
+            // (trafo_part::touch_set).
+            std::vector<CK_ID> fed;
+            bool is_fed(CK_ID id) const { return std::binary_search(fed.begin(), fed.end(), id); }
             bool empty() const { return scripts.empty() && satellites.empty(); }
-            void clear() { scripts.clear(); satellites.clear(); }
+            void clear() { scripts.clear(); satellites.clear(); fed.clear(); }
         };
         // The trafo sets' part of a record (step T1, game/trafo_sets.hpp):
         // the scripts the trafo frame runs, in its order (sets by player id,
@@ -1118,6 +1130,10 @@ namespace bmmo::game {
             std::sort(out.satellites.begin(), out.satellites.end());
             out.scripts.reserve(picked.size());
             for (const auto& [priority, id]: picked) out.scripts.push_back(id);
+            for (const script_feed& feed: script_feeds(context))
+                if (std::find(out.scripts.begin(), out.scripts.end(), feed.target) != out.scripts.end()) out.fed.push_back(feed.target);
+            std::sort(out.fed.begin(), out.fed.end());
+            out.fed.erase(std::unique(out.fed.begin(), out.fed.end()), out.fed.end());
             return out;
         }
 
@@ -1388,6 +1404,11 @@ namespace bmmo::game {
                         capture_behavior(beh, hooks, out, with_slots);
                         continue;
                     }
+                    if (sel.is_fed(id)) {   // written without running: its bytes may not be the record's
+                        ++reuse_stats.walked_fed;
+                        capture_behavior(beh, hooks, out, with_slots);
+                        continue;
+                    }
                     // A kept source is older than t - 1: the root must have
                     // been quiet at every observation since (the ledger).
                     if (!reusable_root(recorded, root_words_of(beh), static_cast<uint32_t>(kFrameFlags))
@@ -1557,15 +1578,16 @@ namespace bmmo::game {
         // observe).  Every capture of a tick makes one: a whole record's
         // inside capture, a light record's through rollback_world
         // observe_scripts.  With the kept source on, every selected root is
-        // observed as well.
+        // observed as well.  A fed root (selection::fed) is observed as
+        // absent: it has no quiet run.
         static void observe_roots(CKContext* context, const selection& sel, script_slots& slots, uint32_t tick) {
             if (reuse_kept_from_env())
                 for (CK_ID id: sel.scripts) slots.track(static_cast<uint32_t>(id));
             slots.begin_observation();
             for (uint32_t root: slots.roots()) {
                 auto* beh = context ? CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(root))) : nullptr;
-                slots.observe(root, tick, beh != nullptr, beh ? root_words_of(beh) : script_root_words{},
-                              static_cast<uint32_t>(kFrameFlags));
+                slots.observe(root, tick, beh != nullptr && !sel.is_fed(static_cast<CK_ID>(root)),
+                              beh ? root_words_of(beh) : script_root_words{}, static_cast<uint32_t>(kFrameFlags));
             }
         }
 
@@ -1851,7 +1873,8 @@ namespace bmmo::game {
                     const bool reset_since = kept_live && std::find(kept_live->begin(), kept_live->end(), id) != kept_live->end();
                     const bool write = !scripts || replay_activation || (was_active && !reset_since);
                     script_root_words words;
-                    const bool held = keeping && write && scripts && read_script_root_words(in.data() + pos, in.size() - pos, words);
+                    const bool held = keeping && write && scripts && !sel.is_fed(id)
+                                   && read_script_root_words(in.data() + pos, in.size() - pos, words);
                     const uint32_t inexact = last_restore().inexact;
                     const bool same = kept && scripts && write && root_unchanged(beh, hooks, *kept, kept_index, k, in, pos, skip_mode);
                     if (!restore_behavior(beh, hooks, in, pos, error, write, images, same)) return false;

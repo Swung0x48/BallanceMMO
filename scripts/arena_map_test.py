@@ -1049,6 +1049,7 @@ def run_case(args, sector, case_dir):
         f'  patience: {str(args.patience == "on").lower()}\n'
         f'  lead_adjust: {str(args.lead_adjust == "on").lower()}\n'
         f'  input_hints: {str(args.input_hints == "on").lower()}\n'
+        f'  trafo_inputs: {str(args.trafo_inputs == "on").lower()}\n'
         f'  test_clock_skew: "{args.test_clock_skew}"\n'
         f'  input_delay: {args.input_delay}\n'
         '  maximum_physics_rooms: 1\n'
@@ -3875,6 +3876,9 @@ def main():
     ap.add_argument('--input-hints', choices=('off', 'on'), default='on',
                     help='protocol 37: the relay also carries the frames queued at the server (physics.input_hints; '
                          'default on, as the server since 2026-11-10)')
+    ap.add_argument('--trafo-inputs', choices=('off', 'on'), default='on',
+                    help='physics.trafo_inputs: off = the sessions before the trafo sets, where the original trafo '
+                         'scripts travel with the records')
     ap.add_argument('--test-clock-skew', default='', metavar='T:MS:PCT')
     ap.add_argument('--server-control', default='', metavar='PYTHON_SCRIPT',
                     help='controller called with start/stop and JSON physics flags; required for external-server twins')
