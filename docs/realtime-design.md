@@ -1480,10 +1480,27 @@ in both is a copy from one source, and that comparison no longer covers it; `BMM
 | scripts copied | 1.67 M | 3.65 M (1.98 M from the kept source: 54 k captures from a captured one, 36 k from a restored one) |
 | omitted copies walked | 26.1 % | 5.9 % |
 
-Not timed: another job held the machine through the whole step, and what the fewer walks are worth in a frame is
-not known (a copy still walks the graph for its structure, every capture now copies its script list aside, a light
-record observes every selected root). The off / on runs are owed, in the full room and in retail's rooms of two,
-where 6-15 % of the copies came from the kept source.
+**Timed, under load** (`work/PERF/run_pt.sh` arms kpoff / kpon interleaved twice, 15000 ticks, medians over the 13
+clients, `kp_compare.py`; another job held 25 of the 28 threads, so only a pair run under the same load compares:
+the replayed tick's time outside its captures, which the switch does not touch, is 0.50 / 0.52 ms in the first
+pair and 0.42 / 0.36 in the second, so the first pair is the comparison and the second flatters the switch):
+
+| first pair | off | on |
+|---|---|---|
+| a replayed whole record | 3.29 ms | 2.19 ms (-33 %) |
+| the live capture, a frame | 2.46 ms | 2.23 ms (-9 %; the frames without a rewind copied already) |
+| the replay of a rewind | 10.0 ms | 8.5 ms (-15 %) |
+| a restore | 3.57 ms | 3.67 ms |
+| rewind work + capture, a second | 496 ms | 435 ms (-12 %) |
+| frame p99 / p999 / max | 27.6 / 38.2 / 56.8 ms | 24.8 / 35.0 / 54.8 ms |
+
+(The second pair: a replayed whole record 2.64 -> 1.46 ms, rewind work + capture 423 -> 328 ms a second, frame p99
+24.2 -> 16.9 ms.) So a record made of copies still costs about two thirds of one walked - from the live capture's
+two figures a walked live record is ~2.85 ms and a copied one 2.23 - and that is what is left: a copy walks the
+graph block by block for its structure and reads every force and joint tail from physics_RT again (205 tails a
+capture on this recipe, and every memo hit reads its own), besides the blob (0.27 ms) and the roots that do run.
+A frame with a rewind is ~2 ms shorter under this load, where the estimate from the walk's shares was 2.5 ms on a
+quiet machine. Retail's rooms of two, where 6-15 % of the copies came from the kept source, are not timed.
 
 **Gate.** Unit tests 845/845 (one new: the ledger's rules for the kept source and a restore). Verify
 (`BMMO_REUSE_KEPT=on BMMO_SCRIPT_REUSE=verify BMMO_SLOT_MEMO=verify`), the L6 re-drive: 3.65 M copies and 20.9 M memo
@@ -1502,4 +1519,5 @@ closes; a third confirmed that and asked for the comparison of an unwritten para
 one of those branches, before the count or after (the kept source served the same 95 997 copies over the fast LBM
 both times): the count has been read, not exercised.
 
-**Why the switch is off.** It is not timed, and the exactness count has never decided anything.
+**Why the switch is off.** Retail is not timed, a quiet machine has not confirmed the figures above, and the
+exactness count has never decided anything.
