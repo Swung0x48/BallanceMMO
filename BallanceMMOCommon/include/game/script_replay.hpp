@@ -1747,6 +1747,22 @@ namespace bmmo::game {
                 return fail(error, "slot images without a slot mask");
             }
             const bool images = (sections & kSectionSlotImages) != 0;
+            // The restore skip: the roots still quiet now, read before any
+            // root's flags are written; disarmed on every way out.
+            struct disarm {
+                script_slots* slots;
+                ~disarm() { if (slots) slots->disarm_restore(); }
+            } armed{nullptr};
+            if (images && restore_skip_mode_from_env() != script_reuse_mode::off) {
+                std::vector<uint32_t> quiet;
+                for (uint32_t root: hooks.slots->roots()) {
+                    auto* beh = CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(root)));
+                    if (beh && hooks.slots->quiet_now(root, root_words_of(beh), static_cast<uint32_t>(kFrameFlags)))
+                        quiet.push_back(root);
+                }
+                hooks.slots->arm_restore(std::move(quiet), script_write_generation());
+                armed.slots = hooks.slots;
+            }
             std::vector<CKBehavior*> written;   // the root scripts written back (G1, live_membership)
             // Gap Q (design 2.2.3): a selected script the record has no
             // state for that exists now runs in the replay too; it has no
@@ -3093,19 +3109,7 @@ namespace bmmo::game {
                 }
                 if (memo) {
                     const char* refused = c->root ? hooks.slots->memo_refused(*c, writes) : "none";
-                    if (!refused) {
-                        // Every force tail as it reads now, against the memo's.
-                        for (const script_slots::tail& t: c->m.tails) {
-                            auto* block = CKBehavior::Cast(child->GetCKContext()->GetObject(static_cast<CK_ID>(t.block)));
-                            tail.clear();
-                            if (block) put_force_and_joint(block, *plain, tail, true);
-                            if (!block || tail.size() != t.length
-                                || !std::equal(tail.begin(), tail.end(), c->m.image.begin() + static_cast<std::ptrdiff_t>(t.offset))) {
-                                refused = "tail";
-                                break;
-                            }
-                        }
-                    }
+                    if (!refused && !memo_tails_current(child, *plain, *c, tail)) refused = "tail";
                     if (!refused) {
                         ++memo_stats.hits;
                         if (memo_mode == script_reuse_mode::verify) {
@@ -3154,6 +3158,59 @@ namespace bmmo::game {
             }
             out[count_at] = static_cast<uint8_t>(count & 0xff);
             out[count_at + 1] = static_cast<uint8_t>(count >> 8);
+        }
+
+        // T3C e3: every force tail of `c`'s memo as it reads now, against the
+        // memo's bytes (`tail` is scratch).
+        static bool memo_tails_current(CKBehavior* child, const script_replay_hooks& plain, const script_slots::copy& c,
+                                       std::vector<uint8_t>& tail) {
+            for (const script_slots::tail& t: c.m.tails) {
+                auto* block = CKBehavior::Cast(child->GetCKContext()->GetObject(static_cast<CK_ID>(t.block)));
+                tail.clear();
+                if (block) put_force_and_joint(block, plain, tail, true);
+                if (!block || tail.size() != t.length
+                    || !std::equal(tail.begin(), tail.end(), c.m.image.begin() + static_cast<std::ptrdiff_t>(t.offset)))
+                    return false;
+            }
+            return true;
+        }
+        // Whether a link of `beh` or a block under it has an activation
+        // delay (a restore re-arms such a link when it writes the block).
+        static bool has_delayed_links(CKBehavior* beh) {
+            if (!beh || beh->IsUsingFunction()) return false;
+            for (int i = 0; i < beh->GetSubBehaviorLinkCount(); ++i)
+                if (CKBehaviorLink* link = beh->GetSubBehaviorLink(i); link && link->GetInitialActivationDelay() > 1) return true;
+            for (int i = 0; i < beh->GetSubBehaviorCount(); ++i)
+                if (has_delayed_links(beh->GetSubBehavior(i))) return true;
+            return false;
+        }
+        // The restore skip (script_slots.hpp): whether an omitted copy that a
+        // restore is about to write already holds `image`.  Counts what it
+        // decides; verify walks a copy it would skip, compares and says no.
+        static bool copy_unchanged(CKBehavior* child, script_slots& slots, const script_replay_hooks& plain,
+                                   const std::vector<uint8_t>& image) {
+            const script_reuse_mode mode = restore_skip_mode_from_env();
+            slot_memo_stats& stats = slot_memo_totals();
+            script_slots::copy* c = slots.find(static_cast<uint32_t>(child->GetID()));
+            bool same = mode != script_reuse_mode::off && c && c->root && slots.restore_quiet(c->root)
+                        && !slots.memo_refused(*c, slots.restore_writes()) && c->m.image == image;
+            if (same && c->delayed < 0) c->delayed = has_delayed_links(child) ? 1 : 0;
+            if (same && c->delayed) same = false;
+            std::vector<uint8_t> scratch;
+            if (same && !memo_tails_current(child, plain, *c, scratch)) same = false;
+            if (same && mode == script_reuse_mode::verify) {
+                ++stats.restore_verified;
+                scratch.clear();
+                capture_behavior(child, plain, scratch);
+                if (scratch != image)
+                    stats.restore_note("restore_skip mismatch: " + owner_name(child) + " / copy #" + std::to_string(child->GetID())
+                                       + " under root #" + std::to_string(c->root) + ": the live walk (" + std::to_string(scratch.size())
+                                       + " bytes) differs from the image written (" + std::to_string(image.size()) + " bytes) at byte "
+                                       + std::to_string(first_difference(scratch.data(), scratch.size(), image.data(), image.size())));
+                same = false;
+            }
+            ++(same ? stats.restore_skipped : stats.restore_written);
+            return same;
         }
 
         // The runtime flags and the active inputs and outputs (v2 and the
@@ -3839,6 +3896,7 @@ namespace bmmo::game {
                         plain = std::make_unique<script_replay_hooks>(hooks);
                         plain->slots = nullptr;
                     }
+                    if (hooks.slots->restore_armed() && copy_unchanged(child, *hooks.slots, *plain, *image)) continue;
                     if (!restore_script_block(child, *plain, *image, error)) return false;
                 }
                 if (next != slot_images.size()) return fail(error, "slot image section");

@@ -255,9 +255,6 @@ namespace bmmo::session {
             };
         world.restore_scripts = [o, context, selection, hooks, trafo, queue, queue_ptr, hold, hold_ptr](
                                     const std::vector<uint8_t>& bytes, uint32_t anchor) {
-            // Step OPC: a script restore writes the scripts, whoever calls it
-            // (the engine's own restore is behind its barrier as well).
-            bmmo::game::note_script_write();
             std::vector<CK_ID> kept_live;
             if (o.reset_ticks)
                 for (const auto& [id, reset_tick]: *o.reset_ticks)
@@ -270,6 +267,11 @@ namespace bmmo::session {
             membership = o.live_membership;
             const bool ok = bmmo::game::script_replay::restore(context, *selection, *hooks, bytes, &error, o.scripts_replayed,
                                                                &kept_live, o.replay_activation, trafo, queue_ptr, hold_ptr);
+            // Step OPC: a script restore writes the scripts, whoever calls it
+            // (the engine's own restore is behind its barrier as well).  After
+            // it, not before: the restore skip reads the generation its memos
+            // were walked under (script_slots.hpp), and no capture runs between.
+            bmmo::game::note_script_write();
             resize = false;
             membership = false;
             if (!ok && o.on_restore_failed) o.on_restore_failed(error);

@@ -23,6 +23,18 @@
 // with a joint block is never memoized.  The bytes appended are the walk's,
 // so a record is byte-identical with the memo on or off; verify walks every
 // hit as well and compares.
+//
+// The restore skip (BMMO_RESTORE_SKIP = off | on | verify, on when unset): a
+// restore wrote every omitted copy back (base + the record's delta), ~0.3-0.8
+// ms of a rewind at the public K = 20, and the census found 99.7-100 % of
+// them already holding exactly those bytes.  The same premise leaves a copy
+// as it is: its root still passes the reuse rule against its last
+// observation when the restore starts (quiet_now, read before the restore
+// writes any root's flags), its memo is current by the capture's rule
+// (memo_refused, every force tail re-read), the memo is the image the record
+// names, and the copy has no delayed link (whose re-arm a write performs).
+// Verify walks each such copy, compares it with the image and writes it
+// anyway, so a verify run is the off run.
 
 #include <algorithm>
 #include <cstddef>
@@ -45,26 +57,42 @@ namespace bmmo::game {
         static const script_reuse_mode mode = parse_script_reuse_mode(std::getenv("BMMO_SLOT_MEMO"), script_reuse_mode::on);
         return mode;
     }
+    // BMMO_RESTORE_SKIP, read once per process (on when unset).
+    inline script_reuse_mode restore_skip_mode_from_env() {
+        static const script_reuse_mode mode = parse_script_reuse_mode(std::getenv("BMMO_RESTORE_SKIP"), script_reuse_mode::on);
+        return mode;
+    }
 
     // What the memo did in this process (diagnostic: nothing decides on it).
     struct slot_memo_stats {
         uint64_t walked = 0, hits = 0, miss_none = 0, miss_gen = 0, miss_run = 0, miss_tail = 0, joint = 0;
         uint64_t verified = 0, mismatches = 0;
+        // The restore skip: omitted copies a restore left as they were, wrote,
+        // and (verify) walked and found unlike the image.
+        uint64_t restore_skipped = 0, restore_written = 0, restore_verified = 0, restore_mismatches = 0;
         std::vector<std::string> notes;
         void note(const std::string& what) {
             ++mismatches;
             if (notes.size() < 16) notes.push_back(what);
         }
+        void restore_note(const std::string& what) {
+            ++restore_mismatches;
+            if (notes.size() < 16) notes.push_back(what);
+        }
         std::string line(script_reuse_mode mode) const {
-            char buf[320];
+            char buf[448];
             std::snprintf(buf, sizeof buf,
                           "slot_memo: mode=%s walked=%llu hits=%llu misses none=%llu gen=%llu run=%llu tail=%llu joint=%llu "
-                          "verified=%llu mismatches=%llu",
+                          "verified=%llu mismatches=%llu restore_skip: mode=%s skipped=%llu written=%llu verified=%llu "
+                          "mismatches=%llu",
                           script_reuse_mode_name(mode), static_cast<unsigned long long>(walked),
                           static_cast<unsigned long long>(hits), static_cast<unsigned long long>(miss_none),
                           static_cast<unsigned long long>(miss_gen), static_cast<unsigned long long>(miss_run),
                           static_cast<unsigned long long>(miss_tail), static_cast<unsigned long long>(joint),
-                          static_cast<unsigned long long>(verified), static_cast<unsigned long long>(mismatches));
+                          static_cast<unsigned long long>(verified), static_cast<unsigned long long>(mismatches),
+                          script_reuse_mode_name(restore_skip_mode_from_env()), static_cast<unsigned long long>(restore_skipped),
+                          static_cast<unsigned long long>(restore_written), static_cast<unsigned long long>(restore_verified),
+                          static_cast<unsigned long long>(restore_mismatches));
             return buf;
         }
     };
@@ -89,10 +117,14 @@ namespace bmmo::game {
             std::vector<uint8_t> base;
             uint32_t base_hash = 0;
             uint32_t root = 0;                   // the unit's root script (0: unknown, never memoized)
+            int8_t delayed = -1;                 // a link with an activation delay in the copy (-1: not looked at yet)
             memo m;
         };
 
-        void clear() { blocks_.clear(); bound_ = ~uint64_t{0}; learned_ = 0; roots_.clear(); runs_.clear(); }
+        void clear() {
+            blocks_.clear(); bound_ = ~uint64_t{0}; learned_ = 0; roots_.clear(); runs_.clear();
+            disarm_restore();
+        }
         // A re-copy of the same block id (another rewire) replaces its base
         // (and so its memo).
         void add(uint32_t id, uint8_t slot, std::vector<uint8_t> base, uint32_t root = 0) {
@@ -144,6 +176,26 @@ namespace bmmo::game {
             if (c.m.writes != writes_now) return "gen";
             if (quiet_since(c.root) > c.m.seq) return "run";
             return nullptr;
+        }
+        // The restore skip: whether `root` would go on quiet if observed now
+        // (its run seen, the reuse rule against its last words).
+        bool quiet_now(uint32_t root, const script_root_words& now, uint32_t frame_flags) const {
+            const auto found = runs_.find(root);
+            return found != runs_.end() && found->second.seen && reusable_root(found->second.words, now, frame_flags);
+        }
+        // A restore's roots still quiet at its start and the host-write
+        // generation then, until disarm_restore.
+        void arm_restore(std::vector<uint32_t> quiet, uint64_t writes) {
+            std::sort(quiet.begin(), quiet.end());
+            restore_quiet_ = std::move(quiet);
+            restore_writes_ = writes;
+            restore_armed_ = true;
+        }
+        void disarm_restore() { restore_armed_ = false; restore_quiet_.clear(); }
+        bool restore_armed() const { return restore_armed_; }
+        uint64_t restore_writes() const { return restore_writes_; }
+        bool restore_quiet(uint32_t root) const {
+            return restore_armed_ && std::binary_search(restore_quiet_.begin(), restore_quiet_.end(), root);
         }
         void select(uint64_t bound) { bound_ = bound | learned_; }
         void select_record(uint64_t bound) { bound_ = bound; }
@@ -287,5 +339,8 @@ namespace bmmo::game {
         std::unordered_map<uint32_t, run> runs_;
         uint64_t seq_ = 0;
         bool observing_ = false;
+        std::vector<uint32_t> restore_quiet_;
+        uint64_t restore_writes_ = 0;
+        bool restore_armed_ = false;
     };
 }

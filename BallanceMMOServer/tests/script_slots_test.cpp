@@ -218,3 +218,36 @@ TEST(ScriptSlots, MemoServesOnlyWhileItsRootStaysQuiet) {
     EXPECT_EQ(slots.find(10), nullptr);
     EXPECT_TRUE(slots.roots().empty());
 }
+
+// The restore skip: a root counts as quiet at a restore only while its words
+// now would go on its run; the armed set is read by root and cleared.
+TEST(ScriptSlots, RestoreSkipArmsOnlyRootsStillQuiet) {
+    using bmmo::game::script_root_words;
+    using bmmo::game::script_slots;
+    constexpr uint32_t kActive = 1;
+    script_slots slots;
+    slots.add(10, 2, {1, 2, 3}, 7);
+    script_root_words quiet;
+    quiet.id = 7;
+    EXPECT_FALSE(slots.quiet_now(7, quiet, kActive)) << "never observed";
+    slots.begin_observation();
+    slots.observe(7, 100, true, quiet, kActive);
+    EXPECT_TRUE(slots.quiet_now(7, quiet, kActive));
+    script_root_words active = quiet;
+    active.flags = kActive;
+    EXPECT_FALSE(slots.quiet_now(7, active, kActive)) << "activated since its last observation";
+    script_root_words switched = quiet;
+    switched.out_mask = 2;
+    EXPECT_FALSE(slots.quiet_now(7, switched, kActive)) << "an output switched since";
+    EXPECT_FALSE(slots.restore_quiet(7)) << "not armed";
+    slots.arm_restore({9, 7}, 4);
+    EXPECT_TRUE(slots.restore_armed());
+    EXPECT_TRUE(slots.restore_quiet(7));
+    EXPECT_FALSE(slots.restore_quiet(8));
+    EXPECT_EQ(slots.restore_writes(), 4u);
+    slots.disarm_restore();
+    EXPECT_FALSE(slots.restore_quiet(7));
+    slots.arm_restore({7}, 4);
+    slots.clear();
+    EXPECT_FALSE(slots.restore_armed()) << "a clear disarms";
+}

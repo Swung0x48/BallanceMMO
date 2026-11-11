@@ -1335,3 +1335,44 @@ p99 16.9 / 16.9 ms - the frame's own wait is what is left (a frame-paced game ta
 a rewind 6.1 -> 5.8 (copy 1) and 25.2 -> 23.9 (copy 2), one run each; FINAL rows exact in both runs, no resync; the
 games' CPU in the session unchanged within the sampler's noise (20-40 % of a core each). The headless client already
 polls every <= 2 ms while it paces.
+
+## Built and measured (T3C: the restore skip, 2026-11-11)
+
+The performance report of 2026-11-10 (the public servers' K = 20 slots, retail census on d6627c28) put the restore's
+script write at 2.77 ms of a 3.65 ms restore on L12 and named it the largest fixed cost. Split by the census with eight
+buckets inside `script_replay::restore` (`work/S0/apply_rs.py`, `rs_split.py`; K = 20, one-way 150, one run each; a probe
+walked every unbound slot copy before it was written, its time excluded):
+
+| per restore, us | L12_h | L12 | ctl_h |
+|---|---|---|---|
+| the selected scripts' walk (bound copies, satellites) | 895 | 847 | 537 |
+| the unbound slot copies written | 765 (468 copies) | 789 (468) | 313 (234) |
+| of them already holding the image written | 100 % | 100 % | 99.7 % |
+| the trafo section | 134 | 151 | 112 |
+| cells, queue, hold, joint order | 78 | 68 | 52 |
+
+A plain walk of a copy (6.9 us) costs more than its write (1.6 us), so the skip cannot prove a copy unchanged by walking
+it. It uses step e3's premise instead (`game/script_slots.hpp`, `BMMO_RESTORE_SKIP` = off | on | verify, on when unset):
+an omitted copy is left as it is when its root still passes the reuse rule against its last ledger observation at the
+restore's start (`quiet_now`, read before the restore writes any root's flags), its slot memo is current by the
+capture's rule (`memo_refused` with the host-write generation at the restore's start, every force tail re-read), the memo
+is the image the record names, and the copy has no delayed link (a write re-arms it). Copies with a joint block are never
+memoized, so they are always written. Verify walks each copy it would skip, compares it with the image and writes it
+anyway, so a verify run is the off run. The restore's binding bumped the host-write generation before restoring, which
+refused every memo (the review's finding: the first build never skipped); the bump now follows the restore, and no
+capture or observation runs in between. Counters on the `slot_memo` line (` restore_skip: mode=... skipped written
+verified mismatches`).
+
+Gate: 844/844 (a ledger test); fast LBM with verify 38/38 twins FINAL exact, every criteria row equal to the protocol 39
+run, 5388 copies verified, 0 mismatches over 116 client sessions; with the skip on 38/38, the same rows, the same 5388
+skipped; x64 and x86 builds. Retail, the census at K = 20, off / on interleaved, 2 runs x 2 clients:
+
+| | L12_h off -> on | ctl_h off -> on |
+|---|---|---|
+| a restore | 3687 -> 2426 us (-34 %) | 2994 -> 2516 us (-16 %) |
+| of it the script write | 2799 -> 1532 us (-45 %) | 1374 -> 915 us (-33 %) |
+| copies skipped | 93-97 % | 93-97 % |
+
+Verify in retail: 69 k copies walked, 0 mismatches. FINAL rows of off, on and verify, client by client: balls, bodies
+and (ctl_h) the 32 trafo pieces bit-equal - the first cross-session check that includes the pieces (protocol 39). The
+restore's other parts are next: the selected scripts' walk (0.5-0.9 ms) and set_savestate (1.1 ms on L11).
