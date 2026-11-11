@@ -732,7 +732,7 @@ namespace bmmo::game {
             // (the Virtools SDK's containers are inline templates, VX_MALLOC
             // off): an access violation in the second copy of the first
             // retail anchor.
-            const ck_object_ids before = all_object_ids(context);
+            const ck_object_ids before(context);
             std::vector<CK3dEntity*> hc;
             {
                 XObjectArray sources;
@@ -742,8 +742,7 @@ namespace bmmo::game {
             }
             const auto refuse = [&](const std::string& why) {
                 std::set<CK_ID> pending;
-                for (CK_ID id: all_object_ids(context))
-                    if (!before.count(id)) pending.insert(id);
+                for (CK_ID id: before.added(context)) pending.insert(id);
                 return undo(context, at + why, pending);
             };
 
@@ -760,8 +759,7 @@ namespace bmmo::game {
                 remap[o] = c;
             }
             std::vector<CK_ID> made;
-            for (CK_ID id: all_object_ids(context))
-                if (!before.count(id)) made.push_back(id);
+            for (CK_ID id: before.added(context)) made.push_back(id);
             {
                 const std::set<CKObject*> mine(hc.begin(), hc.end());
                 for (CK_ID id: made) {
@@ -889,8 +887,7 @@ namespace bmmo::game {
             r.source_id = root->GetID();
             r.entities = hc.size();
             std::map<std::string, int> census;
-            for (CK_ID id: all_object_ids(context)) {
-                if (before.count(id)) continue;
+            for (CK_ID id: before.added(context)) {
                 CKObject* o = context->GetObject(id);
                 r.objects.emplace_back(id, o->GetClassID());
                 const char* cls = CKClassIDToString(o->GetClassID());

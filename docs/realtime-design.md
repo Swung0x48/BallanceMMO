@@ -1391,7 +1391,8 @@ scans look every id up in it). Step 0 found no extra object in any of the 46 joi
 
 Built: `game/ck_object_ids.hpp`, a bitmap indexed by id with the ids in ascending order (the set's order, so every
 loop and log reads as before), used by `build_trafo_set` and the placement copies (`sector_placement.hpp`). Same
-checks, same order. P-core, the two heaviest sessions:
+checks, same order. (Since 'the server's replays' below: the ids come from CK's per-class lists and the later
+passes ask for the ids added since.) P-core, the two heaviest sessions:
 
 | | before | after |
 |---|---|---|
@@ -1521,3 +1522,55 @@ both times): the count has been read, not exercised.
 
 **Why the switch is off.** Retail is not timed, a quiet machine has not confirmed the figures above, and the
 exactness count has never decided anything.
+
+## Measured (hard real time on the public server's machine: the server's replays, 2026-11-11)
+
+**The target** (the user's, 2026-11-11): the public test's records replayed on the machine its server ran on (a
+Ryzen 7 8845HS, WSL2 Arch) with no tick or frame over 15.15 ms. Two halves, reported apart: the server - the four
+heaviest server journals replayed by SimTool on one core (`work/PERF/bench_ids_8845.sh`, the replay's journal
+stamps each tick's end to the millisecond) - and a client - the public L6 re-drive (13 players, K = 20, the players'
+pings) with the measured client alone on a physical core (`run_8845_pin.sh`). The Linux binaries are the local Arch
+tree's, stripped and copied over (`pkg_8845.sh`: same compiler and glibc on both).
+
+**The server's slow ticks were joins, and a join was three passes over every object.** Every tick over 10 ms in
+the four replays (80 of them) but five carries a member's join. A join there (818ed600's build, timed by parts,
+`apply_join_laps3.py`): 12.3 ms (L7, 46 joins) to 15.3 ms (L13), the slowest 21.5, of it 7.8-10.4 ms the three
+snapshots of every object id - `ck_object_ids` took `GetObjectListByType(CKCID_OBJECT, derived)`, an array of
+every object's pointer, and read each of the ~100k objects for its id; the join fix had only replaced what the ids
+were put into. Now the ids are read from CK's per-class id lists (`GetObjectsListByClassID`, every class under
+CKCID_OBJECT; what that call is built from, and what the product reads elsewhere on both engines), the snapshot
+is a bitmap of them, and the two later passes of a copy ask for the ids added since (`added`: one pass against the
+bitmap, sorted, each once) instead of taking a snapshot each and filtering it. The loops in `trafo_sets.hpp` and
+`sector_placement.hpp` get the same ids in the same order.
+
+| 8845HS, one core | before (818ed600) | now |
+|---|---|---|
+| a join, L7 s2 / L13 s2 (mean; slowest) | 12.3 / 15.3 ms; 21.5 | 5.2 / 6.4 ms; 14.3 |
+| of it the three passes over the ids | 7.8 / 10.4 ms | 1.0 / 1.5 ms |
+| L7 s2 (21 players): ticks over 15.15 ms, slowest tick (two runs) | 3, 22 ms | 0, 9-11 ms |
+| L8 s1 (20 players) | 2, 19 ms | 0, 10-12 ms |
+| L13 s2 (12 players) | 4, 17 ms | 0, 12-13 ms |
+| L6 s1 (14 players) | 2, 18 ms | 0, 10-14 ms |
+
+What a join still costs: CopyObjects 1.7-1.9 ms, the copies found again by name (I4) 1.0-1.2, the digest 0.55, the
+bridge's registration 0.3-0.5 (once 5.8). Every tick of the four replays has the previous build's world and pose
+hash (314 496 ticks, `rw_same.py`). Not in a replay: the resync states the public server built (2211; 3.9-7.4 ms +
+coding on a P-core since b14dc6b0, not timed here) and the other rooms the runner's one thread steps - a state
+built in a join's tick is not covered by these figures.
+
+**The client's baseline** (the same build, the kept source on, client 0 alone on a core, the whole recipe, 33 232
+frames; `apply_slow_diag.py`, `slow_frames.py`): frame p50 5.0, p99 23.1, p999 27.6, max 41.9 ms; 4872 frames
+(14.7 %) over 15.15 ms, on average 18.5 ms = restore 4.7 + replay 10.4 (10.5 ticks) + the live capture 1.8 +
+the rest 1.7. The slowest are the start (ticks 232-235, 30-42 ms: 7-10 replayed ticks at 3-4 ms each while the 13
+balls are born), frames near a trafo explosion (31-39 ms) and the deepest steady rewinds (17-18 ticks, 28-30 ms).
+By parts on the same machine (13 clients sharing it, `copy_split.py`): a restore 4.7 ms, 3.8 of it the script
+write; a replayed tick 0.99 ms = its captures 0.42 + the probes' placement 0.35 + step and pre-step 0.13 + the
+rest; a whole record 2.1-2.5 ms. At 18 ticks the sum fits 15.15 ms only with the probes' placement down ~85 %, the
+whole record halved again and the restore's script write down ~80 % (about 13.8 ms then), the start and the
+explosions apart.
+
+Gate (the id lists): 845/845; fast LBM 38/38 twins FINAL exact, every criteria row equal to the resync cut's run
+(before the review's changes and after); x64 and x86 builds, the Arch server; retail at K = 20, L11 and L12 at human key rates: both clients' FINAL
+rows bit-equal to the kept source's sessions with L11's 32 trafo pieces, the same `I0: copied 120 objects` lines
+and the same 53 placement copies object for object; two serial reviews, no defects (the ids once each and the
+interface's leftovers are theirs).

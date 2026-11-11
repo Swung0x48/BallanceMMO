@@ -803,7 +803,7 @@ namespace bmmo::game {
         }
 
         // ---- the copy
-        const ck_object_ids before = all_object_ids(context);
+        const ck_object_ids before(context);
         XObjectArray sources;
         for (CKObject* o: list) sources.PushBack(o->GetID());
         CKDependencies deps;
@@ -815,8 +815,8 @@ namespace bmmo::game {
         // I4).  Every root object the copy made is destroyed again.
         const auto undo_copy = [&](const std::string& why) {
             std::vector<CK_ID> made;
-            for (CK_ID id: all_object_ids(context))
-                if (!before.count(id) && root_kind(context->GetObject(id))) made.push_back(id);
+            for (CK_ID id: before.added(context))
+                if (root_kind(context->GetObject(id))) made.push_back(id);
             for (CK_ID id: made)   // a copied script leaves the owner the copy gave it first, as step 0 does
                 if (CKBehavior* b = CKBehavior::Cast(context->GetObject(id)))
                     if (CKBeObject* owner = b->GetOwner()) owner->RemoveScript(id);
@@ -862,8 +862,8 @@ namespace bmmo::game {
         {
             std::vector<CK_ID> extras;
             std::string names;
-            for (CK_ID id: all_object_ids(context)) {
-                if (before.count(id) || mine.count(id)) continue;
+            for (CK_ID id: before.added(context)) {
+                if (mine.count(id)) continue;
                 CKObject* o = context->GetObject(id);
                 if (!root_kind(o)) continue;
                 extras.push_back(id);
@@ -885,8 +885,8 @@ namespace bmmo::game {
             for (CK_ID id: mine) ++kinds[kind_of(context->GetObject(id))];
             if (kinds != listed_kinds) return undo_copy("I0: the copies' kinds differ from the list's");
             int leftovers = 0;
-            for (CK_ID id: all_object_ids(context))
-                if (!before.count(id) && !mine.count(id) && root_kind(context->GetObject(id))) ++leftovers;
+            for (CK_ID id: before.added(context))
+                if (!mine.count(id) && root_kind(context->GetObject(id))) ++leftovers;
             if (leftovers) return undo_copy("I0: " + std::to_string(leftovers) + " extra root object(s) survived the destroy");
         }
         const auto destroy_made = [&]() {
