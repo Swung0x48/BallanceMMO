@@ -7159,6 +7159,11 @@ namespace {
     //   restored the scrubbed localization restored (replay_activation, as
     //            the resync does) and captured again == v2
     //
+    // Step RLC: v2 names a held constraint's image (kJointImaged), which the
+    // portable record never carries; names / rule / scrubbed compare with v2
+    // as captured without the images (the presence byte alone), restored
+    // with v2 itself (a localized record's restore takes the latest image).
+    //
     // And the balloon's activation (design 2.8, 9 Q8): after every frame,
     // each keep-local script that is not a trafo script (the PE_Balloon*
     // scripts) is checked for a pending activation (next-frame flags).
@@ -7338,6 +7343,19 @@ namespace {
                 ++failures;
                 return;
             }
+            // Step RLC: a local record names a held constraint's image
+            // (kJointImaged); the portable record carries its presence alone,
+            // so a localized record does too (its restore takes the block's
+            // latest image).  The localize arms are held to v2 as captured
+            // without the images; the restore arm to v2 itself.
+            std::vector<uint8_t> v2_presence;
+            bmmo::game::script_replay_hooks presence_hooks = hooks;
+            presence_hooks.capture_joint = nullptr;
+            if (!script_replay::capture(context, sel, presence_hooks, v2_presence)) {
+                std::printf("FAIL %s: v2 capture without joint images failed\n", label.c_str());
+                ++failures;
+                return;
+            }
             if (!script_replay::capture_portable(context, sel, hooks, portable, &e, &captured)) {
                 std::printf("FAIL %s: portable capture failed: %s\n", label.c_str(), e.c_str());
                 ++failures;
@@ -7366,15 +7384,15 @@ namespace {
             // The keep-local arm anchors on the previous checkpoint's record:
             // its keep-local entries must come from there, the rest from the
             // portable record (`kept_changed` of them differ from now).
-            const std::vector<uint8_t>& anchor = previous_v2.empty() ? v2 : previous_v2;
+            const std::vector<uint8_t>& anchor = previous_v2.empty() ? v2_presence : previous_v2;
             std::vector<uint8_t> rule_expected;
             int kept_changed = 0;
-            const bool spliced = splice(v2, anchor, rule_expected, kept_changed);
+            const bool spliced = splice(v2_presence, anchor, rule_expected, kept_changed);
             script_replay::portable_report r_names, r_rule, r_scrub;
-            const std::string s_names = run(nullptr, v2, v2, names, r_names);
+            const std::string s_names = run(nullptr, v2_presence, v2_presence, names, r_names);
             const std::string s_rule = spliced ? run(keep_rule, anchor, rule_expected, rule, r_rule) : std::string("NO-SPLICE");
             const int zeroed = scrub();
-            const std::string s_scrub = run(nullptr, v2, v2, scrubbed, r_scrub);
+            const std::string s_scrub = run(nullptr, v2_presence, v2_presence, scrubbed, r_scrub);
             // Put the world back: the localized record when it is the v2
             // record, else v2 itself (so the run goes on unharmed).
             std::vector<CK_ID> replayed;
@@ -7404,7 +7422,7 @@ namespace {
                         r_scrub.objects_resolved, r_scrub.unportable, s_restored.c_str(), lr.cells_written,
                         lr.links_rearmed, lr.joints_reset);
             std::fflush(stdout);
-            previous_v2 = v2;
+            previous_v2 = v2_presence;
         };
 
         if (!run_ticks(30)) return 1;

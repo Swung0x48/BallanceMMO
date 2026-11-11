@@ -575,6 +575,18 @@ re-arm.
   made the lookups unique-only and added the anchor arm and the index-like
   list: the same sizes and counts as the first run.)
 
+  Since step RLC (13f7d866) a local record names a held constraint's image
+  (`kJointImaged` + hash + its two core-list places, 9 bytes where the
+  portable record has the presence byte); a localized record names none and
+  its restore takes the block's latest image. The check still held the
+  localize arms to the imaged v2, so L6 failed 4 of 5 checkpoints from then
+  (P_Modul_25's joint blocks, 8 bytes each; `script_replay::diff` found no
+  place: both mean "held"). As fixed 2026-11-11: the names / rule / scrubbed
+  arms compare with v2 captured without the images (`capture_joint` unset),
+  byte for byte; the restored arm with v2 itself, so the restore of a
+  localized record is now checked to bring the image back. L1-L13, with
+  and without `--drop-settle 150`: every checkpoint passes, 0 ambiguous.
+
   | level | sectors | selected | checkpoints | blocks | object refs | registry | v2 max (B) | portable max (B) | balloon pending after the frame of |
   |---|---|---|---|---|---|---|---|---|---|
   | 1 | 4 | 12 | 4 | 267 | 277 | 2 | 20,083 | 23,540 | 334 (sector 4 stamped 330) |
