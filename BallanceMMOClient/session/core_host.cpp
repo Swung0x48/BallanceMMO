@@ -4416,6 +4416,7 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
                       t.cache_mode < 3 ? modes[t.cache_mode] : "?", static_cast<unsigned long long>(t.cache_hits),
                       static_cast<unsigned long long>(t.cache_fills), static_cast<unsigned long long>(t.cache_shared),
                       static_cast<unsigned long long>(t.cache_verified), static_cast<unsigned long long>(t.cache_mismatches));
+        logger_->Info("Physics session: %s", proximity_host.union_.lookup_line().c_str());   // place's candidates by name
     }
     if (host.core && host.core->session_phase() != bs::client_core_state::phase::idle) host.core->end(reason);
     // Step WG4 (world-agreement-gaps design 2.3 "Release"): the level
@@ -5863,11 +5864,11 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
         // Step WG4: this process's proximity union (status only).
         if (!value.empty() && value != "status") return "error usage: session probes [status]";
         return std::format("ok probes active={} blocks={} identities={} signature={:016x} anchors={} refused={} "
-                           "releases={} restored={} skipped={} relatched={}", proximity_host.active ? 1 : 0,
+                           "releases={} restored={} skipped={} relatched={} | {}", proximity_host.active ? 1 : 0,
                            proximity_host.union_.probe_count(), proximity_host.union_.identity_count(),
                            proximity_host.signature, proximity_host.anchors, proximity_host.refused,
                            proximity_host.releases, proximity_host.restored, proximity_host.union_.skipped(),
-                           proximity_host.union_.relatched());
+                           proximity_host.union_.relatched(), proximity_host.union_.lookup_line());
     }
     if (what == "force-rollback" && value == "at") {
         // Step EL8: 'session force-rollback at L:D[,L:D...]', one-shot.

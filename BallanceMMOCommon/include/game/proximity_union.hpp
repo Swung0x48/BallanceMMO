@@ -43,6 +43,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <map>
@@ -251,9 +252,18 @@ namespace bmmo::game {
             std::vector<session::probe_ball> balls;
             std::vector<CK3dEntity*> entities;
             std::vector<int> slot_of;   // step Q7: each accepted candidate's slot
+            // The entities by name (candidate_entity).  A hit is right by its
+            // own test; forgetting the names when the candidates change - a
+            // ball born or gone - only gives a name that was shared another
+            // look.
+            if (!std::equal(sorted.begin(), sorted.end(), placed_.begin(), placed_.end(),
+                            [](const probe_candidate& c, const std::string& name) { return c.entity == name; })) {
+                entity_ids_.clear();
+                placed_.clear();
+                for (const probe_candidate& c: sorted) placed_.push_back(c.entity);
+            }
             for (const probe_candidate& c: sorted) {
-                auto* entity = CK3dEntity::Cast(context->GetObjectByNameAndParentClass(
-                    const_cast<CKSTRING>(c.entity.c_str()), CKCID_3DENTITY, nullptr));
+                CK3dEntity* entity = candidate_entity(context, c.entity);
                 if (!entity || (has_body && !has_body(entity))) {
                     ++skipped_;
                     continue;
@@ -351,6 +361,58 @@ namespace bmmo::game {
                 ++relatched_;
                 note_script_write();   // a selected script's output written: no record reuse across it (T3C e3 review)
             }
+        }
+
+        // A candidate's 3D entity.  The scan for it walks every 3D entity,
+        // once per candidate per tick, live and replayed: 0.22 of the
+        // 0.375 ms a place took in a room of 13 on the public server's
+        // machine.  BMMO_LOOKUP_CACHE (off | on | verify, on when unset) and
+        // its rule are physics_state.cpp find_entity's (lookup_cache there
+        // reads the switch too: keep the two alike): a name is entered when
+        // one 3D entity alone had it at the fill; a hit is taken while the
+        // id still names a 3D entity of that name; anything else scans and
+        // fills again.  What makes a hit the scan's answer is that test and
+        // the same premise - no second entity of a candidate's name appears
+        // before the first in the scan's order (the balls' and the clones'
+        // names are their own).  A name shared at the fill (id 0) is scanned
+        // every time, until the candidates change (place).  Verify scans
+        // every hit too, returns the scan's answer and counts a difference.
+        // The counts are the object's whole life's: clear() keeps them.
+        CK3dEntity* candidate_entity(CKContext* context, const std::string& name) {
+            const auto scan = [&](CKObject* after) {
+                return CK3dEntity::Cast(
+                    context->GetObjectByNameAndParentClass(const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, after));
+            };
+            static const int mode = [] {   // 0 off, 1 on, 2 verify
+                const char* text = std::getenv("BMMO_LOOKUP_CACHE");
+                if (text && (std::strcmp(text, "off") == 0 || std::strcmp(text, "0") == 0)) return 0;
+                return text && std::strcmp(text, "verify") == 0 ? 2 : 1;
+            }();
+            if (mode == 0) return scan(nullptr);
+            const auto it = entity_ids_.find(name);
+            const bool shared = it != entity_ids_.end() && it->second == 0;
+            if (it != entity_ids_.end() && !shared) {
+                CK3dEntity* entity = CK3dEntity::Cast(context->GetObject(it->second));
+                const char* entity_name = entity ? entity->GetName() : nullptr;
+                if (entity_name && name == entity_name) {
+                    ++lookup_hits_;
+                    if (mode == 1) return entity;
+                    CK3dEntity* scanned = scan(nullptr);
+                    ++lookup_verified_;
+                    if (scanned != entity) ++lookup_mismatches_;
+                    return scanned;
+                }
+                entity_ids_.erase(it);
+            }
+            CK3dEntity* found = scan(nullptr);
+            // Unique: the scan resumed after the first finds no other.
+            if (found && !shared) entity_ids_[name] = scan(found) ? 0 : found->GetID();
+            ++lookup_scans_;
+            return found;
+        }
+        std::string lookup_line() const {
+            return "proximity union lookups: hits=" + std::to_string(lookup_hits_) + " scans=" + std::to_string(lookup_scans_)
+                 + " verified=" + std::to_string(lookup_verified_) + " mismatches=" + std::to_string(lookup_mismatches_);
         }
 
         // The hold section of the script record (§4.2): u16 frames, each
@@ -820,6 +882,8 @@ namespace bmmo::game {
             skipped_ = 0;
             relatched_ = 0;
             unslotted_ = 0;
+            entity_ids_.clear();
+            placed_.clear();
             units_.clear();
             unit_blocks_.clear();
             recorded_slots_.clear();
@@ -1199,6 +1263,9 @@ namespace bmmo::game {
         std::string initial_entity_;
         std::vector<std::string> lines_;
         uint64_t skipped_ = 0, relatched_ = 0;
+        std::unordered_map<std::string, CK_ID> entity_ids_;   // candidate_entity: 0 = the name was shared at the fill
+        std::vector<std::string> placed_;                     // the last place's candidates
+        uint64_t lookup_hits_ = 0, lookup_scans_ = 0, lookup_verified_ = 0, lookup_mismatches_ = 0;
         // ---- step Q7: the per-player units (§2.10, part I) ----
         struct unit_copy {
             std::vector<CK_ID> roots;        // the copied graph, or the unit's blocks (walk order)

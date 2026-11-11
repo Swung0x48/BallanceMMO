@@ -1632,3 +1632,32 @@ K = 20 (L12, L11 at human key rates): verify 84 k skip candidates, 0 mismatches,
 verify sessions bit-equal to the kept source's sessions with L11's 32 trafo pieces; x64 and x86 builds, the Arch
 server; two serial reviews and a re-review (the link re-arm under the skip, the trafo tails, the entry cleared
 before a write, the remake and the exactness of an entry are theirs).
+
+## Built (the union's candidates by id, 2026-11-11)
+
+**A place by parts** on the public server's machine (the public L6 re-drive, 13 players, K = 20;
+`work/PERF/apply_pp_diag.py`): 0.375 ms a place - the 13 candidates found by name 0.22 (each a scan of every 3D
+entity, `GetObjectByNameAndParentClass`), the identity cells 0.115 (300 cells), the frames 0.04 (329 probes). A
+replayed tick places once, so of a replayed tick's 0.99 ms the place was 0.35.
+
+**Built** (`game/proximity_union.hpp` `candidate_entity`; under `BMMO_LOOKUP_CACHE`, with its verify). The union
+keeps name -> CK id for its candidates, by `physics_state.cpp find_entity`'s rule: a name is entered when one 3D
+entity alone has it at the fill (the scan resumed after the first finds no other), a hit is taken while the id
+still names a 3D entity of that name, anything else scans and fills again. A name shared at the fill is scanned
+every time until the candidates change. The premise is `find_entity`'s too: no second entity of a candidate's name
+appears before the first in the scan's order - the balls' and the clones' names are their own. Verify scans every
+hit as well, returns the scan's answer and counts a difference. The line `proximity union lookups: hits= scans=
+verified= mismatches=` is in the headless client's and the server's logs, the retail log and `session probes`.
+
+**Measured** on the 8845HS (idle; 02ea2898 against this, both built from one tree by one toolchain, two
+interleaved pairs that agree; 13 clients on its 16 threads): the replay outside its captures 0.61 -> 0.35 ms a
+tick, a rewind's replay 8.7 -> 6.6 ms, rewind work 291 -> 241 ms a second, frame p50 5.1 -> 4.8, p99 23.2 -> 19.1,
+p999 28.3 -> 25.8, max 43.6 -> 41.0 ms; 99.8 % of the lookups are hits (868 k of 869 k on client 0). With client 0
+alone on a core (the baseline's recipe, 33 232 frames): p50 5.0 -> 4.6, p99 23.1 -> 18.0, p999 27.6 -> 21.8, max
+41.9 -> 37.7 ms against the baseline of a1b35f80 (the restore skip is in that difference too).
+
+Gate: 845/845; the L6 re-drive in verify, 4.96 M hits each scanned again, 0 mismatches, every session's `mism` 0;
+fast LBM in verify 38/38 twins FINAL exact, every criteria row equal to the resync cut's run, 2.59 M hits scanned
+again, 0 mismatches; fast LBM 38/38, the same rows (comments only changed in `proximity_union.hpp` after these
+runs; the retail log line was added after them); retail at K = 20 (L12, L11 at human key rates) in verify: 28.7 k hits of the two games each scanned again against 90 scans, 0 mismatches, and FINAL rows of the shipped and the verify sessions bit-equal to the restore skip's sessions with L11's 32 trafo pieces; x64 and x86 builds, the Arch server; two serial reviews,
+no defects (the comments' wording and the retail run are theirs).

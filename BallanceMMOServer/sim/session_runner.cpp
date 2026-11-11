@@ -531,6 +531,7 @@ namespace bmmo::sim {
                     const std::string text = "proximity union: skipped " + std::to_string(u.skipped()) + ", relatched "
                         + std::to_string(u.relatched()) + ", candidate set drift " + std::to_string(s.probe_set_drift);
                     log("[session " + std::to_string(s.id) + "] " + text);
+                    log("[session " + std::to_string(s.id) + "] " + u.lookup_line());
                     s.journal.note(s.world->tick_index(), text);
                 }
                 if (s.world) {   // step M1 (J2): the slot fallbacks, 0 by the server's join orders
