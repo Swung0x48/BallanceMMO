@@ -103,6 +103,9 @@ namespace bmmo::game {
     // the bodies, as the host reaches them.
     struct trafo_set_hooks {
         std::function<bool(const std::string& entity)> has_body;
+        // has_body's answer for the entity with this CK id, without the
+        // lookup by name; empty where the backend has none.
+        std::function<bool(CK_ID entity)> has_body_id;
         std::function<bool(const std::string& entity, std::string& error)> unphysicalize;
         // The originals' restore (physics_state.hpp restore_explosion_pieces).
         std::function<void()> restore_originals;
@@ -1399,8 +1402,10 @@ namespace bmmo::game {
                 if (CKBehavior* s = trafo_detail::original_script(context, trafo_explosion_name(t))) explosions_[t] = s->GetID();
                 if (CKBehavior* s = trafo_detail::original_script(context, trafo_reset_name(t))) resets_[t] = s->GetID();
                 if (CK3dEntity* frame = trafo_detail::entity(context, trafo_frame_name(t)))
-                    for (CK3dEntity* child = frame->HierarchyParser(nullptr); child; child = frame->HierarchyParser(child))
+                    for (CK3dEntity* child = frame->HierarchyParser(nullptr); child; child = frame->HierarchyParser(child)) {
                         original_pieces_.push_back(trafo_detail::name_of(child));
+                        original_piece_ids_.push_back(child->GetID());
+                    }
             }
             for (CKBehavior* s: trafo_detail::original_scripts(context)) original_scripts_.push_back(s->GetID());
             // The Trafo Manager's Delayer whose Out reaches "start Explosion".
@@ -1506,16 +1511,21 @@ namespace bmmo::game {
             }
             return out;
         }
-        // The effect checks with the originals found at `arm` (every tick:
-        // no lookup by name).
+        // The effect checks with the originals found at `arm`, every tick:
+        // the pieces by their ids where the backend can (a lookup by name
+        // scans every 3D entity: 51 pieces were ~0.3 ms of a retail frame).
         trafo_effect effect_check(CKContext* context, const trafo_set_hooks& hooks) const {
             trafo_effect e;
             if (!context) return e;
-            for (const std::string& name: original_pieces_)
-                if (hooks.has_body && hooks.has_body(name)) {
+            for (size_t i = 0; i < original_pieces_.size(); ++i) {
+                const std::string& name = original_pieces_[i];
+                const bool body = hooks.has_body_id ? hooks.has_body_id(original_piece_ids_[i])
+                                                    : hooks.has_body && hooks.has_body(name);
+                if (body) {
                     ++e.bodies;
                     if (e.first.empty()) e.first = "body " + name;
                 }
+            }
             for (CK_ID id: original_scripts_)
                 if (CKBehavior* s = CKBehavior::Cast(context->GetObject(id)); s && s->IsActive()) {
                     ++e.scripts;
@@ -1579,6 +1589,7 @@ namespace bmmo::game {
         float delayer_elapsed_ = 0.0f;
         std::vector<CK_ID> original_scripts_;
         std::vector<std::string> original_pieces_;
+        std::vector<CK_ID> original_piece_ids_;   // beside original_pieces_
         std::map<uint8_t, uint32_t> expected_;   // type -> the predicted explosion frame
         uint64_t cancelled_ = 0, predicted_ = 0, confirmed_ = 0, mispredicted_ = 0;
         float confirmed_position_[3] = {};

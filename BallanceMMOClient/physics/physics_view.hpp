@@ -164,6 +164,8 @@ namespace bmmo::physics {
         // (physics_state.hpp entity_lookup_scope_begin; rollback_world::capture_scope).  A bridge
         // without the entry leaves every lookup a scan, as before.
         void lookup_scope(bool on, bool verify = false, bmmo_physics_lookup_totals* totals = nullptr) const;
+        // v37 (T3C): this thread's lookup totals, the name cache's included; zero without a bridge.
+        bmmo_physics_lookup_totals lookup_totals() const;
 
         // ---- bridge API v6 (design 9.10): spawn impulse, deterministic Random block ----
         // Impulse direction_ws * speed * mass at the body's mass centre; applied
@@ -195,6 +197,8 @@ namespace bmmo::physics {
         // clock reset, right after the trafo quiesce, restores the originals
         // (game/host_backend.hpp trafo_hooks_for leaves the hook empty).
         bool has_body(const char* entity_name) const;
+        // The same answer for the entity with this CK id (bridge v36).
+        bool has_body_id(uint32_t entity_id) const;
         bool trafo_set_register(uint32_t player, const uint32_t frames[3], const uint32_t* explosions, int explosion_count,
                                 bmmo_physics_trafo_set_report& out, std::string& error) const;
         bool trafo_set_unregister(uint32_t player, std::string& error) const;
@@ -208,7 +212,7 @@ namespace bmmo::physics {
                               std::string& error) const;
         int airship_zone_contains(const char* entity_name) const;
         void airship_zone_release(const char* entity_name, uint32_t tick, bool undo) const;
-        // v35 (TASX): the x87 model's game-thread precision back to its start, at a level load.
+        // v38 (TASX): the x87 model's game-thread precision back to its start, at a level load.
         void reset_game_precision() const;
         // 1 with the box (min xyz, max xyz) once taken, 0 not yet, -1 off.
         int airship_zone_get(double box[6]) const;

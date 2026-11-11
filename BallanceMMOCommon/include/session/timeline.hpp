@@ -180,6 +180,19 @@ namespace bmmo::session {
             auto it = frames_.find(tick);
             return it == frames_.end() ? nullptr : &it->second;
         }
+        // Protocol 37 (input_relay.hpp, the hints): the frames already here
+        // for the ticks from the cursor on, consecutive from it, that had
+        // arrived by `cutoff` - what the next takes will apply unless a lead
+        // reset drops them.  At most `limit`.
+        std::vector<input_frame> queued(arrival_clock::time_point cutoff, size_t limit) const {
+            std::vector<input_frame> out;
+            uint32_t tick = next_tick_;
+            for (auto it = frames_.find(tick); it != frames_.end() && it->first == tick && out.size() < limit; ++it, ++tick) {
+                if (const auto at = arrivals_.find(tick); at != arrivals_.end() && at->second > cutoff) break;
+                out.push_back(it->second);
+            }
+            return out;
+        }
 
         // The input to apply for `tick`: the client's frame when it arrived,
         // else the substitute - the newest frame that has arrived for a tick

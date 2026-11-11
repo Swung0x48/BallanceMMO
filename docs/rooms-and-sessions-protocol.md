@@ -18,11 +18,15 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 1. 房主 `Create`（可带名字，≤ 32 字节；空则服务端生成）。创建者自动成为成员与房主。
 2. 其他玩家 `List` 查看，`Join <id>` 加入。房间人数上限由服务端配置（默认 8）。
 3. 成员 `Ready` / `Unready`。房主本人也需要 `Ready`。
-4. 房主 `Start`，可带 `mode`：`Shadow`（影子球，旧逻辑）或 `Physics`（物理会话）。服务端校验：全员 Ready、全员在同一张地图（`current_map` 一致）、物理会话时 Mod 白名单通过且服务端物理模拟可用。校验失败返回 `RequestDenied` 与错误码。
-5. 会话进行中房间 phase 为 `Running`；会话结束（房主 `Close`、房主发起 `End`、所有成员离开或服务端失败）回到 `Lobby` 或销毁。
-6. 房主断线：按加入顺序把房主转给下一名成员（`HostChanged`）。最后一名成员离开时销毁房间（`RoomClosed`）。
-7. `Kick <player>` 仅房主可用。被踢者收到 `Kicked`。
-8. 断线即视为 `Leave`。
+4. 房间有两项由房主设定的设置，只能在等待阶段（`Lobby`）改，会话运行中改会被拒绝（`SessionRunning`）：
+   - 地图：房主 `SetMap`，把**房主的游戏此刻所在的关卡**设为房间地图（请求里带这张地图）；房主不在关卡内时带一张全零的地图，表示清除。未设置时房间"在大厅"。
+   - 模式：房主 `SetMode`，`Shadow`（影子球，旧逻辑）或 `Physics`（物理会话）。新房间在服务端提供物理会话时默认 `Physics`，否则 `Shadow`。
+5. 房主 `Start`，带 `mode`（客户端不指定时用房间的模式）。会话的地图是房间地图；房间没有设置地图时沿用旧规则，取房主的 `current_map`；这张图只属于这一次会话（运行期间作为房间地图显示），会话结束后房间回到未设置。服务端校验：全员 Ready、每个成员的 `current_map` 都等于会话的地图（否则 `MapMismatch`，设置过房间地图时 reason 列出不在这张图上的成员）、物理会话时 Mod 白名单通过且服务端物理模拟可用。校验失败返回 `RequestDenied` 与错误码。
+6. 会话进行中可以投票重开：**会话内的**成员 `VoteRestart` / `UnvoteRestart`（没有会话在跑，或自己不在会话里——中途进房间还没加入、已通关——时拒绝，`NoSession`）。会话内的成员都投了之后，房主 `Restart`：服务端把每个成员记为 Ready，然后按房间的模式和地图执行一次 `Start`（结束当前会话、开新会话，`Start` 的其余校验照常，结果作为 `Restart` 的回复）。会话内还有人没投时拒绝（`NotReady`，reason 列出没投的成员）；会话外的成员不计票，但会被带进新会话。票在每次会话开始和结束时清零，成员离开会话时他的票也清掉。
+7. 会话进行中房间 phase 为 `Running`；会话结束（房主 `Close`、房主发起 `End`、所有成员离开或服务端失败）回到 `Lobby` 或销毁。`SetMap` 设置的地图和模式保留到下一次开始。
+8. 房主断线：按加入顺序把房主转给下一名成员（`HostChanged`）。最后一名成员离开时销毁房间（`RoomClosed`）。
+9. `Kick <player>` 仅房主可用。被踢者收到 `Kicked`。
+10. 断线即视为 `Leave`。
 
 ### 1.2 可见性
 
@@ -36,11 +40,12 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| action | u8 | `List=0, Create=1, Join=2, Leave=3, Ready=4, Unready=5, Start=6, Kick=7, Close=8` |
+| action | u8 | `List=0, Create=1, Join=2, Leave=3, Ready=4, Unready=5, Start=6, Kick=7, Close=8, SetMap=9, SetMode=10, VoteRestart=11, UnvoteRestart=12, Restart=13` |
 | room | u32 | 目标房间；`Create`/`List` 时为 0 |
 | name | string ≤ 32 | 仅 `Create` |
 | target | u32 | 仅 `Kick`：被踢玩家 id |
-| mode | u8 | 仅 `Start`：`Shadow=0, Physics=1` |
+| mode | u8 | `Start` / `SetMode`：`Shadow=0, Physics=1` |
+| map | type u8、level i32、md5[16] | 仅 `SetMap`：要设置的地图，全零 = 清除。消息的最后一个字段；更早的客户端不发，服务端读作全零 |
 
 `room_state_msg`（server → client，reliable；房间列表或本房间变化时推送给相关玩家）
 
@@ -48,14 +53,17 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 | --- | --- |
 | own_room | u32（0 = 不在房间） |
 | rooms | u16 count，每项：id u32、name string、host u32、member_count u16、capacity u16、phase u8（`Lobby=0, Running=1`）、mode u8 |
-| members | u16 count（仅本房间），每项：id u32、name string ≤ 64、ready u8、is_host u8、map（type u8、level i32、md5[16]） |
+| members | u16 count（仅本房间），每项：id u32、name string ≤ 64、flags u8（bit 0 = ready，bit 1 = 已投票重开，bit 2 = 在正在运行的会话里；更早的对端只写、只认 0/1）、is_host u8、map（type u8、level i32、md5[16]） |
+| own_map | 本房间的地图（type u8、level i32、md5[16]），全零 = 未设置或不在房间。消息的最后一个字段；更早的服务端不发，客户端读作全零 |
+
+成员的 `current_map` 变化（进入关卡）、成员加入或离开正在运行的会话，也会把 `room_state` 推给同房间的成员。
 
 `room_event_msg`（server → client，reliable）
 
 | 字段 | 类型 |
 | --- | --- |
 | type | u8：`RequestAccepted=0, RequestDenied=1, PlayerJoined=2, PlayerLeft=3, HostChanged=4, Kicked=5, RoomClosed=6, ReadyChanged=7, SessionStarting=8, SessionEnded=9` |
-| error | u8：`None=0, NotFound, Full, AlreadyInRoom, NotInRoom, NotHost, NotReady, MapMismatch, ModMismatch, PhysicsUnavailable, InvalidName, ServerBusy, Unsupported` |
+| error | u8：`None=0, NotFound, Full, AlreadyInRoom, NotInRoom, NotHost, NotReady, MapMismatch, ModMismatch, PhysicsUnavailable, InvalidName, ServerBusy, Unsupported, SessionRunning, NoSession` |
 | room | u32 |
 | actor | u32（发起者） |
 | subject | u32（被操作者，可为 0） |
@@ -65,7 +73,7 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 
 一次操作可能同时产生广播事件：服务端先发给发起者结果，再把 `PlayerJoined` / `PlayerLeft` / `HostChanged` / `RoomClosed` / `SessionStarting` 发给其他成员，最后推送 `room_state`。`Ready`/`Unready` 相反——先推 `room_state`（其中已带新的 ready 标记），再发 `ReadyChanged`，最后回结果，这样收到事件的客户端可以直接从名单里读出新状态与人数。客户端对自己发起的操作只显示结果那一条，不重复显示随之而来的广播事件。
 
-客户端命令：`/mmo room list|create [name]|join <id>|leave|ready [on|off]|start [physics|shadow]|kick <player>|close|status|session`。
+客户端命令：`/mmo room list|create [name]|join <id>|leave|ready [on|off]|setmap|setmode <physics|shadow>|start [physics|shadow]|vote|unvote|restart|kick <player>|close|status|session`。`setmap` 不带参数：设的是自己此刻所在的关卡。
 
 ## 2. 会话（物理模式）
 
@@ -106,7 +114,7 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 | first_tick | u32（接收者锚点 tick 的编号；实际编号随 `SessionAssign` 到达，两端客户端都不读这里，服务端写 0） |
 | seed | i32 |
 | spawn_impulse | f32（每次出生 Physicalize 的踢出速度 m/s，0 = 无；写在 seed 之后） |
-| world_options | u32（协议 11：会话的世界选项 `session::WORLD_*`，写在 protocol 之后、players 之前，整个会话固定、迟到加入者相同；bit 1 `WORLD_TRAFO_INPUTS` = 变球作为输入，由服务端配置 `physics.trafo_inputs` 决定，默认关；协议 12 起 bit 0 `WORLD_PLACEMENT_CLONES` = 小节摆放：PH 表中每一行都在锚点得到自己的对象（docs/sector-placement-design.md），由服务端配置 `physics.placement_clones` 决定；步骤 S5 到 S10 默认关（零售核心宿主还不能建副本），S10 起默认开；协议 16 起 bit 2 `WORLD_PROXIMITY_UNION` = 邻近并集：每个世界按同一条规则放置机关的邻近探针与球身份读取，G3 起默认开，步骤 UOFF 起每个会话都置位（服务端配置 `physics.proximity_union` 已取消，旧配置里的 false 被忽略并删除；没有这一位的 SessionStart 被客户端内核拒绝），见下文协议 16；bit 3 留给记录格式设计的 `WORLD_SESSION_CLOCK`（未建）；协议 19 起 bit 4 `WORLD_PLAYER_MECHANISMS` = 每个玩家一份机关逻辑，由服务端配置 `physics.player_mechanisms` 决定，默认开，见下文协议 19） |
+| world_options | u32（协议 11：会话的世界选项 `session::WORLD_*`，写在 protocol 之后、players 之前，整个会话固定、迟到加入者相同；bit 1 `WORLD_TRAFO_INPUTS` = 变球作为输入，由服务端配置 `physics.trafo_inputs` 决定，默认关；协议 12 起 bit 0 `WORLD_PLACEMENT_CLONES` = 小节摆放：PH 表中每一行都在锚点得到自己的对象（docs/sector-placement-design.md），由服务端配置 `physics.placement_clones` 决定；步骤 S5 到 S10 默认关（零售核心宿主还不能建副本），S10 起默认开；协议 16 起 bit 2 `WORLD_PROXIMITY_UNION` = 邻近并集：每个世界按同一条规则放置机关的邻近探针与球身份读取，G3 起默认开，步骤 UOFF 起每个会话都置位（服务端配置 `physics.proximity_union` 已取消，旧配置里的 false 被忽略并删除；没有这一位的 SessionStart 被客户端内核拒绝），见下文协议 16；bit 3 留给记录格式设计的 `WORLD_SESSION_CLOCK`（未建）；协议 19 起 bit 4 `WORLD_PLAYER_MECHANISMS` = 每个玩家一份机关逻辑，由服务端配置 `physics.player_mechanisms` 决定，默认开，见下文协议 19；协议 39 起 bit 5 `WORLD_TRAFO_SEED_JOIN_ORDER` = 爆炸种子按加入顺序，每个会话都置位，见下文协议 39） |
 | mechanism_slots | u8（协议 19 起，紧跟 world_options：会话的机关槽数 K，等于服务端的 `maximum_members` 夹在 [1, 64]，整个会话固定；`WORLD_PLAYER_MECHANISMS` 打开时解析拒绝 0 与大于 64 的值） |
 | players | u8 count，每项：id u32、join_order u8、ball_type u8、spawn_position f32×3、spawn_rotation f32×4（实体世界矩阵位姿，CK 侧为单精度；这是原版复活点本身，每个成员都相同——设计 9.10 去掉了出生环偏移） |
 
@@ -188,6 +196,10 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 `session_resync_msg`（client → server，reliable）：session u32、last_full_tick u32。服务端回复一个 full snapshot。
 
 `session_end_msg`（server → client，reliable）：session u32、reason string ≤ 256。
+
+**协议 38（步骤 A6，2026-11-10）：客户端遥测。** 新消息 `SessionTelemetry`（client → server，reliable；opcode 追加在 `BallStateMute` 之后；`message/session_telemetry_msg.hpp`）。会话核心在每个成员自己的世界里每 `kTelemetryTicks`（660 tick，10 秒）发一条，说明这段时间的帧是什么样子。字段依次为：schema u8（1，其他值拒收）、session u32、tick u32（这段的最后一个 tick，按成员自己的编号）、host u8（1 零售、2 无头）、ticks u16、frames u16，帧间隔（零售：一次 OnProcess 到下一次，包括渲染、实时步进和宿主；无头：帧开始到帧开始）的 p50 / p99 / p999 / max 各 u16（0.1 ms，饱和），长于 33.3 / 50 / 100 ms 的帧数各 u16，会话核心本身在一帧里的耗时（零售 `core_host_frame`，无头 `frame()`，含回滚与重放）p99 / max 各 u16（0.1 ms），这段的回滚次数 u16（各类合计）、重放 tick 数 u32、发出的重同步请求数 u16、进入的重同步等待次数 u16、服务端回报为饥饿的输入报告数 u16、节拍落后的最大值 u16（0.1 tick），以及中继报文（SessionRemoteInput）从传输层的接收时间戳到交给会话核心之间等待时间的 p50 / p99 / max 各 u16（0.1 ms；零售：网络线程的轮询加上等游戏帧取信箱，无头：轮询间隔；步骤 A5 的测量）。会话开始后（以及编号倒退时）的第一次只开始计时，不发送。服务端只写一行日志 `Physics session S: telemetry NAME (#ID, retail|headless): tick=… ticks=… frames=… interval p50=… p99=… p999=… max=… ms over33=… over50=… over100=… work p99=… max=… ms rewinds=… replayed=… resyncs=… holds=… starved=… behind=… inbound p50=… p99=… max=… ms ping=… ms`（ping 是服务端此刻从 GNS 读到的该连接往返时间），任何世界、journal 和调度都不读它；不属于该会话的发送者被忽略。无头客户端 `--no-telemetry` 关闭发送（对照组）；零售客户端总是发送。37 的服务端会把每一条当作无效 opcode 记日志，所以升了版本号。消息布局之外没有 journal 变化。
+
+**协议 39（2026-11-10）：爆炸种子按加入顺序。** 世界选项 bit 5 `WORLD_TRAFO_SEED_JOIN_ORDER`，服务端在每个会话都置位；置位时，每个世界给一次爆炸的种子 `trafo_seed(会话种子, m, 生效 tick, 碎片类型)` 里的 m 取该生命的加入顺序，不再取玩家 id。玩家 id 是 GNS 的连接句柄，每次连接随机，所以以前同一份配方的两次会话碎片必然不同；加入顺序按进房先后分配，两次会话相同。服务端世界取 `add_player` 收到的 join_order（按 (id, 生命) 记，不是被占用时退而求其次的槽位）。线上两处：`session_event_msg` 的 Trafo 载荷在 position 之后加 join_order u8，由服务端在转发时填（运行器接受时从世界读出，客户端发送 255），中继数据报里的紧凑形式（协议 33）的 Trafo 也在 position 之后带上它，客户端收到别人的爆炸时用它——Trafo 事件从不按“生命未宣布”停放，迟到加入者也可能收到一个它从没被告知生命的离开者的爆炸；`SessionResyncState` 的状态体在账本各条目的生命之后加每条目一个 u8：该生命的加入顺序（总是写），重同步重建碎片时用它。客户端自己的爆炸取 SessionStart 里自己的条目。Trafo 事件因此从 38 字节变成 39 字节。journal 头部的 world_options 带这一位，没有它的旧 journal（包括公测的）在 SimTool `--replay-session` 里仍按玩家 id 重放；journal 布局不变。已知限制：客户端 journal 的 EVENT 记录不带 join_order，SimTool 重放一个迟到加入者的 journal 时，对一个只在重同步账本里出现过的离开者生命，用的是 SimTool 自己猜的加入顺序（只影响离线诊断）。设计见 `docs/trafo-replication-design.md` 2.6。
 
 ## 3. 服务端配置
 

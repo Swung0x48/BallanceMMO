@@ -426,6 +426,7 @@ namespace bmmo::sim {
             options.mechanism_slots = s->mechanism_slots;
             // Step RK3: the Level 1 tutorial's exit at frame 10 (physics_world::tick).
             options.session_clock = (world_option_bits & bmmo::session::WORLD_SESSION_CLOCK) != 0;
+            options.trafo_seed_join_order = (world_option_bits & bmmo::session::WORLD_TRAFO_SEED_JOIN_ORDER) != 0;
             options.log = [this, session](const std::string& text) {
                 log("[session " + std::to_string(session) + "] " + text);
             };
@@ -1103,6 +1104,7 @@ namespace bmmo::sim {
                     a.token = token;
                     a.intake = arrival;
                     a.life = life_of(s, player);
+                    a.join_order = s.world->join_order_of(player, a.life);
                     timing(a);
                     callbacks_.on_event_accepted(a);
                 };
@@ -1561,7 +1563,22 @@ namespace bmmo::sim {
         // Every step, one player or several: the relay's header and held
         // section are the owner's, and a solo player needs them as much as
         // anyone (late-player design 1.2).
-        if (callbacks_.on_inputs && !applied.empty()) callbacks_.on_inputs(s.id, tick, applied);
+        if (callbacks_.on_inputs && !applied.empty()) {
+            // Protocol 37: after the takes, each cursor is at the tick after
+            // this one unless a re-anchor or a lead reset holds it ahead -
+            // then that member's next ticks get no frame of its own, and
+            // nothing is said about them.
+            std::vector<bmmo::session::hint_entry> queued;
+            if (config_.input_hints)
+                for (const auto& [player, buffer]: s.inputs) {
+                    if (buffer.next_tick() != tick + 1) continue;
+                    bmmo::session::hint_entry entry{player, {}};
+                    for (const auto& frame: buffer.queued(cutoff, bmmo::session::kHintMaxTicks))
+                        entry.ticks.push_back(bmmo::session::hint_of(frame));
+                    if (!entry.ticks.empty()) queued.push_back(std::move(entry));
+                }
+            callbacks_.on_inputs(s.id, tick, applied, std::move(queued));
+        }
         // Every event due this tick, in the members' JOIN ORDER - not in the
         // order the network happened to deliver them.  The order two events of
         // the same tick are applied in changes the world (two balls

@@ -240,6 +240,9 @@ namespace bmmo::physics {
             std::string error;
             return get_body_state(entity_name, state, error);
         }
+        bool has_body_id(uint32_t entity_id) const {
+            return bmmo::physics::has_body_id(manager, entity_id);
+        }
         bool trafo_set_register(uint32_t player, const uint32_t frames[3], const uint32_t* explosions, int explosion_count,
                                 bmmo_physics_trafo_set_report& out, std::string& error) const {
             return bmmo::physics::trafo_set_register(manager, player, frames, explosions, explosion_count, out, error);

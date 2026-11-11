@@ -2,6 +2,7 @@
 # The fast LBM layer (docs/canned-tests-plan.md, step LF): LBM6's headless arms on the coordinator's one
 # virtual time, each as off/on twins like the real-time gate; then scripts/lbm_fast_judge.py.
 #   PREFIX=lf1 [ARMS="a0_first:A0 a11:A11 ..."] [MASK=0xFFFF] [ROOT=game dir] bash scripts/lbm_fast.sh
+# HARNESS="--input-hints on" adds harness options to every arm (both twins).
 # The first arm should be an A0 (the control the others are judged against, CONTROL=<its _off dir> otherwise).
 # Run from a build tree with BallanceMMOServer, BallanceMMOSessionClient, BallanceMMOCoordinator and SimTool in
 # build-agent/BallanceMMOServer (BIN=...). The server runs as a copy (BallanceMMOServerT1): the original may
@@ -19,7 +20,7 @@ EXE=; [ -f "$BIN/BallanceMMOServer.exe" ] && EXE=.exe
 cp -f "$BIN/BallanceMMOServer$EXE" "$BIN/BallanceMMOServerT1$EXE"
 P=${PREFIX:-lf}
 ARMS=${ARMS:-"a0_first:A0 a0_second:A0 a6b:A6B a6m:A6M a6m_death:A6M a6m_superseded:A6M a6_drop:A6 a4_swing_seed0:A4 a4_swing_seed1:A4 a4_swing_seed2:A4 a8_r1:A8 a8_r2:A8 a8_r3:A8 a11:A11 a11u:A11U a5d_resync:A5D a10x:A10X a5ub_r1:A5UB a5ub_r2:A5UB"}
-H="python -X utf8 -I scripts/arena_map_test.py --bin $BIN --root $ROOT --port ${PORT:-26997} --coordinated --server-exe BallanceMMOServerT1 --client-arg=--final-checkpoints --client-arg=--ignore-snapshots --client-arg=--record-by-tick --seconds 60 --startup-timeout 90 --drive-stop 1750 --twins"
+H="python -X utf8 -I scripts/arena_map_test.py --bin $BIN --root $ROOT --port ${PORT:-26997} --coordinated --server-exe BallanceMMOServerT1 --client-arg=--final-checkpoints --client-arg=--ignore-snapshots --client-arg=--record-by-tick --seconds 60 --startup-timeout 90 --drive-stop 1750 --twins ${HARNESS:-}"
 CONTROL=${CONTROL:-$A/${P}_a0_first_off}
 labels=
 for spec in $ARMS; do

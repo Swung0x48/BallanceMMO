@@ -1183,3 +1183,155 @@ by arm, 9.8k hits per client, 0 mismatches; retail verify (L12, L12_h, L11 ctl_h
 
 The retail recipes run K = 8 slots; the public servers run 20 (29 of 30 rooms), about three times the omitted copies,
 so the saving there is about three times as large (a projection, measured by T3C's public-test re-drive).
+
+## Measured (T3C: the live core's "other" share)
+
+The census (S0's recipe) with twelve more buckets: the inclusive post_step, inbound drain and pre_step, and self
+time - an enclosed timed scope excluded - for the own trafo poll and retirement, drain_body_events,
+record_script_order, the tracked set's build, rollback_.record, the input uplink, the airship and spawn ghost frames
+and place_probes; plus a count of physics_view's by-name lookups. E-core retail, one-way lag 150, 3 runs, frames
+without a rewind, means in us:
+
+| | L12_h | ctl_h | L12 |
+|---|---|---|---|
+| live core | 3088 | 2751 | 3117 |
+| of it uncovered before ("other") | 916 | 833 | 934 |
+| trafo poll (the effect check) | 344 | 251 | 349 |
+| place_probes (the union) | 146 | 106 | 155 |
+| post_step not in a bucket | 91 | 79 | 94 |
+| core_host_frame outside post / drain / pre | 80 | 78 | 80 |
+| drain_body_events | 56 | 54 | 49 |
+| uplink | 47 | 55 | 50 |
+| ghosts | 34 | 32 | 41 |
+| tracked + record | 60 | 116 | 58 |
+| drain + order + pre_step rest | 58 | 62 | 58 |
+| by-name lookups: count, time (across buckets) | 67, 528 | 77, 447 | 68, 539 |
+
+The trafo effect check asked has_body of the 51 original pieces by name every frame; each lookup scans the 3D
+entities. By CK id (bridge API v36, docs/engine-changes.md): trafo poll 8-11 us, by-name lookups 16-26 per frame,
+live core 3088 -> 2724 (L12_h), 2751 -> 2521 (ctl_h), 3117 -> 2828 us (L12). An entity lookup scope over the 51
+lookups saved only ~50 us (its table is built from every 3D entity once per scope). Next by size: the union's probe
+placement (grows with K), the per-frame GetScriptByName("Gameplay_Ingame") in core_host_frame, the event drain's
+256 KiB buffer.
+
+## Measured (T3C: a replayed tick's parts, 2026-11-10)
+
+With the relay hints a rewind is ~6 ticks deep for the member they help, so a rewind is still two thirds replay
+(restore ~2.2-2.5 ms, a replayed tick ~0.74-0.81 ms on these recipes). The census (S0's recipe on 381dbd4d) with
+28 more buckets (`work/S0/apply_cap.py` after apply_diag.py and apply_other.py; report `work/S0/rc_split.py`): the
+capture's parts by context (replay / live) - the lookup scope's build, get_body, extras + contacts, nav + clock +
+globals, observe_scripts, the scripts, the blob - each replayed record whole or light, and the replay loop's other
+parts as laps. E-core retail, K = 8, one-way lag 150, 3 runs x 2 clients, means over the replayed ticks (they add
+up to the replay meter within 4-5 us), us:
+
+| a replayed tick | L12_h | ctl_h | L12 (12 rewinds) |
+|---|---|---|---|
+| all | 779 | 809 | 743 |
+| capture: scripts (of it the slot images) | 237 (69) | 161 (35) | 274 (76) |
+| capture: get_body | 184 | 199 | 103 |
+| capture: blob, extras + contacts, rest | 48, 12, 13 | 67, 15, 24 | 56, 13, 11 |
+| pre_step, step | 79, 44 | 84, 68 | 96, 39 |
+| place_probes (the replay's union) | 78 | 68 | 72 |
+| the record's build and store (the replaced one freed) | 42 | 52 | 34 |
+| replay_mechanisms | 32 | 46 | 31 |
+| the rest (feed, births, remotes, globals, after_step) | 12 | 25 | 14 |
+| light records, us each / whole, us each | 84 %, 194 / 2071 | 84 %, 227 / 1691 | 82 %, 92 / 2080 |
+
+- The scripts are the whole records' (one in six replayed ticks; a light record observes only, ~2 us).
+- get_body is a light record's whole cost: 14 lookups a tick on L12 (37 on L11) at 13.5 us (5.4) each - every
+  tracked name scanned over the 3D entities, because the capture's lookup scope builds its table only after
+  kScanLookups = 12 scans (physics_state.cpp find_entity), so a capture of 13-14 names pays 12 scans and the
+  table. The live capture the same: 214 us of L12's 1.95 ms (13 lookups at 16 us).
+- The physics itself (pre_step's scripts and the step) is 16-19 % of a replayed tick.
+
+The per-entity probes add ~40 us to a replayed tick against o3's 736 (L12_h). Next by size: a tracked body read
+without the name scan (as v36 did for the trafo check: 184 -> ~10-20 us a replayed tick, ~200 us a live frame,
+estimated), the whole records' scripts (e1, or fewer whole records), the replay's place_probes.
+
+## Measured (T3C: the entity name cache, 2026-11-10)
+
+find_entity's name -> CK id cache (47308459, bridge v37; docs/engine-changes.md "the entity name cache"). The
+same census build on 47308459, `BMMO_LOOKUP_CACHE` off / on interleaved, 2 runs x 2 clients each, then one
+verify run (`work/S0/run_lc.sh`), E-core retail, K = 8, one-way lag 150, us:
+
+| | L12_h off -> on | ctl_h off -> on | L12 off -> on (12 rewinds) |
+|---|---|---|---|
+| a replayed tick | 751 -> 541 (-28 %) | 837 -> 569 (-32 %) | 678 -> 543 |
+| of it get_body | 183 -> 11 | 206 -> 29 | 97 -> 7 |
+| of it the replay's place_probes | 76 -> 54 | 71 -> 40 | 63 -> 45 |
+| the restore | 2234 -> 2319 | 2556 -> 2543 | 2472 -> 2485 |
+| a live frame's core (no rewind) | 2837 -> 2476 | 2857 -> 2336 | 2804 -> 2624 |
+| of it the capture's get_body | 214 -> 12 | 198 -> 30 | 210 -> 13 |
+
+So a rewind of the ~6 ticks a hinted member replays is ~1.3 ms shorter (L12_h: 2.3 + 6.2 x 0.75 -> 0.54), one of
+24 ticks ~5 ms. Verify: 1.26 M hits over the three verify sessions, 0 mismatches, no shared name. The journals'
+FINAL rows of off, on and verify, client by client: the balls and the 14 / 23 bodies bit-equal; ctl_h's 32 trafo
+pieces differ between any two sessions, two off runs and two runs of 381dbd4d alike, and they must: an explosion's
+Random seed is trafo_seed(session seed, player id, applied tick, type), and a player id is the server's
+GameNetworkingSockets connection handle, a random number of each connection (c2off_ctl_h runs 1 and 2: the same
+explosions at ticks 458 / 498 / 908, ids 484592829 / 508092805 vs 2462173594 / 109078206, seeds 1547941638 /
+75651449 / 1829446291 vs 2051120431 / 347687379 / 1593814566). Within a session every client and the server agree;
+across sessions only the balls and bodies are comparable. (Superseded by protocol 39: under WORLD_TRAFO_SEED_JOIN_ORDER
+the seed mixes the life's join order, the same in every session of a recipe - trafo-replication design 2.6.) The restore is unchanged: it is the next fixed part (restore_scripts 1.4-1.5 ms
+on L12, set_savestate 1.2 ms on L11), with the whole records' scripts (~0.2 ms a replayed tick).
+
+## Measured (step A2: a remote correction cadence, 2026-11-10)
+
+The architecture review of 2026-11-09 (after public test 1) proposed a cadence for the remote corrections: in a
+13-player room every remote's key change is a rewind, ~23 a second, and kRemoteReplayCoalesceFrames (own_correction.hpp)
+coalesced them only while the pacer was 2 ticks behind. As built: `core_config::remote_cadence_frames` (headless
+`--remote-cadence N`, retail `session cadence N`, kept in the capture's header; default 0 = the rule as it was). N > 0
+holds a remote's correction on schedule too, up to N frames after the last input replay, under the reach deadline
+(own_replay_pacer::due with the cadence's frame count); the replay that runs carries every correction of the frames
+it waited, from the earliest. Not held: a pending own correction (the own pacer's rule), and - on schedule - a
+correction of a ball within kRemoteCadenceNearMeters (8 m, SRTJ f2's 'near') of the own ball in the newest record. A
+lifecycle rewind that carries the pending replay counts as the replay's frame. Status: ` coalesced: ... deferred=N`
+as before, plus ` deadline=D near=M` once either is non-zero. The world is the same either way: only the frame a
+mirror's correction is shown in moves.
+
+Measured on the public test's Level 6 recording (13 players, K = 20, each client at its public-test ping, 0-114 ms
+round trip, virtual clock, hints on (A1), 6270 ticks, headless x64 on the dev machine, medians over the 13 clients;
+two series run alone one after the other, `a2t_*` without the near rule and `a2u_*` with it):
+
+| | cadence 0 | cadence 3 | cadence 4 |
+|---|---|---|---|
+| rewinds a second | 22.6 | 16.9 | 14.4 / 14.6 |
+| depth mean, p90, max | 5.6, 11, 16 | 6.8, 12, 18 | 7.5, 13, 19 |
+| replayed ticks | 12069 | 10851 | 10406 / 10386 |
+| a rewind (restore + replay) ms | 7.1 / 6.7 | 8.2 | 8.6 / 7.7 |
+| rewind work ms a second | 160 / 151 | 139 | 123 / 112 |
+| frame p99 ms | 15.9 / 14.0 | 17.8 | 17.6 / 14.8 |
+| frame p999 ms | 21.4 / 18.4 | 24.3 | 24.0 / 19.6 |
+| frame max ms | 27.3 / 28.3 | 31.0 | 29.1 / 27.3 |
+
+(a / b: the two series; the two cadence-0 arms run the same rule and differ by 1.9 ms at p99: the machine.) Every
+arm 13/13 FINAL rows exact, the server journals byte-identical across the arms; no wait reached the reach's deadline;
+on the near rule 18-123 corrections per client ran at once (1-6 % of the deferred). The physics-free model
+(`.local-tools/work/ARCH/batch_model.py` on a1t_on's logs) had predicted 23.9 -> 13.6 rewinds a second and 160 -> 109
+ms a second at cadence 4.
+
+So the cadence does what SRTJ found for f2 (above, "What f2 would still buy"): it cuts the rewind work a quarter
+(-23 to -26 %) and the rewind frames a third, and makes each remaining one deeper - the frame tail does not improve
+(p99 +0.8 / +1.7 ms, p999 +1.2 / +2.6 ms, the max unchanged). It is a CPU lever (a client that cannot keep up), not
+a stutter lever on a machine that can; the 2-ticks-behind rule already applies it where the CPU is short. Default
+left 0. Gate: 840/840; fast LBM with the default 38/38 twins FINAL exact, every criteria row equal to A1's merged
+tree (a1g); with cadence 4 38/38 FINAL exact, the only rows that moved already failing (A6M's late ball: input
+rollbacks in D 3 -> 2, its mirror 0.85 -> 1.11 m off from T_off+60); x64 and x86 builds. Not run: retail with the
+cadence on (own_replica_name matching the recorded own-ball name is verified headless only).
+
+## Measured (step A5: how long a relayed frame waits on the client, 2026-11-10)
+
+The review guessed the network polls cost 1-2 ticks of depth (both sides polling every 15.15 ms). The server's half
+was already gone: since K4b the runner asks the loop for a receive pass at each step instant (server.cpp
+wait_until / request_poll), so a frame that arrives before the step is in it. The client's half was measured with
+SessionTelemetry's new inbound fields (the wait from the transport's receive stamp to the core's handover of each
+SessionRemoteInput: retail, the network thread's poll plus the wait for the frame's mailbox drain; headless, its
+poll). Retail, two x86 copies on the Arch server (protocol 38, hints on), RT1's L11 recipe at human key rates, copy
+1 at 150 ms and copy 2 at 20 ms one way, E-cores: inbound p50 15.6 / 16.1 ms and p99 29.6 / 30.5 ms - a whole tick
+at the median, two at p99: the network thread's idle pass slept to the next 1/66 s (client.h run(), uniform 0-15 ms)
+and the drain waits for the next frame (another 0-15 ms). The idle pass now sleeps 1 ms (client.h kIdlePoll; a
+pass that finds nothing costs microseconds, the Player.exe timer resolution allows it): inbound p50 8.3 / 8.3 ms,
+p99 16.9 / 16.9 ms - the frame's own wait is what is left (a frame-paced game takes its messages once a frame). Depth
+a rewind 6.1 -> 5.8 (copy 1) and 25.2 -> 23.9 (copy 2), one run each; FINAL rows exact in both runs, no resync; the
+games' CPU in the session unchanged within the sampler's noise (20-40 % of a core each). The headless client already
+polls every <= 2 ms while it paces.

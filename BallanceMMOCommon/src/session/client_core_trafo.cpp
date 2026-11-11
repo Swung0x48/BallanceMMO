@@ -45,9 +45,33 @@ namespace bmmo::session {
             if (flags & TRAFO_FINAL) text += " (final)";
             return text;
         }
-        int32_t seed_of(int32_t session_seed, uint32_t player, uint32_t applied, uint8_t type, uint8_t flags) {
-            return trafo_is_reset(flags) ? 0 : trafo_seed(static_cast<uint32_t>(session_seed), player, applied, type);
+    }
+
+    int32_t session_client_core::trafo_seed_of(uint32_t player, uint16_t life, uint32_t applied, uint8_t type,
+                                               uint8_t flags, uint8_t stamped) {
+        if (trafo_is_reset(flags)) return 0;
+        uint32_t member = player;
+        if (s.world_options_ & WORLD_TRAFO_SEED_JOIN_ORDER) {
+            // The server's stamp on the relayed event (a Trafo event is
+            // never parked, so its life may not be announced yet); else the
+            // own life's order (SessionStart's own entry), a remote life's
+            // announcing entry, or a resync ledger's.
+            const auto* known = bmmo::session::find_member_life(s.lives_, player, life);
+            const auto ledger = s.trafo_ledger_orders_.find({player, life});
+            if (stamped != 255)
+                member = stamped;
+            else if (player == s.own_id_ && life == own_trafo_life() && s.own_join_order_ >= 0)
+                member = static_cast<uint32_t>(s.own_join_order_);
+            else if (known)
+                member = known->entry.join_order;
+            else if (ledger != s.trafo_ledger_orders_.end())
+                member = ledger->second;   // a leaver's life, named only by a resync ledger
+            else {
+                member = 63;
+                logf("trafo: no join order known for player %u life %u: seeded as 63", player, static_cast<unsigned>(life));
+            }
         }
+        return trafo_seed(static_cast<uint32_t>(s.seed_), member, applied, type);
     }
 
     // ------------------------------------------------------------- sets
@@ -123,7 +147,7 @@ namespace bmmo::session {
         in.origin = due;
         in.applied = due;
         for (int k = 0; k < 3; ++k) in.position[k] = event.position[k];
-        in.seed = seed_of(s.seed_, s.own_id_, due, r.type, in.flags);
+        in.seed = trafo_seed_of(s.own_id_, own_trafo_life(), due, r.type, in.flags);
         in.own = true;
         in.life = own_trafo_life();
         s.trafo_log_.add(in);
@@ -229,7 +253,7 @@ namespace bmmo::session {
         in.origin = msg.origin_tick;
         in.applied = msg.tick;
         for (int k = 0; k < 3; ++k) in.position[k] = trafo_is_reset(msg.flags) ? 0.0f : msg.position[k];
-        in.seed = seed_of(s.seed_, msg.player, msg.tick, msg.ball_type, msg.flags);
+        in.seed = trafo_seed_of(msg.player, life, msg.tick, msg.ball_type, msg.flags, msg.join_order);
         s.trafo_log_.add(in);
         logf("trafo: player %u %s %s for tick %u (stamped %u%s%s) received at local tick %u%s", msg.player,
              trafo_type_name(msg.ball_type), trafo_kind(msg.flags), msg.tick, msg.origin_tick,
@@ -356,7 +380,7 @@ namespace bmmo::session {
         const auto reached = [&](uint32_t tick) { return stepped && static_cast<int32_t>(tick - now) <= 0; };
         if (moved) {
             ++s.trafo_echo_moved_;
-            const int32_t seed = seed_of(s.seed_, own, msg.tick, msg.ball_type, msg.flags);
+            const int32_t seed = trafo_seed_of(own, own_life, msg.tick, msg.ball_type, msg.flags);
             if (!s.trafo_log_.move(own, own_life, msg.ball_type, msg.flags, msg.origin_tick, msg.tick, seed)) {
                 // Not logged (sent before a resync's renumbering pruned it,
                 // or never logged): the server's input all the same.
@@ -418,6 +442,7 @@ namespace bmmo::session {
         for (const auto& e: st.trafo_ledger) {
             if (e.type >= kTrafoTypes) continue;
             const uint16_t life = e.life ? e.life : uint16_t{1};
+            if (e.join_order != 255) s.trafo_ledger_orders_[{e.player, life}] = e.join_order;
             ensure_trafo_set(e.player, life, "the resync ledger", true);
             ledger[{e.player, life, e.type}] = &e;
         }
@@ -463,7 +488,7 @@ namespace bmmo::session {
                     in.applied = applied;
                     if (!trafo_is_reset(flags))
                         for (int k = 0; k < 3; ++k) in.position[k] = e->position[k];
-                    in.seed = seed_of(s.seed_, player, applied, type, flags);
+                    in.seed = trafo_seed_of(player, life, applied, type, flags);
                     in.own = player == s.own_id_ && life == own_trafo_life();
                     s.trafo_log_.add(in);
                 };
@@ -524,7 +549,7 @@ namespace bmmo::session {
             spec.life = life;
             spec.type = type;
             for (int k = 0; k < 3; ++k) spec.position[k] = e->position[k];
-            spec.seed = seed_of(s.seed_, player, e->explode_applied, type, TRAFO_EXPLODE);
+            spec.seed = trafo_seed_of(player, life, e->explode_applied, type, TRAFO_EXPLODE);
             spec.birth_tick = anchor;
             const trafo_reconcile_result r = platform_.trafo_reconcile(spec);
             if (!r.ok) {

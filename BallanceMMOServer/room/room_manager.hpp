@@ -19,6 +19,7 @@ namespace bmmo {
         struct member {
             bmmo::net::connection id = bmmo::net::kInvalidConnection;
             bool ready = false;
+            bool vote = false;   // voted to restart the running session; cleared by every start and end
         };
 
         uint32_t id = 0;
@@ -26,6 +27,11 @@ namespace bmmo {
         bmmo::net::connection host = bmmo::net::kInvalidConnection;
         room::phase phase = room::phase::Lobby;
         room::mode mode = room::mode::Shadow;
+        // The session's map (room::map_set): the host's setting (SetMap), or
+        // - none set - the host's own map as a Start found it, which is that
+        // session's only (map_taken) and goes when it ends.
+        bmmo::map map{};
+        bool map_taken = false;
         uint16_t capacity = 8;
         std::vector<member> members;  // in join order; the host is one of them
 
@@ -109,6 +115,50 @@ namespace bmmo {
             return room::error_code::None;
         }
 
+        // A member's vote to restart its room's running session.
+        room::error_code set_vote(bmmo::net::connection c, bool vote) {
+            const uint32_t id = room_of(c);
+            auto* r = id != 0 ? find(id) : nullptr;
+            auto* m = r ? r->find_member(c) : nullptr;
+            if (!m) return room::error_code::NotInRoom;
+            if (r->phase != room::phase::Running) return room::error_code::NoSession;
+            m->vote = vote;
+            return room::error_code::None;
+        }
+
+        // Whether c may restart its room's session now: its host, a session
+        // running, and the vote of every member in that session (in_session
+        // says who is; the server's to know).
+        template <typename InSession>
+        room::error_code can_restart(bmmo::net::connection c, InSession&& in_session) const {
+            const uint32_t id = room_of(c);
+            const auto* r = id != 0 ? find(id) : nullptr;
+            if (!r) return room::error_code::NotInRoom;
+            if (r->host != c) return room::error_code::NotHost;
+            if (r->phase != room::phase::Running) return room::error_code::NoSession;
+            for (const auto& m : r->members)
+                if (in_session(m.id) && !m.vote) return room::error_code::NotReady;
+            return room::error_code::None;
+        }
+
+        // The host's settings for the session its room will start: its map
+        // and its kind.  Only while the room waits - a running session keeps
+        // what it started with.
+        room::error_code set_map(bmmo::net::connection c, const bmmo::map& map) {
+            auto err = room::error_code::None;
+            if (auto* r = waiting_room_of_host(c, err)) {
+                r->map = map;
+                r->map_taken = false;
+            }
+            return err;
+        }
+
+        room::error_code set_mode(bmmo::net::connection c, room::mode mode) {
+            auto err = room::error_code::None;
+            if (auto* r = waiting_room_of_host(c, err)) r->mode = mode;
+            return err;
+        }
+
         // Validates a start request and, on success, marks the room Running.
         // Map consistency and physics availability are checked by the caller,
         // which owns the per-player map data; here we only enforce host + ready.
@@ -121,6 +171,7 @@ namespace bmmo {
             if (!r->all_ready()) return room::error_code::NotReady;
             r->phase = room::phase::Running;
             r->mode = mode;
+            for (auto& m : r->members) m.vote = false;   // the votes were the last session's
             return room::error_code::None;
         }
 
@@ -132,18 +183,14 @@ namespace bmmo {
             auto* r = find(id);
             if (!r) return room::error_code::NotInRoom;
             if (r->host != c) return room::error_code::NotHost;
-            r->phase = room::phase::Lobby;
-            for (auto& m : r->members) m.ready = false;
+            back_to_lobby(*r);
             return room::error_code::None;
         }
 
         // The running session ended for a reason other than a host request
         // (server failure, world mismatch): back to the lobby, ready cleared.
         void reset_session(uint32_t id) {
-            auto* r = find(id);
-            if (!r) return;
-            r->phase = room::phase::Lobby;
-            for (auto& m : r->members) m.ready = false;
+            if (auto* r = find(id)) back_to_lobby(*r);
         }
 
         room::error_code kick(bmmo::net::connection host, bmmo::net::connection target,
@@ -183,6 +230,27 @@ namespace bmmo {
         }
 
     private:
+        // A session ended: everyone un-readied so a new Start is deliberate,
+        // and a map that session took from its host forgotten.
+        static void back_to_lobby(server_room& r) {
+            r.phase = room::phase::Lobby;
+            for (auto& m : r.members) m.ready = m.vote = false;
+            if (r.map_taken) {
+                r.map = {};
+                r.map_taken = false;
+            }
+        }
+
+        // The room c hosts while it waits in its lobby, or why there is none.
+        server_room* waiting_room_of_host(bmmo::net::connection c, room::error_code& err) {
+            const uint32_t id = room_of(c);
+            auto* r = id != 0 ? find(id) : nullptr;
+            if (!r) err = room::error_code::NotInRoom;
+            else if (r->host != c) err = room::error_code::NotHost;
+            else if (r->phase != room::phase::Lobby) err = room::error_code::SessionRunning;
+            return err == room::error_code::None ? r : nullptr;
+        }
+
         removal_result remove_member(bmmo::net::connection c) {
             removal_result res;
             const uint32_t id = room_of(c);

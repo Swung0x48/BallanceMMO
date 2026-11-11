@@ -447,6 +447,11 @@ namespace {
     // every SessionStart and applied to a running core at once (the core
     // reads the field at each restore).  Host-local: nothing on the wire.
     std::atomic<bool> own_births_parked_next{false};
+    // Step A2: core_config::remote_cadence_frames ('session cadence N'): 0 =
+    // a remote's correction waits only while the pacer is behind.  Read at
+    // every SessionStart, applied to a running core at once, kept in the
+    // capture's header.  Host-local: nothing on the wire.
+    std::atomic<uint32_t> remote_cadence_next{0};
 
     // ------------------------------------------------------------ the mailbox
     // Design 3.2 "Receive": every Session* opcode's bytes, in arrival order.  A
@@ -454,6 +459,7 @@ namespace {
     struct mailbox_entry {
         int code = 0;
         std::string bytes;
+        bmmo::net::microseconds received = 0;   // the transport's stamp (step A5's measure)
     };
     class core_mailbox {
     public:
@@ -462,7 +468,7 @@ namespace {
         // gone since FULL step LGD.
         static constexpr size_t kMaxSnapshots = 64;
 
-        void push(int code, const void* data, size_t size) {
+        void push(int code, const void* data, size_t size, bmmo::net::microseconds received = 0) {
             std::lock_guard lk(mutex_);
             if (code == bmmo::SessionSnapshot) {
                 // The cap, on the snapshot entries only: the oldest one goes.
@@ -477,7 +483,7 @@ namespace {
                 }
                 ++snapshots_;
             }
-            entries_.push_back({code, std::string(static_cast<const char*>(data), size)});
+            entries_.push_back({code, std::string(static_cast<const char*>(data), size), received});
             ++pushed_;
         }
         std::deque<mailbox_entry> take() {
@@ -2134,7 +2140,8 @@ bool BallanceMMOClient::core_host_offer(const bmmo::net::message* network_msg) {
     case bmmo::SessionStartAt:       // FULL step SAXH (protocol 24)
     case bmmo::SessionStartStatus:
         if (!core_latched.load()) { core_stray.fetch_add(1); return true; }
-        mailbox.push(static_cast<int>(raw->code), network_msg->data, static_cast<size_t>(network_msg->size));
+        mailbox.push(static_cast<int>(raw->code), network_msg->data, static_cast<size_t>(network_msg->size),
+                     network_msg->received);
         return true;
     default:
         return false;
@@ -2298,6 +2305,8 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     // FULL step R6B: 'session own-births parked' keeps the in-window
     // scripted own birth on the parking path (the control arm).
     config.own_births_parked = own_births_parked_next.load();
+    config.remote_cadence_frames = remote_cadence_next.load();   // step A2
+    config.telemetry_host = bmmo::session_telemetry_msg::HostRetail;   // step A6
     // RC3 (step B5RX, the user: work as if snapshots did not exist): with
     // the session's snapshots off, a body-set change's full snapshot is no
     // correction, only names and rows.
@@ -2841,11 +2850,11 @@ void BallanceMMOClient::core_host_start_capture(const std::string& start_bytes) 
     for (const auto byte: msg.map.md5) md5 += std::format("{:02x}", static_cast<unsigned>(static_cast<uint8_t>(byte)));
     const std::string header = std::format(
         "bmmo-retail-capture 1 build={} session={} level={} map={} own={} snapshots={} cache={} parked={} trace={} "
-        "rollback={} nonblocking={} final_checkpoints={} checkpoint_ticks={}",
+        "rollback={} nonblocking={} final_checkpoints={} checkpoint_ticks={} cadence={}",
         physics_view_.build_id(), msg.session, msg.map.level, md5, db_.get_client_id(), snapshots_next.load() ? 1 : 0,
         static_cast<int>(capture_cache_next.load()), own_births_parked_next.load() ? 1 : 0, core_trace ? 1 : 0,
         core_rollback ? 1 : 0, anchor_freeze.nonblocking ? 1 : 0, diag_final_checkpoints() ? 1 : 0,
-        journal_checkpoint_ticks())
+        journal_checkpoint_ticks(), remote_cadence_next.load())
         + core_host_capture_players() + core_host_capture_requests();
     std::string error;
     auto prune = [directory] { bmmo::retail::session_capture::prune(directory, bmmo::retail::journal_files::kKeepCaptures - 1); };
@@ -3015,6 +3024,7 @@ std::string BallanceMMOClient::core_host_capture_verb(const std::string& rest) {
     snapshots_next.store(number("snapshots") != 0);
     capture_cache_next.store(static_cast<uint8_t>(number("cache")));
     own_births_parked_next.store(number("parked") != 0);
+    remote_cadence_next.store(static_cast<uint32_t>(std::max(0LL, number("cadence"))));   // older captures: 0
     core_trace = number("trace") != 0;
     core_rollback = number("rollback") != 0;
     anchor_freeze.nonblocking = number("nonblocking") != 0;
@@ -3160,6 +3170,10 @@ void BallanceMMOClient::core_host_drain() {
                 core_host_end_local("ended by the server: " + msg.reason);
             continue;
         }
+        // Step A5's measure: from the transport's stamp to the handover.
+        if (entry.code == bmmo::SessionRemoteInput && entry.received
+                && !bmmo::retail::session_capture::instance().replaying())
+            host.core->note_inbound_wait((transport().local_timestamp() - entry.received) / 1000.0);
         core_host_dispatch(entry.code, entry.bytes);
     }
     core_host_capture_idle();
@@ -4141,17 +4155,23 @@ void BallanceMMOClient::core_host_frame() {
         frame_times.session = host.session;
         frame_times.have_last = false;
     }
-    if (frame_times.have_last)
-        frame_times.interval.note(std::chrono::duration<double, std::milli>(frame_started - frame_times.last).count());
+    double interval_ms = -1.0;
+    if (frame_times.have_last) {
+        interval_ms = std::chrono::duration<double, std::milli>(frame_started - frame_times.last).count();
+        frame_times.interval.note(interval_ms);
+    }
     frame_times.last = frame_started;
     frame_times.have_last = true;
     struct frame_time_scope {
         std::chrono::steady_clock::time_point started;
+        double interval_ms;
         ~frame_time_scope() {
-            frame_times.frame.note(
-                    std::chrono::duration<double, std::milli>(bmmo::retail::host_clock().now(bs::clock_site::retail_display) - started).count());
+            const double ms =
+                    std::chrono::duration<double, std::milli>(bmmo::retail::host_clock().now(bs::clock_site::retail_display) - started).count();
+            frame_times.frame.note(ms);
+            if (host.core) host.core->note_frame_time(interval_ms, ms);   // step A6: the telemetry window
         }
-    } frame_time{frame_started};
+    } frame_time{frame_started, interval_ms};
     std::string error;
     // Step BALL: the airship ghosts' CK matrices are physics_RT's for the
     // whole frame (ghost_pins above), the stream's again after it.
@@ -4391,6 +4411,14 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
         const auto& memo = bmmo::game::slot_memo_totals();
         logger_->Info("Physics session: %s", memo.line(bmmo::game::slot_memo_mode_from_env()).c_str());
         for (const std::string& note: memo.notes) logger_->Warn("Physics session: %s", note.c_str());
+    }
+    {   // T3C: find_entity's name cache (bridge v37), this thread's lookups since the process started
+        const bmmo_physics_lookup_totals t = physics_view_.lookup_totals();
+        static const char* const modes[] = {"off", "on", "verify"};
+        logger_->Info("Physics session: lookup_cache: mode=%s hits=%llu fills=%llu shared=%llu verified=%llu mismatches=%llu",
+                      t.cache_mode < 3 ? modes[t.cache_mode] : "?", static_cast<unsigned long long>(t.cache_hits),
+                      static_cast<unsigned long long>(t.cache_fills), static_cast<unsigned long long>(t.cache_shared),
+                      static_cast<unsigned long long>(t.cache_verified), static_cast<unsigned long long>(t.cache_mismatches));
     }
     if (host.core && host.core->session_phase() != bs::client_core_state::phase::idle) host.core->end(reason);
     // Step WG4 (world-agreement-gaps design 2.3 "Release"): the level
@@ -5969,6 +5997,20 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
                            host.sound_skipped_queued, host.sound_reset_failed, host.sound_checks, host.sound_bound,
                            host.sound_unbound);
     }
+    if (what == "cadence") {
+        // Step A2: 'session cadence N|status' (core_config::
+        // remote_cadence_frames, 0-16): for the next session and, at once,
+        // for a running core.
+        if (!value.empty() && value != "status") {
+            char* end = nullptr;
+            const long n = std::strtol(value.c_str(), &end, 10);
+            if (end == value.c_str() || *end || n < 0 || n > 16) return "error usage: session cadence <0-16>|status";
+            remote_cadence_next.store(static_cast<uint32_t>(n));
+            if (core_session_running()) host.core->config.remote_cadence_frames = static_cast<uint32_t>(n);
+        }
+        return std::format("ok cadence next={} running={}", remote_cadence_next.load(),
+                           core_session_running() ? std::to_string(host.core->config.remote_cadence_frames) : "none");
+    }
     if (what == "drop-birth") {
         // A testing tool (R1 (c)): the next own Physicalize of this core
         // session never reaches the server (hooks.filter_event).
@@ -5982,7 +6024,7 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
            "session drop-birth | session hold-event TYPE:N:MS|TYPE:N:drop|off | session force-own-move <n> [after <k>] | "
            "session placement | session probes | session activate <script> at b+<n>|<tick> | "
            "session cache off|on|verify|status | session snapshots on|off|status | "
-           "session own-births parked|remade|status | "
+           "session own-births parked|remade|status | session cadence <0-16>|status | "
            "session hold blocking|nonblocking|status | session hold shots DIR|off";
 }
 
@@ -6589,13 +6631,30 @@ std::string BallanceMMOClient::core_host_overlay_text() {
     auto& core = *host.core;
     const auto& rs = core.rollback_stats();
     text += std::format("Tick: {}\n", core.current_tick());
-    text += std::format("Snapshots: {} ok, {} corrected\n", rs.matched, rs.mismatched);
-    if (rs.snapshots)
-        text += std::format("Rollbacks: {} ({:.0f}%), {} ticks resim\n", rs.rollbacks,
-                            100.0 * static_cast<double>(rs.mismatched) / static_cast<double>(rs.snapshots), rs.resim_ticks);
-    text += std::format("Max error: {:.3f} m\n", rs.max_error);
+    if (rs.snapshots) {
+        text += std::format("Snapshots: {} ok, {} corrected\n", rs.matched, rs.mismatched);
+        text += std::format("Max error: {:.3f} m\n", rs.max_error);
+    }
+    // Every rollback class (with the snapshots off, the default, the input
+    // corrections are nearly all of them).
+    text += std::format("Rollbacks: {}, {} ticks resim\n", rs.rollbacks, rs.resim_ticks);
     if (rs.too_far || rs.frozen || core.resyncs_sent())
         text += std::format("Too far: {}  Frozen: {}  Resyncs: {}\n", rs.too_far, rs.frozen, core.resyncs_sent());
     if (!core.remotes().empty()) text += std::format("Remote balls: {}\n", core.remotes().size());
+    // Step A6: the last telemetry window the server got (every 10 s).
+    if (const auto* t = core.last_telemetry()) {
+        const auto ms = [](uint16_t tenths) { return tenths / 10.0; };
+        const double seconds = t->ticks / static_cast<double>(bmmo::session::TICK_RATE);
+        text += std::format("Last {:.0f} s (to tick {}):\n", seconds, t->tick);
+        text += std::format("  Frame p50 {:.1f}  p99 {:.1f}  p999 {:.1f}  max {:.1f} ms\n", ms(t->interval_p50),
+                            ms(t->interval_p99), ms(t->interval_p999), ms(t->interval_max));
+        text += std::format("  Frames over 33 / 50 / 100 ms: {} / {} / {}\n", t->over_33, t->over_50, t->over_100);
+        text += std::format("  Session work p99 {:.1f}  max {:.1f} ms\n", ms(t->work_p99), ms(t->work_max));
+        text += std::format("  Rollbacks {:.1f}/s, {:.1f} ticks each\n", seconds > 0 ? t->rewinds / seconds : 0.0,
+                            t->rewinds ? static_cast<double>(t->replayed) / t->rewinds : 0.0);
+        text += std::format("  Relay wait p50 {:.1f}  p99 {:.1f} ms\n", ms(t->inbound_p50), ms(t->inbound_p99));
+        text += std::format("  Behind max {:.1f} ticks  Resyncs {}  Holds {}  Starved {}\n", ms(t->behind_max),
+                            t->resyncs, t->holds, t->starved);
+    }
     return text;
 }

@@ -56,10 +56,24 @@ namespace bmmo::session {
             ++s.subst_deferred_;
             return;
         }
-        if (s.pacer_behind_ >= bmmo::session::kRemoteCoalesceBehind
-                && !s.remote_replay_pacer_.due(current_tick(), s.input_rewind_tick_, reach, true)) {
-            ++s.input_rewinds_deferred_;
-            return;
+        // Step A2: with config.remote_cadence_frames a remote's correction
+        // waits on schedule too - but not a pending own one, nor one of a
+        // ball near the own ball (kRemoteCadenceNearMeters).
+        const bool behind = s.pacer_behind_ >= bmmo::session::kRemoteCoalesceBehind;
+        const bool cadence = config.remote_cadence_frames != 0 && !s.input_rewind_own_ && !s.input_rewind_has_own_;
+        if (behind || cadence) {
+            const uint32_t standard_frames = s.remote_replay_pacer_.coalesce();
+            const uint32_t frames = !cadence ? standard_frames
+                : behind ? std::max(config.remote_cadence_frames, standard_frames) : config.remote_cadence_frames;
+            if (!s.remote_replay_pacer_.due(current_tick(), s.input_rewind_tick_, reach, true, frames)) {
+                if (behind || !correction_near_own_ball()) {
+                    ++s.input_rewinds_deferred_;
+                    return;
+                }
+                ++s.input_rewinds_near_;
+            } else if (cadence && s.remote_replay_pacer_.recent(frames)) {
+                ++s.input_rewinds_deadline_;   // the reach bound the wait
+            }
         }
         const uint32_t anchor = s.input_rewind_tick_;
         const std::string entity = s.input_rewind_entity_;
@@ -124,6 +138,22 @@ namespace bmmo::session {
                  static_cast<unsigned long long>(s.trafo_missed_));
             if (!s.resync_pending_) request_resync("a trafo input could not be replayed", true);
         }
+    }
+
+    // Step A2: whether a ball the pending replay corrects is within
+    // kRemoteCadenceNearMeters of the own ball in the newest record.
+    bool session_client_core::correction_near_own_ball() const {
+        const uint32_t now = current_tick();
+        bmmo_physics_body_state own{}, other{};
+        if (!s.rollback_.recorded_body_state(platform_.own_replica_name(), now, own)) return false;
+        constexpr double r2 = bmmo::session::kRemoteCadenceNearMeters * bmmo::session::kRemoteCadenceNearMeters;
+        for (const auto& entity: s.input_rewind_entities_) {
+            if (!s.rollback_.recorded_body_state(entity, now, other)) continue;
+            double d2 = 0.0;
+            for (int i = 0; i < 3; ++i) d2 += (own.position[i] - other.position[i]) * (own.position[i] - other.position[i]);
+            if (d2 < r2) return true;
+        }
+        return false;
     }
 
     // The reach's cap from a measured rewind before the session needs a
@@ -526,17 +556,24 @@ namespace bmmo::session {
     bool session_client_core::recorded_input_at(const std::string& entity, uint32_t tick,
                                                 bmmo::session::input_frame& out) const {
         const std::map<uint32_t, bmmo::session::input_frame>* inputs = nullptr;
+        const std::map<uint32_t, bmmo::session::input_hint>* hints = nullptr;
         if (entity == platform_.own_replica_name()) inputs = &s.own_inputs_;
         else
             for (const auto& [id, remote]: s.remotes_)
-                if (remote.entity == entity) inputs = &remote.inputs;
+                if (remote.entity == entity) {
+                    inputs = &remote.inputs;
+                    hints = &remote.hints;
+                }
         // Gap L, L2 (step EL7): a life whose name is not the player's
         // current one (H names one clone per life) reads that player's
         // ring, found by the life log; frames of an earlier lifetime stay
         // in the ring.
         if (!inputs && !entity.empty() && entity != platform_.own_replica_name())
             if (const uint32_t player = mirror_player_of(entity); player != 0)
-                if (const auto it = s.remotes_.find(player); it != s.remotes_.end()) inputs = &it->second.inputs;
+                if (const auto it = s.remotes_.find(player); it != s.remotes_.end()) {
+                    inputs = &it->second.inputs;
+                    hints = &it->second.hints;
+                }
         if (!inputs) return false;
         if (inputs == &s.own_inputs_) {
             auto it = inputs->find(tick);
@@ -550,7 +587,10 @@ namespace bmmo::session {
         // predictor's (live_drive), step RC1 - so a replay re-predicts the
         // tail instead of keeping the prediction recorded before the change
         // arrived; none before the first relayed frame, where the recorded
-        // prediction stands.
+        // prediction stands.  Protocol 37: in the tail, that newest frame
+        // with the keys the owner's queued frames hold there, where the
+        // server has said (hinted_frame) - live_drive's rule again.
+        if (hints && bmmo::session::hinted_frame(*inputs, *hints, tick, out)) return true;
         const auto* frame = bmmo::session::relay_frame_or_newest(*inputs, tick);
         if (!frame) return false;
         out = *frame;
@@ -1127,6 +1167,7 @@ namespace bmmo::session {
             const std::string text = window_text(tick, host_values());
             if (!text.empty() && platform_.hooks.window) platform_.hooks.window(text);
         }
+        if (s.assigned_) telemetry_tick(tick);   // step A6
         // The box's own view of this frame, last: the fingerprint of the
         // world the corrections above have finished with, and the bodies
         // when a checkpoint is due.

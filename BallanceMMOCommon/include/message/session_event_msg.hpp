@@ -34,6 +34,10 @@ namespace bmmo {
         uint8_t ball_type = 0;              // Physicalize; Trafo: the piece type
         uint8_t flags = 0;                  // Physicalize: session::PHYSICALIZE_FLAG_*; Trafo: TRAFO_* (session/trafo_input.hpp)
         float position[3] = {};             // Physicalize; Trafo: the explosion's referential (zeros for a reset)
+        // Trafo (protocol 39): the join order of the event's life, the seed's
+        // member term (trafo-replication design 2.6); the server fills it on
+        // relay, a client sends 255.
+        uint8_t join_order = 255;
         float rotation[9] = {};             // Physicalize: world matrix rows (right, up, dir)
         session::ball_recipe recipe;        // Physicalize
         session::airship_release_state release;   // AirshipRelease
@@ -173,6 +177,7 @@ namespace bmmo {
                     raw.write(reinterpret_cast<const char*>(&ball_type), sizeof(ball_type));
                     raw.write(reinterpret_cast<const char*>(&flags), sizeof(flags));
                     raw.write(reinterpret_cast<const char*>(position), sizeof(position));
+                    raw.write(reinterpret_cast<const char*>(&join_order), sizeof(join_order));
                     break;
             }
             raw.write(reinterpret_cast<const char*>(&origin_tick), sizeof(origin_tick));
@@ -220,6 +225,7 @@ namespace bmmo {
                     if (!message_utils::read_variable(raw, &ball_type)) return false;
                     if (!message_utils::read_variable(raw, &flags)) return false;
                     if (!raw.read(reinterpret_cast<char*>(position), sizeof(position))) return false;
+                    if (!message_utils::read_variable(raw, &join_order)) return false;
                     break;
             }
             if (!message_utils::read_variable(raw, &origin_tick)) return false;

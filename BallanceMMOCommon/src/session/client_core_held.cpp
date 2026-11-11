@@ -641,6 +641,9 @@ namespace bmmo::session {
         }
         if (has_remote) {
             ++s.input_rewinds_carried_;
+            // Step A2: on the cadence the lifecycle rewind is the input
+            // replay's frame - the next one waits from it.
+            if (config.remote_cadence_frames != 0) s.remote_replay_pacer_.ran();
             for (const auto& [id, remote]: s.remotes_)
                 if (s.input_rewind_entities_.count(remote.entity)) ++s.window_inrew_src_[id];
         }

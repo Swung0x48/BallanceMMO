@@ -122,6 +122,8 @@ namespace bmmo {
         AutomationVerdict,
         // Protocol 34: the players whose legacy ball stream a session member does not need (ball_state_mute_msg.hpp).
         BallStateMute,
+        // Protocol 38 (step A6): a member's frame times and rewinds for the server's log (session_telemetry_msg.hpp).
+        SessionTelemetry,
     };
 
     template<typename T, opcode C = None>

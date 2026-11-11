@@ -49,6 +49,9 @@ namespace bmmo {
     //   ledger lives (protocol 21, step TRL) after the ledger: one u16 per
     //               ledger entry, the life of the set it describes (a set
     //               is (player, life)'s); always there since protocol 34.
+    //   ledger join orders (protocol 39) after the lives: one u8 per entry,
+    //               the join order of its life (trafo_ledger_entry::
+    //               join_order), always there.
     //
     // Protocol 34: those sections are the state's BODY (body_bytes /
     // read_body_bytes, the layout above, with scripts and savestate raw and
@@ -178,6 +181,8 @@ namespace bmmo {
             }
             for (uint16_t i = 0; i < ledger_count; ++i)
                 raw.write(reinterpret_cast<const char*>(&trafo_ledger[i].life), sizeof(trafo_ledger[i].life));
+            for (uint16_t i = 0; i < ledger_count; ++i)
+                raw.write(reinterpret_cast<const char*>(&trafo_ledger[i].join_order), sizeof(trafo_ledger[i].join_order));
         }
 
         bool read_body(std::stringstream& raw, std::streamoff end) {
@@ -252,6 +257,9 @@ namespace bmmo {
             // The entries' lives (protocol 21; always written since 34).
             for (auto& e: trafo_ledger)
                 if (!message_utils::read_variable(raw, &e.life) || e.life == 0) return false;
+            // The entries' join orders (protocol 39).
+            for (auto& e: trafo_ledger)
+                if (!message_utils::read_variable(raw, &e.join_order)) return false;
             return true;
         }
 

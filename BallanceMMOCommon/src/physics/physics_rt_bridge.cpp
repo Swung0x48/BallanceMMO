@@ -373,12 +373,17 @@ namespace {
         return 1;
     }
 
+    // v36 (T3C): a body by the entity's CK id.
+    int32_t api_has_body_id(void* manager, uint32_t entity_id) {
+        return manager && bmmo::physics::has_body_id(static_cast<CKIpionManager*>(manager), entity_id) ? 1 : 0;
+    }
+
     // v31 (FULL step SRT2B): the record capture's entity lookup scope.
     int32_t api_lookup_scope(void* manager, int32_t begin, uint32_t flags, bmmo_physics_lookup_totals* totals) {
         if (!manager) return 0;
         CKIpionManager* physics = static_cast<CKIpionManager*>(manager);
-        if (begin) bmmo::physics::entity_lookup_scope_begin(physics, (flags & BMMO_LOOKUP_SCOPE_VERIFY) != 0);
-        else bmmo::physics::entity_lookup_scope_end(physics);
+        if (begin > 0) bmmo::physics::entity_lookup_scope_begin(physics, (flags & BMMO_LOOKUP_SCOPE_VERIFY) != 0);
+        else if (begin == 0) bmmo::physics::entity_lookup_scope_end(physics);
         if (totals) *totals = bmmo::physics::entity_lookup_totals();
         return 1;
     }
@@ -849,7 +854,7 @@ namespace {
         bmmo::physics::airship_zone_release(static_cast<CKIpionManager*>(manager), entity_name, tick, undo != 0);
     }
 
-    // v35 (TASX): the x87 model's game-thread precision at a level load.
+    // v38 (TASX): the x87 model's game-thread precision at a level load.
     void api_reset_game_precision(void* manager) {
         if (manager) static_cast<CKIpionManager*>(manager)->ResetGamePrecision();
     }
@@ -1148,6 +1153,7 @@ namespace {
         api_drain_muted_recipes,
         api_airship_zone_release,
         api_capture_world_hash_tick,
+        api_has_body_id,
         api_reset_game_precision,
     };
 }

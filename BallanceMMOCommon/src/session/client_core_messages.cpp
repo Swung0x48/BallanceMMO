@@ -416,6 +416,7 @@ namespace bmmo::session {
                 if (bmmo::session::relay_store(remote.inputs, tick, frame, bmmo::session::kRelayRing)
                         == bmmo::session::relay_store_result::stored)
                     note_input_correction(remote, tick, frame);
+                if (bmmo::session::hints_confirmed(remote.hints, tick, frame)) ++s.hint_wrong_;
                 if (remote.have_input && static_cast<int32_t>(tick - remote.input_tick) < 0) continue;   // out of order
                 remote.input = frame;
                 remote.input_tick = tick;
@@ -423,6 +424,68 @@ namespace bmmo::session {
             }
         }
         if (events_taken) note_relay_span(msg);
+        take_hints(msg);
+    }
+
+    // Protocol 37: what the other members' frames queued at the server hold
+    // for the ticks after this datagram's newest.  After the entries, so the
+    // rings hold everything the datagram applied.  A hint for a tick already
+    // relayed says nothing new, and one for a player with no mirror here has
+    // nothing to predict.
+    void session_client_core::take_hints(const bmmo::session_remote_input_msg& msg) {
+        if (!msg.hints.empty()) s.hint_bytes_ += bmmo::session::kHintCountBytes;
+        for (const auto& hint: msg.hints) {
+            s.hint_bytes_ += bmmo::session::hint_bytes(hint);
+            const auto it = s.remotes_.find(hint.player);
+            if (it == s.remotes_.end() || it->second.inputs.empty()) continue;
+            auto& remote = it->second;
+            uint32_t earliest = 0;
+            bool news = false;
+            for (size_t i = 0; i < hint.ticks.size(); ++i) {
+                const uint32_t tick = msg.tick + 1 + static_cast<uint32_t>(i);
+                if (tick <= remote.inputs.rbegin()->first) continue;
+                if (!bmmo::session::hint_store(remote.hints, tick, hint.ticks[i])) continue;
+                ++s.hint_news_;
+                if (!news) earliest = tick;
+                news = true;
+            }
+            // The ticks from the first changed hint on that this world has
+            // stepped: each ran on the prediction of its time.
+            if (!news || !s.assigned_) continue;
+            for (uint32_t tick = earliest; static_cast<int32_t>(tick - current_tick()) <= 0; ++tick)
+                if (note_hint(remote, tick)) break;
+        }
+    }
+
+    // A hint for a tick this client has already simulated: note_input_correction's
+    // rule with the hinted frame as the news, and nothing counted or asked
+    // for when the tick is out of reach - the applied frame's arrival judges
+    // that.  True once a replay from `tick` (or before it) is due, which
+    // re-predicts every later tick as well.
+    bool session_client_core::note_hint(const client_core_state::remote_ball& remote, uint32_t tick) {
+        const std::string& entity = remote.entity;
+        if (!config.rollback || !config.input_rewind || entity.empty() || tick == 0) return true;
+        if (s.state_anchored_ && static_cast<int32_t>(tick - s.resync_base_) < 0) return false;
+        bmmo::session::input_frame hinted{};
+        if (!bmmo::session::hinted_frame(remote.inputs, remote.hints, tick, hinted)) return false;
+        const uint32_t anchor = tick - 1;
+        if (current_tick() - anchor > window_rewind_reach(tick) || !s.rollback_.rewindable(anchor)) {
+            ++s.hint_late_;
+            return false;
+        }
+        if (!s.rollback_.recorded_body(entity, tick)) return false;
+        if (remote.physicalized && tick == remote.born_tick && !remakes_birth(remote)) return false;
+        bmmo::session::input_frame predicted{};
+        if (s.rollback_.recorded_input(entity, tick, predicted) && same_frame(predicted, hinted)) return false;
+        ++s.hint_rewinds_;
+        if (!s.input_rewind_pending_ || static_cast<int32_t>(tick - s.input_rewind_tick_) < 0) {
+            s.input_rewind_pending_ = true;
+            s.input_rewind_tick_ = tick;
+            s.input_rewind_entity_ = entity;
+            s.input_rewind_own_ = false;
+        }
+        s.input_rewind_entities_.insert(entity);
+        return true;
     }
 
     // Protocol 33 (docs/relay-protocol-design.md 4.9): the events section -
@@ -483,6 +546,7 @@ namespace bmmo::session {
         s.relay_held_ = s.tick_base_ - 1;
         s.relay_parts_.clear();
         s.relay_bases_.clear();
+        for (auto& [player, remote]: s.remotes_) remote.hints.clear();
     }
 
     // A relayed frame for a tick this client has already simulated: if it

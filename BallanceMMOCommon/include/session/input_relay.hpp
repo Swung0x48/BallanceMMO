@@ -123,6 +123,44 @@ namespace bmmo::session {
         return tick - source >= kHeldInlineDistance || static_cast<int32_t>(source - epoch) < 0;
     }
 
+    // ------------------------------------------------------------ hints
+    // Protocol 37 (docs/relay-protocol-design.md 4.10).  A member's frame
+    // usually reaches the server ticks before the server steps it - a tick is
+    // stepped when the last member's frame is in - and until the applied
+    // frame is relayed every other client predicts that member with its last
+    // applied frame.  So a datagram also says what the other members' frames
+    // already queued at the server hold for the ticks after the newest
+    // applied one: their keys and flags, as a prediction.  The applied frame
+    // stays the only truth (a lead hold can still drop a queued frame), so a
+    // hint is neither journalled nor acknowledged: it replaces the hold-last
+    // guess for the ticks it names, and a client that has stepped one of
+    // them on other keys replays from there - as deep as the hint is early,
+    // not as deep as the applied frame is late.
+    struct input_hint {
+        uint8_t keys = 0;
+        uint8_t flags = 0;
+        bool operator==(const input_hint& o) const { return keys == o.keys && flags == o.flags; }
+        bool operator!=(const input_hint& o) const { return !(*this == o); }
+    };
+    inline input_hint hint_of(const input_frame& f) { return input_hint{f.keys, f.flags}; }
+    // How many ticks past the newest applied one an entry covers at most.
+    constexpr size_t kHintMaxTicks = 64;
+    // One member's queued frames, for the ticks newest + 1 .. newest + ticks.size().
+    struct hint_entry {
+        uint32_t player = 0;
+        std::vector<input_hint> ticks;
+    };
+    // On the wire: player u32, nticks u8, nruns u8, per run len u8, keys u8,
+    // flags u8; the section's count byte only in a datagram that carries any.
+    inline size_t hint_runs(const hint_entry& e) {
+        size_t runs = 0;
+        for (size_t i = 0; i < e.ticks.size(); ++i)
+            if (i == 0 || e.ticks[i] != e.ticks[i - 1]) ++runs;
+        return runs;
+    }
+    inline size_t hint_bytes(const hint_entry& e) { return 4 + 1 + 1 + 3 * hint_runs(e); }
+    constexpr size_t kHintCountBytes = 1;
+
     // ------------------------------------------------------------ server
     // The session's applied frames for the last kRelayHistory ticks with
     // their heading codes, every player's camera bases, and what every
@@ -160,11 +198,31 @@ namespace bmmo::session {
             std::vector<held_entry> held;
             std::vector<std::pair<uint8_t, ball_recipe>> recipes;   // protocol 33
             std::vector<relay_event> events;
+            std::vector<hint_entry> hints;                           // protocol 37
         };
 
         bool empty() const { return ticks_.empty(); }
         uint32_t newest_tick() const { return ticks_.empty() ? 0 : ticks_.back().tick; }
-        void clear() { ticks_.clear(); held_.clear(); recipients_.clear(); bases_.clear(); recipes_.clear(); }
+        void clear() { ticks_.clear(); held_.clear(); recipients_.clear(); bases_.clear(); recipes_.clear(); hints_.clear(); }
+
+        // Protocol 37: the members' frames queued past the tick just pushed
+        // (push() forgets the previous tick's).  Kept only where some tick
+        // differs from the frame applied for that player now: the others the
+        // recipients' hold-last prediction already has right.
+        void set_hints(std::vector<hint_entry> queued) {
+            hints_.clear();
+            if (ticks_.empty()) return;
+            const auto& applied = ticks_.back().applied;
+            for (auto& q: queued) {
+                if (q.ticks.size() > kHintMaxTicks) q.ticks.resize(kHintMaxTicks);
+                const auto at = std::find_if(applied.begin(), applied.end(),
+                                             [&q](const applied_input& a) { return a.player == q.player; });
+                if (at == applied.end()) continue;
+                const input_hint now = hint_of(at->frame);
+                if (std::all_of(q.ticks.begin(), q.ticks.end(), [now](const input_hint& h) { return h == now; })) continue;
+                hints_.push_back(std::move(q));
+            }
+        }
 
         // Protocol 33 (docs/relay-protocol-design.md 4.9): a message the
         // server sends `to` reliably, for their relay too - in every datagram
@@ -196,6 +254,7 @@ namespace bmmo::session {
             while (ticks_.size() > kRelayHistory) ticks_.pop_front();
             for (auto& [player, bases]: bases_) bases.forget_before(ticks_.front().tick);
             rebuild_held();
+            hints_.clear();
         }
         // Every frame fresh (the tests' shape).
         void push(uint32_t tick, const std::vector<std::pair<uint32_t, input_frame>>& applied) {
@@ -350,6 +409,19 @@ namespace bmmo::session {
             }
             carry_events(r, out, used, budget, open);
             if (out.empty()) open();
+            // Protocol 37: each hint where it fits.  One that fits nowhere is
+            // left out: the next tick's datagram carries what is queued then.
+            for (const hint_entry& h: hints_) {
+                if (h.player == recipient) continue;
+                const size_t bytes = hint_bytes(h);
+                for (size_t i = 0; i < out.size(); ++i) {
+                    const size_t section = out[i].hints.empty() ? kHintCountBytes : 0;
+                    if (used[i] + section + bytes > budget) continue;
+                    out[i].hints.push_back(h);
+                    used[i] += section + bytes;
+                    break;
+                }
+            }
             return out;
         }
 
@@ -512,6 +584,7 @@ namespace bmmo::session {
         std::map<uint32_t, recipient_state> recipients_;
         std::map<uint32_t, camera_bases> bases_;   // per player, the codes' bases
         recipe_numbering recipes_;                 // protocol 33: the session's recipes
+        std::vector<hint_entry> hints_;            // protocol 37: queued past the newest tick
     };
 
     // ------------------------------------------------------------ client
@@ -566,6 +639,51 @@ namespace bmmo::session {
         if (const input_frame* frame = relay_frame_or_earlier(ring, tick)) return frame;
         if (ring.empty() || tick < ring.rbegin()->first) return nullptr;
         return &ring.rbegin()->second;
+    }
+
+    // Protocol 37: a hint into a mirror's map, by tick.  True when it is news
+    // (a tick not held, or held with another value).  The map keeps the
+    // newest `cap` ticks; the hints at or below the newest relayed frame are
+    // dropped by the caller as the frames arrive (hints_confirmed).
+    inline bool hint_store(std::map<uint32_t, input_hint>& hints, uint32_t tick, input_hint hint,
+                           size_t cap = 2 * kHintMaxTicks) {
+        const auto [it, inserted] = hints.emplace(tick, hint);
+        if (!inserted) {
+            if (it->second == hint) return false;
+            it->second = hint;
+        }
+        while (hints.size() > cap) hints.erase(hints.begin());
+        return true;
+    }
+    // The relayed frame of `tick` arrived: the hints up to it have served.
+    // True when the hint held for that tick had said otherwise (a queued
+    // frame the server then did not apply: a lead hold, a late straggler).
+    inline bool hints_confirmed(std::map<uint32_t, input_hint>& hints, uint32_t tick, const input_frame& relayed) {
+        const auto it = hints.find(tick);
+        const bool wrong = it != hints.end() && it->second != hint_of(relayed);
+        hints.erase(hints.begin(), hints.upper_bound(tick));
+        return wrong;
+    }
+    // The frame a mirror is predicted with at a tick past its newest relayed
+    // frame when the server has said what the owner's queued frames hold
+    // there: that newest frame with the keys and flags of the hint at
+    // `tick`, or of the newest hint before it (the owner's frames past the
+    // hints are still to come, so hold-last from what is known).  False when
+    // no hint lies past the newest relayed frame and at or before `tick`: the
+    // caller's hold-last stands.
+    inline bool hinted_frame(const std::map<uint32_t, input_frame>& ring, const std::map<uint32_t, input_hint>& hints,
+                             uint32_t tick, input_frame& out) {
+        if (ring.empty() || hints.empty()) return false;
+        const uint32_t newest = ring.rbegin()->first;
+        if (tick <= newest) return false;
+        auto it = hints.upper_bound(tick);
+        if (it == hints.begin()) return false;
+        --it;
+        if (it->first <= newest) return false;
+        out = ring.rbegin()->second;
+        out.keys = it->second.keys;
+        out.flags = it->second.flags;
+        return true;
     }
 
     // Which (player, tick) frames this client has already taken, for the

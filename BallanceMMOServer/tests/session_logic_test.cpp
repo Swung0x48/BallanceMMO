@@ -753,6 +753,19 @@ TEST(OwnCorrection, PacerRunsTheFirstAtOnceAndAtTheReachDeadline) {
     EXPECT_TRUE(pacer.due(507, 505, 48, true));
 }
 
+// Step A2: the remote cadence asks the same pacer with its own frame count.
+TEST(OwnCorrection, PacerTakesTheCadencesFrameCount) {
+    own_replay_pacer pacer(3);
+    pacer.frame();
+    pacer.ran();
+    for (uint32_t k = 0; k < 3; ++k) pacer.frame();
+    EXPECT_FALSE(pacer.recent(3));
+    EXPECT_TRUE(pacer.due(503, 500, 48, true));
+    EXPECT_TRUE(pacer.recent(6));
+    EXPECT_FALSE(pacer.due(503, 500, 48, true, 6));
+    EXPECT_TRUE(pacer.due(503, 456, 48, true, 6));   // 504 - 455 = 49: the reach's deadline
+}
+
 // The end of an episode: the last notices arrive, then the server's header
 // says it has our frames again.  The waiting replay runs on that frame, not
 // at the rate limit's or the reach's edge, so the own ball is right as soon

@@ -104,6 +104,7 @@
 #include "../message/session_resync_state_msg.hpp"
 #include "../message/session_start_msg.hpp"
 #include "../message/session_clock_ack_msg.hpp"
+#include "../message/session_telemetry_msg.hpp"
 #include "../message/session_start_at_msg.hpp"
 #include "../message/session_start_status_msg.hpp"
 #include "start_handshake.hpp"
@@ -240,6 +241,9 @@ namespace bmmo::session {
             pending_birth birth{};
             bool birth_known = false;
             std::map<uint32_t, bmmo::session::input_frame> inputs;   // relayed frames by tick
+            // Protocol 37: what the owner's frames queued at the server hold
+            // for ticks past the newest relayed frame (input_relay.hpp).
+            std::map<uint32_t, bmmo::session::input_hint> hints;
             bmmo::session::body_corrector corrector;
             uint64_t blends = 0, hard_sets = 0;
             // Step BALA (the airship rule): the tick this world first found
@@ -710,6 +714,11 @@ namespace bmmo::session {
         uint64_t relay_bodiless_ = 0;
         // ...and for a mirror's birth tick, which no replay can change.
         uint64_t relay_birth_frozen_ = 0;
+        // Protocol 37: hint ticks taken as news, the replays they asked for,
+        // those the applied frame then contradicted, those for a tick
+        // stepped past the reach (the applied frame's own correction decides
+        // there), and the bytes of every hint section received.
+        uint64_t hint_news_ = 0, hint_rewinds_ = 0, hint_wrong_ = 0, hint_late_ = 0, hint_bytes_ = 0;
         // FULL step SLX (Q-SLOT (a)): mirror steps whose drive pre_step
         // re-chose from the relayed frame for that very tick, which reached
         // the ring after post_step(T - 1) chose another (the drain hits).
@@ -740,6 +749,7 @@ namespace bmmo::session {
         // is kept per source player because a late player shows up in the
         // others' lag for its frames alone.
         static constexpr uint32_t kWindowTicks = 60;
+        static constexpr uint32_t kTelemetryTicks = 660;   // step A6: a SessionTelemetry every 10 s
         uint32_t window_index_ = 0xFFFFFFFFu;
         std::map<uint32_t, std::map<uint32_t, uint32_t>> window_lag_;   // source -> lag -> first arrivals
         std::map<uint32_t, uint32_t> window_inrew_src_;                 // source -> input rewinds naming its ball
@@ -807,6 +817,19 @@ namespace bmmo::session {
         bmmo::session::own_replay_pacer remote_replay_pacer_{bmmo::session::kRemoteReplayCoalesceFrames};
         double pacer_behind_ = 0.0;
         uint64_t input_rewinds_deferred_ = 0;
+        uint64_t input_rewinds_deadline_ = 0;   // step A2: cadence waits the reach cut short
+        uint64_t input_rewinds_near_ = 0;       // step A2: not held, a corrected ball near the own one
+        // Step A6: the telemetry window (session_telemetry_msg): the host's
+        // frame times since the window began, and the counters then.
+        struct telemetry_window {
+            bool based = false;
+            uint32_t first_tick = 0;
+            std::vector<float> interval, work, inbound;
+            uint64_t rewinds = 0, replayed = 0, resyncs = 0, holds = 0, starved = 0;
+            double behind_max = 0.0;
+            bool have_last = false;          // the last window sent (the F3 panel's)
+            bmmo::session_telemetry last{};
+        } telemetry_;
         uint32_t subst_late_logs_ = 0, subst_unresolved_logs_ = 0;
         // The frames each uplink datagram carried (remember_sent), and the
         // notices of ticks not simulated yet with whether to correct them
@@ -1177,6 +1200,9 @@ namespace bmmo::session {
         // a retired life is gone ('no resume'); only a resync ledger that
         // still names it does (the server's state at S holds it).
         std::set<bmmo::session::trafo_key> trafo_retired_sets_;
+        // Protocol 38: the join orders resync ledgers gave, for lives this
+        // world was never told of (trafo_seed_of).
+        std::map<std::pair<uint32_t, uint16_t>, uint8_t> trafo_ledger_orders_;
         // Their pieces' entities and sets (the host's trafo_type_set at the
         // make): a snapshot row of one restores it only on a breach
         // (rollback_world::row_on_breach_only).
@@ -1267,6 +1293,20 @@ namespace bmmo::session {
         // them its behaviour is today's `rollback` alone.
         bool input_rewind = true;
         bool own_corrections = true;
+        // Step A2 (the rewind cadence): 0 = a remote's correction is put
+        // off only while the pacer is behind (kRemoteCoalesceBehind, up to
+        // kRemoteReplayCoalesceFrames frames); N = always, up to N frames
+        // after the last input replay, under the same reach deadline - the
+        // replay that runs carries every correction of the frames it
+        // waited.  Not held by it: a pending own correction (the own
+        // pacer's rule), and on schedule one of a ball within
+        // kRemoteCadenceNearMeters of the own ball.  Headless
+        // --remote-cadence N; retail 'session cadence N'.
+        uint32_t remote_cadence_frames = 0;
+        // Step A6: the SessionTelemetry this host sends every kTelemetryTicks
+        // (bmmo::session_telemetry_msg::host_kind; 0 = none).  Headless
+        // --no-telemetry sets 0.
+        uint8_t telemetry_host = 0;
         // Design 1.2 feature switch (R1): `lifecycle_rewind` - a remote birth
         // stamped in the past is made inside a replay at its tick
         // (make_remote_birth's pending path) and a late body change rewinds
@@ -1680,7 +1720,29 @@ namespace bmmo::session {
         // How far behind its schedule the host's pacer is this frame (the
         // expected frame less the one about to run), every counted frame:
         // a client that is behind coalesces remote corrections.
-        void note_pacer_behind(double behind_ticks) { s.pacer_behind_ = behind_ticks; }
+        void note_pacer_behind(double behind_ticks) {
+            s.pacer_behind_ = behind_ticks;
+            s.telemetry_.behind_max = std::max(s.telemetry_.behind_max, behind_ticks);   // step A6
+        }
+        // Step A6: one frame's times for the telemetry window, every frame -
+        // the period since the previous frame began (negative: none) and the
+        // core's work in it, in ms.  Measures only.
+        void note_frame_time(double interval_ms, double work_ms) {
+            if (!config.telemetry_host) return;
+            if (interval_ms >= 0.0) s.telemetry_.interval.push_back(static_cast<float>(interval_ms));
+            s.telemetry_.work.push_back(static_cast<float>(work_ms));
+        }
+        // Step A5's measure: how long a SessionRemoteInput waited between the
+        // transport's receive stamp and its handover to the core, in ms (the
+        // network thread's poll and the wait for the frame).  Measures only.
+        void note_inbound_wait(double ms) {
+            if (config.telemetry_host && ms >= 0.0) s.telemetry_.inbound.push_back(static_cast<float>(ms));
+        }
+        // The last telemetry window this session sent (the F3 panel), or
+        // nullptr before the first one.
+        const bmmo::session_telemetry* last_telemetry() const {
+            return s.telemetry_.have_last ? &s.telemetry_.last : nullptr;
+        }
         // The input basis (design 1.2): the last camera reference seen,
         // nullptr until one was.
         const float (*previous_cam() const)[3] { return s.previous_cam_valid_ ? s.previous_cam_ : nullptr; }
@@ -2116,6 +2178,8 @@ namespace bmmo::session {
         // One replay for every input correction the frame collected (the
         // relay's and our own substituted frames').
         void replay_corrected_inputs();
+        bool correction_near_own_ball() const;   // step A2
+        void telemetry_tick(uint32_t tick);       // step A6
         void calibrate_rewind_cost();
         void retry_owed_resync();
         // Every rewind the core asks of the engine outside a snapshot
@@ -2236,6 +2300,8 @@ namespace bmmo::session {
                                    const bmmo::session::input_frame& relayed);
         // Protocol 29: the acknowledged span (client_core_messages.cpp).
         void note_relay_span(const bmmo::session_remote_input_msg& msg);
+        void take_hints(const bmmo::session_remote_input_msg& msg);
+        bool note_hint(const client_core_state::remote_ball& remote, uint32_t tick);
         bool deliver_relayed_events(const bmmo::session_remote_input_msg& msg);
         // The server's last fresh tick of ours, as its relay header says
         // (protocol 33: what our piggybacked events ride until).
@@ -2361,6 +2427,12 @@ namespace bmmo::session {
         // The own player's life (SessionStart's own entry; 1 before
         // protocol 18).
         uint16_t own_trafo_life() const { return s.own_member_life_ ? s.own_member_life_ : uint16_t{1}; }
+        // The seed of an explosion of (player, life) applied at `applied`
+        // (design 2.6): its member term is the life's join order under
+        // WORLD_TRAFO_SEED_JOIN_ORDER, else the player id; 0 for a reset.
+        // `stamped`: the join order the relayed event carried (255: none).
+        int32_t trafo_seed_of(uint32_t player, uint16_t life, uint32_t applied, uint8_t type, uint8_t flags,
+                              uint8_t stamped = 255);
         // The hold's report of an own activation, stamped for `due` (sent,
         // logged as an own input); before the assignment it waits.
         void hold_trafo(const trafo_report& report, uint32_t due, const char* why);

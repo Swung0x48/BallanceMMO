@@ -75,6 +75,7 @@
 #include <message/session_remote_input_msg.hpp>
 #include <message/session_resync_msg.hpp>
 #include <message/session_resync_state_msg.hpp>
+#include <message/session_telemetry_msg.hpp>
 
 // The core's state and its frame's steps are private (step E11); the tests
 // reach them through this friend.  steps{core}.<step>(...) calls a private
@@ -109,6 +110,7 @@ namespace bmmo::session {
         BMMO_CORE_STEP(sector_union_pass)
         BMMO_CORE_STEP(poll_own_sector)
         BMMO_CORE_STEP(replay_corrected_inputs)
+        BMMO_CORE_STEP(telemetry_tick)
         BMMO_CORE_STEP(retry_owed_resync)
         BMMO_CORE_STEP(take_forced_own)
         BMMO_CORE_STEP(play_forced_own)
@@ -7194,6 +7196,61 @@ namespace {
         EXPECT_EQ(text.find('\n'), std::string::npos);
     }
 
+    // Step A6: the first call only starts the telemetry window; one
+    // SessionTelemetry (reliable) once it spans kTelemetryTicks, with the
+    // window's frame times and the counters' deltas; nothing without
+    // telemetry_host.
+    TEST(SessionClientCoreReport, TelemetryEveryWindow) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        auto& s = state_of(core);
+        s.session_ = 5;
+        steps{core}.telemetry_tick(100);
+        EXPECT_TRUE(fake.sent.empty()) << "telemetry_host 0: nothing";
+        core.config.telemetry_host = bmmo::session_telemetry_msg::HostHeadless;
+        steps{core}.telemetry_tick(100);
+        EXPECT_TRUE(fake.sent.empty()) << "the first call starts the window";
+        for (int i = 0; i < 100; ++i) core.note_frame_time(15.0, 2.0);
+        core.note_frame_time(60.0, 40.0);
+        core.note_frame_time(120.0, 3.0);
+        core.note_pacer_behind(2.5);
+        core.note_inbound_wait(3.0);
+        core.note_inbound_wait(9.0);
+        s.resyncs_sent_ += 1;
+        s.input_starved_ += 3;
+        steps{core}.telemetry_tick(759);
+        EXPECT_TRUE(fake.sent.empty()) << "659 ticks: inside the window";
+        steps{core}.telemetry_tick(760);
+        ASSERT_EQ(fake.sent.size(), 1u);
+        EXPECT_EQ(fake.sent[0].second, send_mode::reliable);
+        const auto m = decode<bmmo::session_telemetry_msg>(fake.sent[0].first);
+        EXPECT_EQ(m.session, 5u);
+        EXPECT_EQ(m.tick, 760u);
+        EXPECT_EQ(m.host, bmmo::session_telemetry_msg::HostHeadless);
+        EXPECT_EQ(m.ticks, 660);
+        EXPECT_EQ(m.frames, 102);
+        EXPECT_EQ(m.interval_p50, 150);
+        EXPECT_EQ(m.interval_p99, 600) << "the 101st of 102";
+        EXPECT_EQ(m.interval_max, 1200);
+        EXPECT_EQ(m.over_33, 2);
+        EXPECT_EQ(m.over_50, 2);
+        EXPECT_EQ(m.over_100, 1);
+        EXPECT_EQ(m.work_max, 400);
+        EXPECT_EQ(m.resyncs, 1);
+        EXPECT_EQ(m.starved, 3);
+        EXPECT_EQ(m.behind_max, 25);
+        EXPECT_EQ(m.inbound_p50, 30);
+        EXPECT_EQ(m.inbound_max, 90);
+        steps{core}.telemetry_tick(1419);
+        EXPECT_EQ(fake.sent.size(), 1u) << "a new window from 760";
+        steps{core}.telemetry_tick(1420);
+        ASSERT_EQ(fake.sent.size(), 2u);
+        const auto next = decode<bmmo::session_telemetry_msg>(fake.sent[1].first);
+        EXPECT_EQ(next.frames, 0);
+        EXPECT_EQ(next.resyncs, 0);
+        EXPECT_EQ(next.behind_max, 0);
+    }
+
     // The window: line (design 1.3 step 31): nothing on the first edge
     // (the base is set), one line on each new window index with this
     // window's deltas (the host's rebases among them), the lag and the
@@ -9751,6 +9808,41 @@ namespace {
                                             bmmo::session::rollback_tracked{}, {});
     }
 
+    // Design 2.6 (protocol 38): under WORLD_TRAFO_SEED_JOIN_ORDER an
+    // explosion's seed mixes the life's join order, not the id - the own
+    // (SessionStart's entry: 2) and a remote (player 4: 0, then a test life
+    // of player 5 with 7) - so two sessions of a recipe seed alike.
+    TEST(SessionClientCoreTrafo, SeedsByJoinOrderUnderTheWorldOption) {
+        flow_fake fake;
+        trafo_fake t;
+        session_client_core core(trafo_rewind_platform(fake, t), trafo_caps());
+        trafo_tick_125(core, fake);
+        auto& s = state_of(core);
+        s.world_options_ |= bmmo::session::WORLD_TRAFO_SEED_JOIN_ORDER;
+        core.on_session_event(trafo_message(4, 1, 0, 126, 124));
+        set_test_life(core, 5, 7);
+        core.on_session_event(trafo_message(5, 2, 0, 126, 124));
+        // The server's stamp wins, the life's announcement not needed (a
+        // Trafo event is never parked): player 6, never announced, order 9.
+        auto stamped = trafo_message(6, 0, 0, 126, 124);
+        stamped.join_order = 9;
+        core.on_session_event(std::move(stamped));
+        bmmo::session::trafo_report wood;
+        wood.flags = bmmo::session::TRAFO_EXPLODE;
+        wood.type = 0;
+        wood.source = "activation";
+        t.next_poll.reports.push_back(wood);
+        steps{core}.poll_own_trafo(125);
+        ASSERT_EQ(s.trafo_log_.at(126).size(), 3u);
+        EXPECT_EQ(s.trafo_log_.at(126)[0].seed, bmmo::session::trafo_seed(11u, 0u, 126u, 1));
+        EXPECT_EQ(s.trafo_log_.at(126)[1].seed, bmmo::session::trafo_seed(11u, 7u, 126u, 2));
+        EXPECT_EQ(s.trafo_log_.at(126)[2].seed, bmmo::session::trafo_seed(11u, 9u, 126u, 0));
+        const bmmo::session::trafo_input* own = s.trafo_log_.newest(3, 1, 0, false, 1000);
+        ASSERT_NE(own, nullptr);
+        EXPECT_TRUE(own->own);
+        EXPECT_EQ(own->seed, bmmo::session::trafo_seed(11u, 2u, own->applied, 0));
+    }
+
     TEST(SessionClientCoreTrafo, InputsAppliedLiveAndInTheReplayOfALateOne) {
         for (const bool retail: {false, true}) {
             flow_fake fake;
@@ -9820,6 +9912,36 @@ namespace {
         steps{core}.replay_corrected_inputs();
         EXPECT_EQ(s.input_rewinds_, 2u) << "the third frame after the last replay";
         EXPECT_FALSE(s.input_rewind_pending_);
+    }
+
+    // Step A2: config.remote_cadence_frames puts a remote's correction off
+    // on schedule too, for that many frames after the last input replay;
+    // the reach still bounds the wait.
+    TEST(SessionClientCoreTrafo, OnTheCadenceARemoteCorrectionWaitsOnSchedule) {
+        flow_fake fake;
+        trafo_fake t;
+        session_client_core core(trafo_rewind_platform(fake, t), trafo_caps());
+        trafo_tick_125(core, fake);
+        core.config.rollback = true;
+        core.config.remote_cadence_frames = 4;
+        trafo_record_ticks(core, 110, 125);
+        auto& s = state_of(core);
+        const auto late = [&](uint32_t seq, uint32_t tick) {
+            core.on_session_event(trafo_message(4, seq, bmmo::session::TRAFO_RESET | bmmo::session::TRAFO_SERVER
+                                                            | bmmo::session::TRAFO_FINAL, tick, tick));
+            ASSERT_TRUE(s.input_rewind_pending_);
+        };
+        late(1, 120);
+        steps{core}.replay_corrected_inputs();
+        EXPECT_EQ(s.input_rewinds_, 1u) << "nothing ran before it: at once";
+        late(2, 121);
+        for (int i = 0; i < 3; ++i) steps{core}.replay_corrected_inputs();
+        EXPECT_EQ(s.input_rewinds_deferred_, 3u) << "on schedule (no note_pacer_behind)";
+        EXPECT_TRUE(s.input_rewind_pending_);
+        steps{core}.replay_corrected_inputs();
+        EXPECT_EQ(s.input_rewinds_, 2u) << "the fourth frame after the last replay";
+        EXPECT_FALSE(s.input_rewind_pending_);
+        EXPECT_EQ(s.input_rewinds_deadline_, 0u);
     }
 
     TEST(SessionClientCoreTrafo, AnInputPastTheHistoryAsksForAResync) {

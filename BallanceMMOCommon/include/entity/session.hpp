@@ -284,7 +284,22 @@ namespace bmmo::session {
     //      (wake_mode::wake_moving: the release used to leave it at ~18% of
     //      its speed).  No wire change, no journal version: worlds of 35 and
     //      36 step differently, which the build id refuses anyway.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 36;
+    //  37  The relay's hints (session/input_relay.hpp, relay-protocol design
+    //      4.10; the server's physics.input_hints): a SessionRemoteInput may
+    //      end with what the other members' frames queued at the server hold
+    //      for the ticks after its newest one, and a client predicts those
+    //      mirrors with them instead of hold-last.  With the option off the
+    //      datagrams are byte for byte 36's.  No journal version (a hint is
+    //      a prediction: no world's inputs change).
+    //  38  SessionTelemetry (session_telemetry_msg.hpp, step A6): a member
+    //      reports its frame times, rewinds and resyncs to the server every
+    //      kTelemetryTicks; the server logs it, nothing else reads it.  A 37
+    //      server would log every one as an invalid opcode.
+    //  39  Explosions seeded by join order (WORLD_TRAFO_SEED_JOIN_ORDER,
+    //      trafo-replication design 2.6): a relayed Trafo event carries its
+    //      life's join order (session_event_msg::join_order), and the
+    //      resync ledger each entry's.  A 38 peer seeds by player id.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 39;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
     // The protocol whose SessionStart carries `mechanism_slots` (step Q7).
@@ -379,6 +394,13 @@ namespace bmmo::session {
     // Other levels: no effect.  The server's config physics.session_clock
     // (default on).
     constexpr uint32_t WORLD_SESSION_CLOCK = 1u << 3;
+    // WORLD_TRAFO_SEED_JOIN_ORDER (trafo-replication design 2.6; protocol
+    // 39): an explosion's seed mixes the life's join order where it mixed
+    // the player id, so the same recipe explodes the same pieces in every
+    // session (an id is a random connection handle).  The server sets it in
+    // every session; a journal without it (an older session) replays with
+    // the id.
+    constexpr uint32_t WORLD_TRAFO_SEED_JOIN_ORDER = 1u << 5;
     // The level the tutorial runs on, and the frame (1-based: world steps
     // since the anchor, the first step after it is frame 1) right before
     // which every world activates its exit under WORLD_SESSION_CLOCK - the
@@ -582,6 +604,10 @@ namespace bmmo::session {
         uint32_t reset_applied = 0;
         bool final = false;           // the type set's TRAFO_FINAL reset was applied at or before S
         uint32_t final_applied = 0;   // the set's newest TRAFO_FINAL reset (retirement: + history_ticks)
+        // Protocol 39: the life's join order, the seed's member term under
+        // WORLD_TRAFO_SEED_JOIN_ORDER (a leaver's life a late joiner was
+        // never told of); 255 = unknown (not used).
+        uint8_t join_order = 255;
     };
 
     // session_snapshot_msg body kind.

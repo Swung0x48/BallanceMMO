@@ -15,7 +15,10 @@
 
 #include "session/client_core.hpp"
 
+#include "message/session_telemetry_msg.hpp"
+
 #include <algorithm>
+#include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -58,6 +61,74 @@ namespace bmmo::session {
             if (seen * 100 >= total * 99) return b;
         }
         return client_core_state::kRelayLagBuckets - 1;
+    }
+
+    // Step A6: a SessionTelemetry once the window spans kTelemetryTicks
+    // (reliable, to the server's log).  The first call of a session (or
+    // after the numbering went back) only starts the window.
+    void session_client_core::telemetry_tick(uint32_t tick) {
+        if (!config.telemetry_host) return;
+        auto& w = s.telemetry_;
+        const auto& rs = s.rollback_.stats();
+        const int32_t span = static_cast<int32_t>(tick - w.first_tick);
+        if (w.based && span >= 0 && span < static_cast<int32_t>(client_core_state::kTelemetryTicks)) return;
+        if (w.based && span >= 0) {
+            auto tenths = [](double ms) {
+                return static_cast<uint16_t>(std::min(65535.0, std::max(0.0, std::round(ms * 10.0))));
+            };
+            auto count16 = [](uint64_t n) { return static_cast<uint16_t>(std::min<uint64_t>(n, 65535)); };
+            auto quantile = [](std::vector<float>& v, double q) {   // v sorted
+                if (v.empty()) return 0.0;
+                const size_t i = static_cast<size_t>(std::ceil(q * static_cast<double>(v.size())));
+                return static_cast<double>(v[std::min(v.size(), std::max<size_t>(i, 1)) - 1]);
+            };
+            std::sort(w.interval.begin(), w.interval.end());
+            std::sort(w.work.begin(), w.work.end());
+            std::sort(w.inbound.begin(), w.inbound.end());
+            bmmo::session_telemetry_msg msg;
+            msg.session = s.session_;
+            msg.tick = tick;
+            msg.host = config.telemetry_host;
+            msg.ticks = count16(static_cast<uint64_t>(span));
+            msg.frames = count16(w.work.size());
+            msg.interval_p50 = tenths(quantile(w.interval, 0.5));
+            msg.interval_p99 = tenths(quantile(w.interval, 0.99));
+            msg.interval_p999 = tenths(quantile(w.interval, 0.999));
+            msg.interval_max = tenths(w.interval.empty() ? 0.0 : w.interval.back());
+            auto over = [&w](double ms) {
+                return static_cast<uint64_t>(w.interval.end() - std::upper_bound(w.interval.begin(), w.interval.end(),
+                                                                                 static_cast<float>(ms)));
+            };
+            msg.over_33 = count16(over(1000.0 / 30.0));
+            msg.over_50 = count16(over(50.0));
+            msg.over_100 = count16(over(100.0));
+            msg.work_p99 = tenths(quantile(w.work, 0.99));
+            msg.work_max = tenths(w.work.empty() ? 0.0 : w.work.back());
+            msg.rewinds = count16(rs.rollbacks - w.rewinds);
+            msg.replayed = static_cast<uint32_t>(std::min<uint64_t>(rs.resim_ticks - w.replayed, 0xFFFFFFFFu));
+            msg.resyncs = count16(s.resyncs_sent_ - w.resyncs);
+            msg.holds = count16(s.resync_holds_ - w.holds);
+            msg.starved = count16(s.input_starved_ - w.starved);
+            msg.behind_max = tenths(w.behind_max);   // ticks, in tenths
+            msg.inbound_p50 = tenths(quantile(w.inbound, 0.5));
+            msg.inbound_p99 = tenths(quantile(w.inbound, 0.99));
+            msg.inbound_max = tenths(w.inbound.empty() ? 0.0 : w.inbound.back());
+            msg.serialize();
+            platform_.send(msg.raw.str(), send_mode::reliable);
+            w.last = msg;   // the values (the F3 panel)
+            w.have_last = true;
+        }
+        w.based = true;
+        w.first_tick = tick;
+        w.interval.clear();
+        w.work.clear();
+        w.inbound.clear();
+        w.rewinds = rs.rollbacks;
+        w.replayed = rs.resim_ticks;
+        w.resyncs = s.resyncs_sent_;
+        w.holds = s.resync_holds_;
+        w.starved = s.input_starved_;
+        w.behind_max = 0.0;
     }
 
     // One line per kWindowTicks ticks (late-player design 5.1 C1): what
@@ -248,12 +319,18 @@ namespace bmmo::session {
         // lifecycle rewind replayed already - only when there were any
         // (every other status line is the text it was).
         // ... and the frames a remote's correction waited while the pacer
-        // was behind (kRemoteCoalesceBehind).
+        // was behind (kRemoteCoalesceBehind) or on the cadence (step A2;
+        // deadline= / near=: the waits the reach cut short, the corrections
+        // not held for a ball near the own one; only when there were any).
         const std::string coalesced = !s.life_events_coalesced_ && !s.input_rewinds_carried_ && !s.input_rewinds_deferred_
             ? std::string()
             : textf(" coalesced: life=%llu input=%llu deferred=%llu", static_cast<unsigned long long>(s.life_events_coalesced_),
                     static_cast<unsigned long long>(s.input_rewinds_carried_),
-                    static_cast<unsigned long long>(s.input_rewinds_deferred_));
+                    static_cast<unsigned long long>(s.input_rewinds_deferred_))
+              + (s.input_rewinds_deadline_ || s.input_rewinds_near_
+                     ? textf(" deadline=%llu near=%llu", static_cast<unsigned long long>(s.input_rewinds_deadline_),
+                             static_cast<unsigned long long>(s.input_rewinds_near_))
+                     : std::string());
         // RC2 (b) (step RCB): ccache=hits/mismatches - the bodies whose
         // extras and contacts a capture took from the record before, and the
         // cached entries that differed from a fresh read (verify only, then
@@ -273,6 +350,15 @@ namespace bmmo::session {
         const std::string n3 = h.manager_unpassed < 0 ? std::string() : textf(
             " n3: manager_unpassed=%lld handed_back=%llu rehold_count=%llu", static_cast<long long>(h.manager_unpassed),
             static_cast<unsigned long long>(h.manager_unpassed_handed_back), static_cast<unsigned long long>(h.checkpoint_reholds));
+        // Protocol 37: hints=news/rewinds/wrong/late/bytes - hint ticks taken
+        // as news, the replays they asked for, hints the applied frame then
+        // contradicted, hints for a tick stepped past the reach, and the
+        // bytes of the hint sections received.  Only once the server sent
+        // one.
+        const std::string hints = s.hint_bytes_ == 0 ? std::string() : textf(
+            " hints=%llu/%llu/%llu/%llu/%llu", static_cast<unsigned long long>(s.hint_news_),
+            static_cast<unsigned long long>(s.hint_rewinds_), static_cast<unsigned long long>(s.hint_wrong_),
+            static_cast<unsigned long long>(s.hint_late_), static_cast<unsigned long long>(s.hint_bytes_));
         const std::string sparse = s.rollback_.sparse_capture() <= 1 ? std::string() : textf(
             " sparse=%u%s light=%llu/%.0f whole=%llu/%.0f rebased=%llu+%llu unanch=%llu verify=%llu/%llu/%llu/%llu",
             s.rollback_.sparse_capture(), s.rollback_.sparse_capture_verify() ? "v" : "",
@@ -523,7 +609,7 @@ namespace bmmo::session {
                      // starved reports now, the longest run, and the resyncs
                      // the starved rule asked for.
                      s.starved_run_, s.starved_run_max_, static_cast<unsigned long long>(s.starved_resyncs_),
-                     trafo.c_str(), probes.c_str(), arrays.c_str(), outside.c_str(), drain.c_str(), coalesced.c_str(), ccache.c_str()) + sparse + n3;
+                     trafo.c_str(), probes.c_str(), arrays.c_str(), outside.c_str(), drain.c_str(), coalesced.c_str(), ccache.c_str()) + sparse + n3 + hints;
     }
 
 }

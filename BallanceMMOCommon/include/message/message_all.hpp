@@ -76,6 +76,7 @@
 #include "session_start_at_msg.hpp"
 #include "session_start_status_msg.hpp"
 #include "session_boot_status_msg.hpp"
+#include "session_telemetry_msg.hpp"
 #include "player_command_msg.hpp"
 #include "automation_request_msg.hpp"
 #include "ball_state_mute_msg.hpp"

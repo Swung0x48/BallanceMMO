@@ -74,8 +74,11 @@ namespace bmmo::session {
     // FNV-1a over the four values' little-endian bytes, folded to a nonzero
     // int32.  The applied tick goes in, not the origin (the server and every
     // receiver know only the applied tick; an owner whose own event was moved
-    // re-runs the explosion at the applied tick).
-    inline int32_t trafo_seed(uint32_t session_seed, uint32_t player, uint32_t applied_tick, uint8_t type) {
+    // re-runs the explosion at the applied tick).  `member` names the
+    // exploding life: its join order under session::WORLD_TRAFO_SEED_JOIN_ORDER
+    // (the same in every session of a recipe), else the player id (sessions
+    // before that bit, and their journals' replays).
+    inline int32_t trafo_seed(uint32_t session_seed, uint32_t member, uint32_t applied_tick, uint8_t type) {
         uint32_t h = 2166136261u;
         const auto mix = [&h](uint32_t v) {
             for (int k = 0; k < 4; ++k) {
@@ -84,7 +87,7 @@ namespace bmmo::session {
             }
         };
         mix(session_seed);
-        mix(player);
+        mix(member);
         mix(applied_tick);
         mix(type);
         const int32_t folded = static_cast<int32_t>(h & 0x7fffffffu);
@@ -289,7 +292,7 @@ namespace bmmo::session {
         uint32_t origin = 0;
         uint32_t applied = 0;
         float position[3] = {};   // explode: the referential's translation; reset: zeros
-        int32_t seed = 0;         // explode: trafo_seed(session seed, player, applied, type)
+        int32_t seed = 0;         // explode: trafo_seed(session seed, member, applied, type)
         bool own = false;         // the owner's own input (stamped here)
         uint16_t life = 1;        // step TRL: the life whose set it runs on (the seed does not read it)
     };

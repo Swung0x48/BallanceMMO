@@ -40,6 +40,7 @@ namespace bmmo::session {
         uint16_t life = 0;
         uint32_t tick = 0, origin_tick = 0;
         uint8_t ball_type = 0, flags = 0;
+        uint8_t join_order = 255;        // Trafo (protocol 39): session_event_msg::join_order
         float position[3] = {};
         float rotation[9] = {};
         int32_t sector = 0;
@@ -57,7 +58,7 @@ namespace bmmo::session {
         bool operator==(const relay_event& o) const {
             return kind == o.kind && state == o.state && player == o.player && life == o.life && tick == o.tick
                 && origin_tick == o.origin_tick && ball_type == o.ball_type && flags == o.flags
-                && std::memcmp(position, o.position, sizeof(position)) == 0
+                && join_order == o.join_order && std::memcmp(position, o.position, sizeof(position)) == 0
                 && std::memcmp(rotation, o.rotation, sizeof(rotation)) == 0 && sector == o.sector
                 && recipe == o.recipe && (compact() || raw == o.raw);
         }
@@ -117,6 +118,7 @@ namespace bmmo::session {
         e.origin_tick = m.origin_tick;
         e.ball_type = m.ball_type;
         e.flags = m.flags;
+        e.join_order = m.join_order;
         std::memcpy(e.position, m.position, sizeof(e.position));
         std::memcpy(e.rotation, m.rotation, sizeof(e.rotation));
         e.sector = m.sector;
@@ -137,7 +139,7 @@ namespace bmmo::session {
         switch (static_cast<event_type>(e.kind)) {
             case event_type::Physicalize: return bytes + 4;
             case event_type::Sector: return bytes + sizeof(int32_t);
-            case event_type::Trafo: return bytes + 2 + sizeof(e.position);
+            case event_type::Trafo: return bytes + 3 + sizeof(e.position);
             default: return bytes;
         }
     }
@@ -156,6 +158,7 @@ namespace bmmo::session {
         out.life = e.life;
         out.ball_type = e.ball_type;
         out.flags = e.flags;
+        out.join_order = e.join_order;
         std::memcpy(out.position, e.position, sizeof(out.position));
         std::memcpy(out.rotation, e.rotation, sizeof(out.rotation));
         out.sector = e.sector;

@@ -815,6 +815,7 @@ namespace bmmo::sim {
         const uint16_t adds = ++adds_[id];
         if (life == 0) life = adds;
         lives_[id] = life;
+        join_orders_[{id, life}] = join_order;
         // Trafo-replication design 2.4: every member's own piece set, built
         // at its add - per life (step TRL): a rejoin's new life gets a set of
         // its own beside the old life's, which fades and retires.
@@ -1485,7 +1486,8 @@ namespace bmmo::sim {
             return true;
         }
         const bool reset = bmmo::session::trafo_is_reset(event.flags);
-        const int32_t seed = reset ? 0 : bmmo::session::trafo_seed(static_cast<uint32_t>(options_.seed), id, event.tick, type);
+        const uint32_t member = options_.trafo_seed_join_order ? join_order_of(id, life) : id;
+        const int32_t seed = reset ? 0 : bmmo::session::trafo_seed(static_cast<uint32_t>(options_.seed), member, event.tick, type);
         if (!bmmo::game::run_trafo(engine_->context(), trafo_registry_, trafo_hooks_, id, life, event.flags, type, event.position,
                                    seed, error))
             return false;
@@ -1566,6 +1568,7 @@ namespace bmmo::sim {
                 e.player = set.player;
                 e.life = set.life;
                 e.type = type;
+                e.join_order = join_order_of(set.player, set.life);
                 for (CK_ID piece: set.types[type].pieces) {
                     CKObject* o = context->GetObject(piece);
                     if (o && o->GetName() && trafo_hooks_.has_body(o->GetName())) {

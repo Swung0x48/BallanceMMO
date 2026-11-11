@@ -10,6 +10,7 @@
 
 #include <message/message_all.hpp>
 #include <session/input_relay.hpp>
+#include <session/timeline.hpp>
 
 using bmmo::session::input_frame;
 using bmmo::session::pending_relay;
@@ -55,6 +56,7 @@ namespace {
         }
         msg.recipes = std::move(d.recipes);
         msg.events = std::move(d.events);
+        msg.hints = std::move(d.hints);
         return msg;
     }
     bmmo::session_remote_input_msg parse(bmmo::session_remote_input_msg& msg) {
@@ -592,4 +594,94 @@ TEST(RelayRing, CarriesMessagesUntilAcknowledged) {
     EXPECT_LT(carried, 40u);
     ring.acknowledge(1, 14);
     EXPECT_EQ(ring.pending_messages(1), 40u - carried);
+}
+
+// Protocol 37: the hints.  The ring keeps a member's queued frames only where
+// hold-last from the frame just applied gets a tick wrong, never sends a
+// member its own, and forgets them at the next tick; a datagram without
+// hints is byte for byte the one before the protocol.
+TEST(RelayHints, OnlyWhatHoldLastGetsWrongAndTheWire) {
+    using bmmo::session::hint_entry;
+    using bmmo::session::input_hint;
+    relay_ring ring;
+    ring.reanchor(1, 9);
+    ring.reanchor(2, 9);
+    ring.push(10, applied_list{{1, frame(1)}, {2, frame(2)}, {3, frame(4)}});
+    auto plain = to_message(ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget)[0], 10);
+    ASSERT_TRUE(plain.serialize());
+    ring.set_hints({hint_entry{1, {input_hint{9, 0}}},
+                    hint_entry{2, {input_hint{2, 0}, input_hint{2, 0}, input_hint{8, 4}}},
+                    hint_entry{3, {input_hint{4, 0}, input_hint{4, 0}}}});
+    auto d = ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget);
+    ASSERT_EQ(d.size(), 1u);
+    ASSERT_EQ(d[0].hints.size(), 1u);          // 3's frames repeat the applied one; 1 is the recipient
+    EXPECT_EQ(d[0].hints[0].player, 2u);
+    EXPECT_EQ(ring.build_datagrams(2, bmmo::session::kRelayDatagramBudget)[0].hints.size(), 1u);   // 1's, not its own
+    auto msg = to_message(d[0], 10);
+    auto parsed = parse(msg);
+    EXPECT_EQ(msg.size(), plain.size() + bmmo::session::kHintCountBytes + bmmo::session::hint_bytes(parsed.hints.at(0)));
+    ASSERT_EQ(parsed.hints.size(), 1u);
+    ASSERT_EQ(parsed.hints[0].ticks.size(), 3u);
+    EXPECT_EQ(parsed.hints[0].ticks[1], (input_hint{2, 0}));
+    EXPECT_EQ(parsed.hints[0].ticks[2], (input_hint{8, 4}));
+    // No room, no hint: the entries and the header go as before.
+    EXPECT_TRUE(ring.build_datagrams(1, plain.size())[0].hints.empty());
+    ring.push(11, applied_list{{1, frame(1)}, {2, frame(2)}, {3, frame(4)}});
+    EXPECT_TRUE(ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget)[0].hints.empty());
+    // A truncated section is another layout.
+    std::string bytes = msg.raw.str();
+    bmmo::session_remote_input_msg cut;
+    cut.raw.write(bytes.data(), static_cast<std::streamsize>(bytes.size() - 1));
+    EXPECT_FALSE(cut.deserialize());
+}
+
+// The client's side: past its newest relayed frame a mirror is predicted with
+// that frame and the hinted keys - the hint of the tick, else the newest one
+// before it - and the relayed frame's arrival retires the hints up to it.
+TEST(RelayHints, TheTailIsPredictedWithTheQueuedKeys) {
+    using bmmo::session::input_hint;
+    std::map<uint32_t, input_frame> ring;
+    std::map<uint32_t, input_hint> hints;
+    input_frame out{};
+    relay_store(ring, 10, turning(1, 0.25f));
+    EXPECT_FALSE(bmmo::session::hinted_frame(ring, hints, 11, out));
+    EXPECT_TRUE(bmmo::session::hint_store(hints, 11, input_hint{1, 0}));
+    EXPECT_TRUE(bmmo::session::hint_store(hints, 12, input_hint{8, 4}));
+    EXPECT_FALSE(bmmo::session::hint_store(hints, 12, input_hint{8, 4}));   // a later datagram's repeat
+    EXPECT_FALSE(bmmo::session::hinted_frame(ring, hints, 10, out));        // relayed: not the tail
+    ASSERT_TRUE(bmmo::session::hinted_frame(ring, hints, 11, out));
+    EXPECT_EQ(out.keys, 1);
+    ASSERT_TRUE(bmmo::session::hinted_frame(ring, hints, 20, out));         // past the hints: the newest one
+    EXPECT_EQ(out.keys, 8);
+    EXPECT_EQ(out.flags, 4);
+    EXPECT_FLOAT_EQ(out.cam_dir[0], 0.25f);                                 // the camera stays the relayed frame's
+    // The frame of 11 arrives as hinted, the one of 12 does not.
+    relay_store(ring, 11, frame(1));
+    EXPECT_FALSE(bmmo::session::hints_confirmed(hints, 11, frame(1)));
+    EXPECT_EQ(hints.size(), 1u);
+    relay_store(ring, 12, frame(2));
+    EXPECT_TRUE(bmmo::session::hints_confirmed(hints, 12, frame(2)));
+    EXPECT_TRUE(hints.empty());
+    EXPECT_FALSE(bmmo::session::hinted_frame(ring, hints, 13, out));
+}
+
+// The server's side: the frames queued from the cursor on, consecutive, that
+// had arrived by the step's cutoff.
+TEST(RelayHints, TheBufferSaysWhatIsQueuedFromTheCursor) {
+    using clock = bmmo::session::input_buffer::arrival_clock;
+    const auto t0 = clock::time_point{} + std::chrono::seconds(10);
+    bmmo::session::input_buffer buffer;
+    buffer.submit(5, std::vector<input_frame>{frame(1), frame(2), frame(3)}, t0);
+    buffer.submit(8, std::vector<input_frame>{frame(4)}, t0 + std::chrono::milliseconds(5));
+    buffer.submit(10, std::vector<input_frame>{frame(6)}, t0);
+    bool fresh = false;
+    uint32_t source = 0;
+    buffer.take(5, fresh, source, t0);
+    auto queued = buffer.queued(t0, 64);
+    ASSERT_EQ(queued.size(), 2u);                        // 6 and 7; 8 arrived after the cutoff
+    EXPECT_EQ(queued[1].keys, 3);
+    EXPECT_EQ(buffer.queued(t0 + std::chrono::milliseconds(5), 64).size(), 3u);   // ..8; 9 is missing
+    EXPECT_EQ(buffer.queued(t0 + std::chrono::milliseconds(5), 2).size(), 2u);
+    buffer.reset_hold(9);                                // a lead reset drops them and moves the cursor
+    EXPECT_TRUE(buffer.queued(t0 + std::chrono::milliseconds(5), 64).empty());
 }

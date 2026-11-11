@@ -188,7 +188,7 @@ TEST(SessionStartMsg, MechanismSlots) {
 // option WORLD_SESSION_CLOCK (bit 3) round-trips with the others.
 TEST(SessionStartMsg, SessionClockBitRoundTrips) {
     EXPECT_EQ(1u << 3, bmmo::session::WORLD_SESSION_CLOCK);
-    EXPECT_EQ(36u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
+    EXPECT_EQ(39u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
     bmmo::session_start_msg msg{};
     msg.mode = bmmo::room::mode::Physics;
     msg.world_options = bmmo::session::WORLD_SESSION_CLOCK | bmmo::session::WORLD_PLACEMENT_CLONES;
@@ -626,13 +626,13 @@ TEST(SessionInputMsg, PiggybackedEventSizesFitTheBudget) {
     EXPECT_EQ(base, 42u) << "opcode 4 + session 4 + first_tick 4 + relay_ack 4 + count 1 + 8 x 3 + nevents 1";
     EXPECT_EQ(event_bytes(event_type::Unphysicalize, 1).size(), 24u);
     EXPECT_EQ(event_bytes(event_type::Sector, 1, 2).size(), 28u);
-    EXPECT_EQ(event_bytes(event_type::Trafo, 1).size(), 38u);
+    EXPECT_EQ(event_bytes(event_type::Trafo, 1).size(), 39u);
     const size_t p = event_bytes(event_type::Physicalize, 1).size();
     EXPECT_GE(p, 100u) << p;
     EXPECT_LE(p, 160u) << p;
-    const size_t all = base + 4 * sizeof(uint16_t) + 24 + 28 + 38 + p;
+    const size_t all = base + 4 * sizeof(uint16_t) + 24 + 28 + 39 + p;
     EXPECT_LT(all, bmmo::session::kInputDatagramBudget) << all;
-    std::printf("[ sizes    ] input datagram, 8 frames, no event: %zu B; U 24, Sector 28, Trafo 38, P %zu; "
+    std::printf("[ sizes    ] input datagram, 8 frames, no event: %zu B; U 24, Sector 28, Trafo 39, P %zu; "
                 "8 frames + U + P + Sector + Trafo: %zu B (budget %zu)\n",
                 base, p, all, bmmo::session::kInputDatagramBudget);
 }
@@ -1486,7 +1486,7 @@ TEST(SessionRemoteInputMsg, EventsSectionRoundTripsCompactAndRaw) {
     EXPECT_FALSE(msg.events.back().compact());
     auto parsed = round_trip(msg);
     const size_t recipe = 1 + bmmo::session::recipe_bytes(numbering.recipe(0)).size();
-    const size_t events = 13 + 14 + 9 + 13 + 23 + 3 + member.raw.str().size();
+    const size_t events = 13 + 14 + 9 + 13 + 24 + 3 + member.raw.str().size();   // Trafo 24 since protocol 39 (its join order)
     EXPECT_EQ(msg.size(), bmmo::session::kRelayDatagramHeader + 1 + bmmo::session::kEventCountBytes + recipe
                               + bmmo::session::kRelayPoseBytes + events);
     ASSERT_EQ(parsed.events.size(), msg.events.size());
@@ -1864,7 +1864,9 @@ bmmo::session_event_msg make_trafo_event(uint8_t type, uint8_t flags) {
 
 TEST(TrafoWire, TheEventRoundTripsAndRefusesEveryTruncation) {
     auto msg = make_trafo_event(1, 0);
+    msg.join_order = 4;   // protocol 39: the life's join order, filled on relay
     auto parsed = round_trip(msg);
+    EXPECT_EQ(4, parsed.join_order);
     EXPECT_EQ(bmmo::session::event_type::Trafo, parsed.type);
     EXPECT_EQ(77u, parsed.player);
     EXPECT_EQ(860u, parsed.tick);
@@ -1875,13 +1877,13 @@ TEST(TrafoWire, TheEventRoundTripsAndRefusesEveryTruncation) {
     EXPECT_EQ(948.74127f, parsed.position[0]);
     EXPECT_EQ(3.7663198f, parsed.position[1]);
     EXPECT_EQ(-56.514111f, parsed.position[2]);
-    // Exactly the three fields and the trailer: type byte, then 1 + 1 + 12.
+    // Exactly the four fields and the trailer: type byte, then 1 + 1 + 12 + 1.
     msg.clear();
     ASSERT_TRUE(msg.serialize());
     auto sector = make_trafo_event(1, 0);
     sector.type = bmmo::session::event_type::Finish;
     ASSERT_TRUE(sector.serialize());
-    EXPECT_EQ(sector.raw.str().size() + 14, msg.raw.str().size());
+    EXPECT_EQ(sector.raw.str().size() + 15, msg.raw.str().size());
     auto again = make_trafo_event(2, 3);
     expect_rejects_every_truncation(again);
     // A type past Trafo is refused.
@@ -1939,6 +1941,7 @@ TEST(TrafoWire, TheResyncStateCarriesTheLedger) {
     b.final = true;            // a leaver's set between its final resets and its retirement
     b.final_applied = 900;
     a.life = 2;                // protocol 21 (step TRL): the set is (player, life)'s
+    a.join_order = 6;          // protocol 38: the life's join order (the seed's member)
     msg.trafo_ledger = {a, b};
     const std::string bytes = msg.body_bytes();   // protocol 34: the body's sections
     bmmo::session_resync_state_msg parsed;
@@ -1959,21 +1962,24 @@ TEST(TrafoWire, TheResyncStateCarriesTheLedger) {
     EXPECT_EQ(900u, parsed.trafo_ledger[1].final_applied);
     EXPECT_EQ(2u, parsed.trafo_ledger[0].life);
     EXPECT_EQ(1u, parsed.trafo_ledger[1].life);
-    // Every truncation is refused (since protocol 34 the lives are always there).
+    EXPECT_EQ(6, parsed.trafo_ledger[0].join_order);
+    EXPECT_EQ(255, parsed.trafo_ledger[1].join_order);
+    // Every truncation is refused (since protocol 34 the lives, since 38
+    // the join orders are always there).
     for (size_t len = 0; len < bytes.size(); ++len) {
         bmmo::session_resync_state_msg cut{};
         EXPECT_FALSE(cut.read_body_bytes(bytes.substr(0, len))) << "accepted a body truncated to " << len << " bytes";
     }
     // A life 0 is refused.
     std::string zero = bytes;
-    zero[zero.size() - 4] = 0;
-    zero[zero.size() - 3] = 0;
+    zero[zero.size() - 2 - 4] = 0;
+    zero[zero.size() - 2 - 3] = 0;
     bmmo::session_resync_state_msg zeroed;
     EXPECT_FALSE(zeroed.read_body_bytes(zero));
     // A forged count past the cap, an unknown piece type and an unknown
     // bit are refused.
     std::string forged = bytes;
-    const size_t count_at = bytes.size() - 2 * 2 - 2 * (4 + 1 + 1 + 4 + 12 + 4 + 4) - 2;
+    const size_t count_at = bytes.size() - 2 * 1 - 2 * 2 - 2 * (4 + 1 + 1 + 4 + 12 + 4 + 4) - 2;
     const uint16_t too_many = static_cast<uint16_t>(bmmo::session_resync_state_msg::kMaxTrafoLedger + 1);
     std::memcpy(&forged[count_at], &too_many, sizeof(too_many));
     bmmo::session_resync_state_msg capped;
@@ -2351,6 +2357,35 @@ TEST(EventPiggyback, ServerIntakeEventsBeforeFramesDedupeAndRateOnce) {
 // Protocol 34: a mute set round-trips sorted and unique, a count past the cap
 // is refused, and the server's filter keeps the other players' balls and
 // timestamps (nothing at all when every one is muted).
+// Step A6 (protocol 38): every field survives; another schema is refused.
+TEST(SessionTelemetryMsg, RoundTripAndSchema) {
+    bmmo::session_telemetry_msg msg{};
+    msg.session = 3; msg.tick = 6600; msg.host = bmmo::session_telemetry_msg::HostRetail; msg.ticks = 660;
+    msg.frames = 655; msg.interval_p50 = 152; msg.interval_p99 = 331; msg.interval_p999 = 512; msg.interval_max = 65535;
+    msg.over_33 = 4; msg.over_50 = 2; msg.over_100 = 1; msg.work_p99 = 88; msg.work_max = 240; msg.rewinds = 210;
+    msg.replayed = 1234567; msg.resyncs = 1; msg.holds = 2; msg.starved = 5; msg.behind_max = 27;
+    msg.inbound_p50 = 31; msg.inbound_p99 = 148; msg.inbound_max = 902;
+    const auto back = round_trip(msg);
+    EXPECT_EQ(back.session, 3u); EXPECT_EQ(back.tick, 6600u); EXPECT_EQ(back.host, msg.host); EXPECT_EQ(back.ticks, 660);
+    EXPECT_EQ(back.frames, 655); EXPECT_EQ(back.interval_p50, 152); EXPECT_EQ(back.interval_p99, 331);
+    EXPECT_EQ(back.interval_p999, 512); EXPECT_EQ(back.interval_max, 65535); EXPECT_EQ(back.over_33, 4);
+    EXPECT_EQ(back.over_50, 2); EXPECT_EQ(back.over_100, 1); EXPECT_EQ(back.work_p99, 88); EXPECT_EQ(back.work_max, 240);
+    EXPECT_EQ(back.rewinds, 210); EXPECT_EQ(back.replayed, 1234567u); EXPECT_EQ(back.resyncs, 1); EXPECT_EQ(back.holds, 2);
+    EXPECT_EQ(back.starved, 5); EXPECT_EQ(back.behind_max, 27);
+    EXPECT_EQ(back.inbound_p50, 31); EXPECT_EQ(back.inbound_p99, 148); EXPECT_EQ(back.inbound_max, 902);
+    bmmo::session_telemetry_msg once{};
+    once.serialize();
+    const std::string full = once.raw.str();
+    std::string bytes = full;
+    bytes[sizeof(bmmo::opcode)] = static_cast<char>(bmmo::session_telemetry_msg::kSchema + 1);
+    bmmo::session_telemetry_msg other{};
+    other.raw.str(bytes);
+    EXPECT_FALSE(other.deserialize());
+    bmmo::session_telemetry_msg cut{};
+    cut.raw.str(full.substr(0, full.size() - 1));
+    EXPECT_FALSE(cut.deserialize());
+}
+
 TEST(BallStateMuteMsg, RoundTripCapAndFilter) {
     bmmo::ball_state_mute_msg msg{};
     msg.players = {7, 3, 7, 9};

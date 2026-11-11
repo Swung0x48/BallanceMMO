@@ -138,6 +138,10 @@ namespace bmmo::game {
         hooks.has_body = [backend](const std::string& name) {
             return host_backend_detail::backend_of(backend).has_body(name.c_str());
         };
+        if constexpr (requires(const backend_type& b) { b.has_body_id(0u); })
+            hooks.has_body_id = [backend](CK_ID id) {
+                return host_backend_detail::backend_of(backend).has_body_id(static_cast<uint32_t>(id));
+            };
         hooks.unphysicalize = [backend](const std::string& name, std::string& error) {
             return host_backend_detail::backend_of(backend).unphysicalize(name.c_str(), error);
         };

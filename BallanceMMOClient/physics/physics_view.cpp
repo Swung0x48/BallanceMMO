@@ -873,6 +873,13 @@ namespace bmmo::physics {
         api_->lookup_scope(manager_, on ? 1 : 0, verify ? BMMO_LOOKUP_SCOPE_VERIFY : 0u, totals);
     }
 
+    bmmo_physics_lookup_totals physics_view::lookup_totals() const {
+        bmmo_physics_lookup_totals totals{};
+        if (available() && api_->struct_size >= sizeof(bmmo_physics_api_v2) && api_->lookup_scope)
+            api_->lookup_scope(manager_, -1, 0u, &totals);
+        return totals;
+    }
+
     bool physics_view::step_physics(float delta_ms, std::string& error) const {
         error.clear();
         if (!available()) { error = "physics bridge is not initialized"; return false; }
@@ -1024,6 +1031,10 @@ namespace bmmo::physics {
     }
 
     // ---- bridge API v21 / v22: the trafo sets (step T4) ----
+
+    bool physics_view::has_body_id(uint32_t entity_id) const {
+        return available() && api_->has_body_id && api_->has_body_id(manager_, entity_id) != 0;
+    }
 
     bool physics_view::has_body(const char* entity_name) const {
         if (!available() || !entity_name || !entity_name[0]) return false;

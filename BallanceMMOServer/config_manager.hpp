@@ -100,6 +100,14 @@ public:
     // above; off, the server does exactly what it did before the flag
     // existed.
     bool physics_lead_adjust = true;
+    // Protocol 37 (session/input_relay.hpp, the hints): every relay datagram
+    // also carries what the other members' frames queued at the server hold
+    // for the ticks not stepped yet, so a client's rewind for a key change
+    // is as deep as its own round trip instead of as deep as the session's
+    // wait for its slowest member.  On by default since 2026-11-10 (the
+    // retail smoke, docs/relay-protocol-design.md 4.10); off, the datagrams
+    // are byte for byte protocol 36's.
+    bool physics_input_hints = true;
     std::string physics_test_clock_skew; // test only, T:MS:PCT; empty disables
     // Trafo-replication design 2.14 (protocol 11, step T2): the session's
     // world option WORLD_TRAFO_INPUTS - every member's trafo explosion and
