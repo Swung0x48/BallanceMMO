@@ -1453,7 +1453,7 @@ captures walked every script, and the restore's bump of the host-write generatio
 rewind (385 k of the 455 k omitted copies that client walked).
 
 **What was built** (`game/script_slots.hpp`, `game/script_replay.hpp`, `session/rollback_binding_scripts.hpp`;
-`BMMO_REUSE_KEPT` = off | on, off when unset). The slots keep the script list of the last record these scripts are
+`BMMO_REUSE_KEPT` = off | on, on when unset since its second gate, below). The slots keep the script list of the last record these scripts are
 known to hold - the one a capture left, or the one a restore wrote - with the observation it was kept at and the
 host-write generation then. The quiet-run ledger (step e3) observes every selected root, light records included.
 A capture the engine offers no record of t - 1 copies a root's block from the kept source (step OPC2's copy: force
@@ -1520,8 +1520,18 @@ closes; a third confirmed that and asked for the comparison of an unwritten para
 one of those branches, before the count or after (the kept source served the same 95 997 copies over the fast LBM
 both times): the count has been read, not exercised.
 
-**Why the switch is off.** Retail is not timed, a quiet machine has not confirmed the figures above, and the
-exactness count has never decided anything.
+**On by default** (a1b35f80's successor). On the public server's machine (8845HS, idle, 13 clients on its 16
+threads, three interleaved pairs that agree within 2 %): a replayed whole record 2.68 -> 1.84 ms, the live capture
+2.40 -> 2.20 ms a frame, the replay of a rewind 9.56 -> 8.26 ms, rewind work + capture 501 -> 457 ms a second,
+frame p99 26.8 -> 24.4, p999 32.3 -> 29.4, max 48.6 -> 45.4 ms; a frame without a rewind 5.0 -> 5.1 ms (the source
+kept and indexed, ~0.08 ms a record by the split). The roots a restore keeps and the ones it wrote but does not
+keep are on the `script_reuse` line (`kept: ... roots= refused=`): the exactness count decides in the headless
+runs - 12 refused of 1.12 M on the L6 re-drive, 9 of 27 k over the fast LBM - and never in retail's two recipes
+(0 of 15 k). Gate with the switch unset: 845/845; the L6 re-drive in verify, 3.65 M copies and 20.9 M memo hits,
+0 mismatches; fast LBM verify 38/38 twins FINAL exact, every criteria row equal to the resync cut's run, 6.37 M
+copies and 1.66 M memo hits, 0 mismatches; fast LBM 38/38, the same rows; retail verify at K = 20 (L12, L11), 619 k
+copies and 3.55 M memo hits, 0 mismatches, FINAL rows bit-equal to the first gate's sessions with L11's 32 pieces;
+x64 and x86 builds, the Arch server.
 
 ## Measured (hard real time on the public server's machine: the server's replays, 2026-11-11)
 

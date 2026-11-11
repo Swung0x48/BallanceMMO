@@ -36,7 +36,7 @@
 // Verify walks each such copy, compares it with the image and writes it
 // anyway, so a verify run is the off run.
 //
-// The kept source (BMMO_REUSE_KEPT = off | on, off when unset): a rewind
+// The kept source (BMMO_REUSE_KEPT = off | on, on when unset): a rewind
 // left every whole record after it a full walk - the replay's own (the record
 // of t - 1 is a light one, or the restore's barrier is in the way) and the
 // live one of the same frame (the engine's barrier at the rewind's end) -,
@@ -82,9 +82,9 @@ namespace bmmo::game {
         static const script_reuse_mode mode = parse_script_reuse_mode(std::getenv("BMMO_RESTORE_SKIP"), script_reuse_mode::on);
         return mode;
     }
-    // BMMO_REUSE_KEPT, read once per process (off when unset).
+    // BMMO_REUSE_KEPT, read once per process (on when unset).
     inline bool reuse_kept_from_env() {
-        static const bool on = parse_script_reuse_mode(std::getenv("BMMO_REUSE_KEPT"), script_reuse_mode::off)
+        static const bool on = parse_script_reuse_mode(std::getenv("BMMO_REUSE_KEPT"), script_reuse_mode::on)
                                != script_reuse_mode::off;
         return on;
     }

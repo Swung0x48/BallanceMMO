@@ -1811,7 +1811,7 @@ namespace bmmo::game {
                 ~forget_unless_kept() { if (slots) slots->forget(); }
             } forgetting{keeping ? hooks.slots : nullptr};
             std::vector<script_root_words> exact;
-            size_t scripts_end = 0;
+            size_t held_roots = 0, scripts_end = 0;
             std::vector<CKBehavior*> written;   // the root scripts written back (G1, live_membership)
             // Gap Q (design 2.2.3): a selected script the record has no
             // state for that exists now runs in the replay too; it has no
@@ -1843,6 +1843,7 @@ namespace bmmo::game {
                     const bool held = keeping && write && scripts && read_script_root_words(in.data() + pos, in.size() - pos, words);
                     const uint32_t inexact = last_restore().inexact;
                     if (!restore_behavior(beh, hooks, in, pos, error, write, images)) return false;
+                    if (held) ++held_roots;
                     if (held && last_restore().inexact == inexact) exact.push_back(words);
                     if (write && scripts && replayed) replayed->push_back(id);
                     if (write && scripts) written.push_back(beh);
@@ -2031,6 +2032,8 @@ namespace bmmo::game {
                     const script_root_words now = root_words_of(beh);
                     return now.flags != words.flags || now.in_mask != words.in_mask || now.out_mask != words.out_mask;
                 });
+                script_reuse_totals().kept_roots += exact.size();
+                script_reuse_totals().kept_refused += held_roots - exact.size();
                 hooks.slots->restored(*tick, exact, in.data(), scripts_end, writes);
                 forgetting.slots = nullptr;
             }
@@ -3075,18 +3078,17 @@ namespace bmmo::game {
             // ball again).  The live frame propagates only when the block
             // executes, and the replayed frames do that themselves.
             if (parameter) {
+                const bool sized = !is_opaque(parameter) && parameter->GetDataSize() == static_cast<int>(size);
                 bool wrote = false;
-                if (is_opaque(parameter)) {
-                } else if (parameter->GetDataSize() == static_cast<int>(size)) {
+                if (sized) {
                     if (void* buffer = parameter->GetWriteDataPtr()) { std::memcpy(buffer, in.data() + pos, size); wrote = true; }
-                } else if (size > 0 && resize_strings() && parameter->GetGUID() == CKPGUID_STRING) {
+                } else if (!is_opaque(parameter) && size > 0 && resize_strings() && parameter->GetGUID() == CKPGUID_STRING) {
                     if (resize_parameter(parameter, in.data() + pos, static_cast<int>(size))) { ++last_restore().strings_resized; wrote = true; }
                 }
                 // Left alone (a parameter with no write buffer - a "this" -,
                 // another size): exact only if it holds the record's bytes.
                 if (!wrote) {
-                    const void* live = !is_opaque(parameter) && parameter->GetDataSize() == static_cast<int>(size)
-                                           ? parameter->GetReadDataPtr(FALSE) : nullptr;
+                    const void* live = sized ? parameter->GetReadDataPtr(FALSE) : nullptr;
                     if (!live || std::memcmp(live, in.data() + pos, size) != 0) ++last_restore().inexact;
                 }
             }
