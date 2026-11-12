@@ -1925,3 +1925,79 @@ again beside their plan (790 held), 0 mismatches, as shipped 66.2 k blocks from 
 put back, FINAL rows of the three ways bit-equal to the restore skip's sessions with L11's 32 trafo pieces; x64 and
 x86 builds, the Arch server; two serial reviews, no defects - their risks are the two exceptions above, the built
 encoding, the counters and the gate's second way, and the gate ran on the tree after those changes.
+
+## Built (the slot cells: a place writes a slot's identity only when its candidate changed, 2026-11-12)
+
+**Where an over-budget frame's time was.** With every rollback hook timed on the public server's machine (HEAD
+46bebee0, client 0 pinned), frames holding one rollback: a deep frame UNDER the budget (963 frames, 14.0 replayed
+ticks) is 11.9 ms = restore 1.92 + replay 7.82 + capture 0.79 + rest, the replay being whole records 2.15 (2.2
+records of 0.98 ms) + place_probes 2.02 (0.145 ms a tick) + pre_step 1.35 (0.096) + step 0.79 (0.056) + the rest; a
+frame OVER it (65 frames, 12.7 ticks) is 16.95 ms: whole records 4.06 (2.7 records of 1.5 ms: the script capture
+0.98 ms a call against 0.63), place_probes 2.57, pre_step 1.80, step 1.34, restore 2.45. So even a frame that fits
+spent 3.4 ms in the two per-tick hooks.
+
+**What they did** (profiled on the L6 re-drive, the dev machine, per replayed tick). place_probes 114 us: the
+candidates 12, their lookup 5, the probe frames 17 (they follow the balls: 11.08 M writes of a new value against
+700 of the same), and the identity cells 78 - of which 67 are the 300 slot reads of a room of 13 at K = 20, each
+writing its slot's cell and checking its latch, and 15.12 M of 15.13 M cell writes stored the value the cell
+already held. pre_step 58 us: the replayed script frame 34 (the selected scripts run: real work), the own entities'
+matrices 18 (the headless host found each entity by a scan of every 3D entity), the rest 6.
+
+**Built.** `BMMO_SLOT_CELLS` (off | on | verify, on when unset; `proximity_union::place`): a slot read's cell and
+latch are a function of its slot's candidate alone, so the slot pass is skipped while every slot has the candidate
+of the last full pass (by CK id and name: a by-name cell takes the candidate's type from its name) and the
+script-write generation is the one that pass ended with. The cells are the union's own (only place, the rewire and
+the release write them; a rewire or release clears the state); a latch is a Get Cell's output, written by its own
+block - which reads the cell, so writes the value it holds - and by a script restore or a host write into the
+scripts, which bump the generation (a restore bumps it before it writes, so the first replayed tick after a restore
+runs the full pass). A by-name cell's value is the retail object named after the candidate's type, taken to be the
+same object while the rewire stands. Verify runs every pass and counts a pass the guard would have skipped that
+changed a cell or moved a latch. `BMMO_MATRIX_LOOKUP` (off | on | verify, on when unset; the headless client's
+`matrix_entity`): name -> CK id for entity_matrix / set_entity_matrix by candidate_entity's rule, cleared at the
+rewire and the release; the retail host's two calls still scan. Counters: `; slot cells: skipped= full= verified=
+mismatches=` on the union's lookups line, `own matrix lookups: hits= scans= verified= mismatches=` at the headless
+session's end.
+
+**Measured** on the 8845HS (the public L6 re-drive, the text-diff diagnostic off). One binary with the two switches
+off / on, two interleaved pairs that agree, 13 clients on its 16 threads:
+
+| | off | on |
+|---|---|---|
+| a replayed tick, outside its captures | 0.359-0.378 ms | 0.260-0.268 ms |
+| a rewind's replay | 4.98-5.19 ms | 4.14-4.22 ms |
+| rewind work a second | 170-173 ms | 147 ms |
+| frame p50 | 3.5 ms | 3.3 ms |
+| frame p99 | 14.2-14.6 ms | 12.3-12.6 ms |
+
+Client 0 alone on a core (33 232 frames), the held trafo scripts' build against this:
+
+| | the held trafo scripts | the slot cells |
+|---|---|---|
+| frames over 15.15 ms | 115 (0.35 %) | 37 (0.11 %) |
+| p50 / p99 / p999 | 3.4 / 13.7 / 17.3 ms | 3.2 / 11.5 / 15.6 ms |
+| max | 30.3 ms | 25.9 ms |
+
+**Where the frames over the budget are now.** All 37 are in the first 50 s (before tick 3300), where the players
+are born, die and change type: after that the session has no frame over a tick. 28 hold one rollback (17.1 ms =
+restore 2.9 + replay 11.7 over 11.3 ticks + capture 1.2 + rest 1.3: 1.03 ms a replayed tick), nine hold two (21.2
+ms, the slowest 25.9 - the run's max).
+
+**Studied the same day, not built.** (1) Depth through the relay: the server takes a receive pass every 15.15 ms
+and builds hints only in its step, which waits for the slowest member's frame; a hint waits ~0.9 tick there. A
+1 ms idle receive pass (server only) is worth ~0.5 tick on every relayed frame, a hint-only send at arrival ~0.45
+more. (2) The two rollbacks of one frame are always a late lifecycle batch (3-6 ticks) and then a remote input
+(deeper), in the start pile; merged at the final flush under a narrow predicate they would save one restore and
+4.3 ticks. (3) A running trafo script takes its whole set of eight out of the ledger every tick (touch_set), so
+seven siblings are walked by every capture to be found unchanged (about half of the trafo walks); narrowing the
+touch to the script and its feed targets needs the feeds enumerated with parameter operations and out-to-out
+chains, and a gate arm that fires each feed. (4) Whole records every 4 ticks instead of 8: no better at today's
+costs (the sparse model).
+
+Gate: 845/845; the L6 re-drive with the two switches and BMMO_LOOKUP_CACHE in verify, 768 k skipped passes and
+102 k matrix hits checked again, 0 mismatches, every session's `mism` 0; the same as shipped, `mism` 0 (the agent's
+runs: every client's and the server's journal byte-equal with the switches off and on); fast LBM in verify 38/38
+twins FINAL exact, every criteria row equal to the resync cut's run, 731 k skipped passes checked again, 0
+mismatches; fast LBM 38/38, the same rows; retail at K = 20, L12 and L11 at human key rates, in verify 19 k and
+48 k skipped passes checked again, 0 mismatches, as shipped the same; FINAL rows of the four sessions bit-equal to
+the restore skip's sessions with L11's 32 trafo pieces; x64 and x86 builds, the Arch server; one review, no defects
+(its points: the by-name premise stated, the switch read once, the matrix cache cleared per level).

@@ -110,6 +110,7 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -2105,8 +2106,7 @@ namespace {
             };
             // Step EL8 (gap L, L3; design 9.7): an entity's CK world matrix.
             p.entity_matrix = [this](const std::string& name, float matrix[16]) {
-                auto* entity = CK3dEntity::Cast(engine_->context()->GetObjectByNameAndParentClass(
-                        const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr));
+                CK3dEntity* entity = matrix_entity(name);
                 if (!entity) return false;
                 const VxMatrix& world = entity->GetWorldMatrix();
                 for (int r = 0; r < 4; ++r)
@@ -2170,8 +2170,7 @@ namespace {
                 return zone.ready ? 1 : 0;
             };
             p.set_entity_matrix = [this](const std::string& name, const float matrix[16]) {
-                auto* entity = CK3dEntity::Cast(engine_->context()->GetObjectByNameAndParentClass(
-                        const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr));
+                CK3dEntity* entity = matrix_entity(name);
                 if (!entity) return false;
                 VxMatrix world;
                 for (int r = 0; r < 4; ++r)
@@ -3177,6 +3176,7 @@ namespace {
             // Step Q7 (world-agreement-gaps-design.md 2.10): the per-player
             // units copied K times under WORLD_PLAYER_MECHANISMS.
             options.slots = core_.mechanism_slots();
+            matrix_ids_.clear();   // matrix_entity's premise is asked of one level only
             const std::string error = proximity_.rewire(context, bmmo::game::probe_class::mechanism, sel, options, script_hooks_);
             script_hooks_.slots = proximity_.slots() ? &proximity_.recorded_slots() : nullptr;
             proximity_.recorded_slots().select(bmmo::session::bound_member_slots(core_.member_lives(), core_.next_tick()));
@@ -3199,6 +3199,7 @@ namespace {
             if (!engine_ || (!proximity_.probe_count() && !proximity_.identity_count() && !proximity_.unit_count())) return;
             const size_t copies = proximity_.copy_count();
             const int restored = proximity_.release(engine_->context());
+            matrix_ids_.clear();
             install_controller_alias();
             logf("proximity union released (%s): %d inputs back, %zu unit copies destroyed", why, restored, copies);
         }
@@ -5160,6 +5161,9 @@ namespace {
                      static_cast<unsigned long long>(frame_time_count_), frame_time_quantile(0.5),
                      frame_time_quantile(0.99), frame_time_quantile(0.999), frame_time_max_ms_);
             logf("%s", proximity_.lookup_line().c_str());
+            logf("own matrix lookups: hits=%llu scans=%llu verified=%llu mismatches=%llu",
+                 static_cast<unsigned long long>(matrix_hits_), static_cast<unsigned long long>(matrix_scans_),
+                 static_cast<unsigned long long>(matrix_verified_), static_cast<unsigned long long>(matrix_mismatches_));
             // Step OPA: the journal hash's memo (hits, drops, verify mismatches).
             {
                 const std::string memo = bmmo::physics::describe_surface_memo();
@@ -5390,6 +5394,54 @@ namespace {
         // rewired at its anchor under WORLD_PROXIMITY_UNION, released before
         // the engine goes (release_proximity).
         bmmo::game::proximity_union proximity_;
+        // The own entities' matrices by name (entity_matrix, set_entity_matrix:
+        // the core's own matrices of every live and replayed tick, two or
+        // three entities a tick).  A scan walks every 3D entity: on the
+        // public L6 re-drive's client 0 the own matrices took 18 us of the
+        // 58 us a replayed tick spends before its step.
+        // BMMO_MATRIX_LOOKUP (off | on | verify, on when unset) keeps name ->
+        // CK id by the proximity union's candidate_entity rule: a name is
+        // entered when one 3D entity alone had it at the fill; a hit is taken
+        // while the id still names a 3D entity of that name; anything else
+        // scans and fills again.  The premise is the same: no second entity
+        // of the name appears before the first in the scan's order (the
+        // balls' names are their own).  Verify scans every hit too, returns
+        // the scan's answer and counts a difference.
+        CK3dEntity* matrix_entity(const std::string& name) {
+            CKContext* context = engine_->context();
+            const auto scan = [&](CKObject* after) {
+                return CK3dEntity::Cast(
+                    context->GetObjectByNameAndParentClass(const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, after));
+            };
+            static const int mode = [] {   // 0 off, 1 on, 2 verify
+                const char* text = std::getenv("BMMO_MATRIX_LOOKUP");
+                if (text && (std::strcmp(text, "off") == 0 || std::strcmp(text, "0") == 0)) return 0;
+                return text && std::strcmp(text, "verify") == 0 ? 2 : 1;
+            }();
+            if (mode == 0) return scan(nullptr);
+            const auto it = matrix_ids_.find(name);
+            const bool shared = it != matrix_ids_.end() && it->second == 0;
+            if (it != matrix_ids_.end() && !shared) {
+                CK3dEntity* entity = CK3dEntity::Cast(context->GetObject(it->second));
+                const char* entity_name = entity ? entity->GetName() : nullptr;
+                if (entity_name && name == entity_name) {
+                    ++matrix_hits_;
+                    if (mode == 1) return entity;
+                    CK3dEntity* scanned = scan(nullptr);
+                    ++matrix_verified_;
+                    if (scanned != entity) ++matrix_mismatches_;
+                    return scanned;
+                }
+                matrix_ids_.erase(it);
+            }
+            CK3dEntity* found = scan(nullptr);
+            // Unique: the scan resumed after the first finds no other.
+            if (found && !shared) matrix_ids_[name] = scan(found) ? 0 : found->GetID();
+            ++matrix_scans_;
+            return found;
+        }
+        std::unordered_map<std::string, CK_ID> matrix_ids_;   // 0: the name was shared at the fill
+        uint64_t matrix_hits_ = 0, matrix_scans_ = 0, matrix_verified_ = 0, matrix_mismatches_ = 0;
         // (kOwnEchoDeadlineTicks, kOwnEchoUplinkSettleTicks and
         // kOwnRecordKeepTicks moved into the core state at E7.)
         // Step BMX: the mirrors' clones, one per player and ball type

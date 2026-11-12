@@ -317,13 +317,55 @@ namespace bmmo::game {
                 const VxVector position(balls[k].position[0], balls[k].position[1], balls[k].position[2]);
                 frame->SetPosition(&position);
             }
+            // The slot cells (BMMO_SLOT_CELLS off | on | verify, on when
+            // unset).  A slot read's cell and latch are a function of its
+            // slot's candidate alone, and after a pass the cell holds that
+            // candidate's value and the latch it or the cell's value: 300
+            // reads a tick in a room of 13 at K = 20, most of a place, that
+            // nearly always write the value the cell already has.  So the
+            // pass is skipped while every slot has the candidate of the last
+            // full pass (by CK id and name: a by-name cell takes the
+            // candidate's type from its name) and the script-write
+            // generation is the one that pass ended with.  What can change a
+            // cell or a latch in between: the cells are this union's own
+            // (only place, the rewire and the release write them; a rewire
+            // or release clears the state); a latch is a Get Cell's output,
+            // written by its block, which reads the cell and so writes the
+            // value it holds, and by a script restore or a host write into
+            // the scripts, which bump the generation (script_replay::restore
+            // bumps it before it writes anything).  A skip leaves out writes
+            // of the value a cell already has (CKDataArray::SetElementObject
+            // stores the id and touches nothing else of the copy once it has
+            // been written).  One more premise, for a by-name cell: its value
+            // is the retail object named after the candidate's type
+            // (retail_entity_of), taken to be the same object while the
+            // rewire stands (the parked retail balls live as long as the
+            // level).  Verify runs every pass and counts a pass the guard
+            // would have skipped that changed a cell or moved a latch.
+            static const int cells_mode = [] {   // 0 off, 1 on, 2 verify
+                const char* text = std::getenv("BMMO_SLOT_CELLS");
+                if (text && (std::strcmp(text, "off") == 0 || std::strcmp(text, "0") == 0)) return 0;
+                return text && std::strcmp(text, "verify") == 0 ? 2 : 1;
+            }();
+            bool cells_same = cells_mode != 0 && slots_ && cells_placed_ && cells_generation_ == script_write_generation()
+                && cells_ids_.size() == slots_;
+            for (size_t s = 0; cells_same && s < cells_ids_.size(); ++s) {
+                const int k = slot_ball(static_cast<int>(s));
+                CK3dEntity* candidate = k < 0 ? nullptr : entities[static_cast<size_t>(k)];
+                const char* name = candidate && candidate->GetName() ? candidate->GetName() : "";
+                cells_same = cells_ids_[s] == (candidate ? candidate->GetID() : 0) && cells_names_[s] == name;
+            }
+            bool cells_changed = false;
             // Identity cells: the gating probe's choice; by-name holds, body
             // kind names BMMO_NoBall when there is no candidate.
             CKObject* no_ball = context->GetObject(no_ball_);
             for (identity& r: identities_) {
+                if (r.slot >= 0 && cells_same && cells_mode == 1) continue;
                 auto* array = CKDataArray::Cast(context->GetObject(r.array));
                 if (r.slot >= 0) {
-                    if (array) place_slot_identity(context, r, *array, slot_ball(r.slot), entities, no_ball);
+                    if (array)
+                        place_slot_identity(context, r, *array, slot_ball(r.slot), entities, no_ball,
+                                            cells_same ? &cells_changed : nullptr);
                     continue;
                 }
                 if (!array || r.gating < 0) continue;
@@ -361,6 +403,29 @@ namespace bmmo::game {
                 ++relatched_;
                 note_script_write();   // a selected script's output written: no record reuse across it (T3C e3 review)
             }
+            if (cells_mode == 0 || !slots_) return;
+            if (cells_same) {
+                ++cells_skipped_;
+                if (cells_mode == 2) {
+                    ++cells_verified_;
+                    if (cells_changed) ++cells_mismatches_;
+                }
+            } else {
+                ++cells_full_;
+                cells_ids_.clear();
+                cells_names_.clear();
+                for (int s = 0; s < static_cast<int>(slots_); ++s) {
+                    const int k = slot_ball(s);
+                    CK3dEntity* candidate = k < 0 ? nullptr : entities[static_cast<size_t>(k)];
+                    const CK_ID id = candidate ? candidate->GetID() : 0;
+                    const std::string name = candidate && candidate->GetName() ? candidate->GetName() : "";
+                    cells_ids_.push_back(id);
+                    cells_names_.push_back(name);
+                }
+            }
+            // After the pass: its own latch moves bumped the generation.
+            cells_generation_ = script_write_generation();
+            cells_placed_ = true;
         }
 
         // A candidate's 3D entity.  The scan for it walks every 3D entity,
@@ -412,7 +477,9 @@ namespace bmmo::game {
         }
         std::string lookup_line() const {
             return "proximity union lookups: hits=" + std::to_string(lookup_hits_) + " scans=" + std::to_string(lookup_scans_)
-                 + " verified=" + std::to_string(lookup_verified_) + " mismatches=" + std::to_string(lookup_mismatches_);
+                 + " verified=" + std::to_string(lookup_verified_) + " mismatches=" + std::to_string(lookup_mismatches_)
+                 + "; slot cells: skipped=" + std::to_string(cells_skipped_) + " full=" + std::to_string(cells_full_)
+                 + " verified=" + std::to_string(cells_verified_) + " mismatches=" + std::to_string(cells_mismatches_);
         }
 
         // The hold section of the script record (§4.2): u16 frames, each
@@ -884,6 +951,9 @@ namespace bmmo::game {
             unslotted_ = 0;
             entity_ids_.clear();
             placed_.clear();
+            cells_placed_ = false;
+            cells_ids_.clear();
+            cells_names_.clear();
             units_.clear();
             unit_blocks_.clear();
             recorded_slots_.clear();
@@ -1266,6 +1336,13 @@ namespace bmmo::game {
         std::unordered_map<std::string, CK_ID> entity_ids_;   // candidate_entity: 0 = the name was shared at the fill
         std::vector<std::string> placed_;                     // the last place's candidates
         uint64_t lookup_hits_ = 0, lookup_scans_ = 0, lookup_verified_ = 0, lookup_mismatches_ = 0;
+        // The slot cells' last full pass (place): each slot's candidate (0 /
+        // "" for none) and the script-write generation it ended with.
+        bool cells_placed_ = false;
+        uint64_t cells_generation_ = 0;
+        std::vector<CK_ID> cells_ids_;
+        std::vector<std::string> cells_names_;
+        uint64_t cells_skipped_ = 0, cells_full_ = 0, cells_verified_ = 0, cells_mismatches_ = 0;
         // ---- step Q7: the per-player units (§2.10, part I) ----
         struct unit_copy {
             std::vector<CK_ID> roots;        // the copied graph, or the unit's blocks (walk order)
@@ -1325,14 +1402,17 @@ namespace bmmo::game {
         // BMMO_NoBall; never the hold.  A body-kind output that does not name
         // the slot's candidate is moved to the cell, through the block's own
         // path; id 0 (the block never ran) is left alone (step G2's rule).
+        // `changed` (the slot cells' verify): set when the cell held another
+        // value or the latch is moved.
         void place_slot_identity(CKContext* context, identity& r, CKDataArray& array, int k,
-                                 const std::vector<CK3dEntity*>& entities, CKObject* no_ball) {
+                                 const std::vector<CK3dEntity*>& entities, CKObject* no_ball, bool* changed = nullptr) {
             CK3dEntity* candidate = k >= 0 ? entities[static_cast<size_t>(k)] : nullptr;
             CKObject* value = no_ball;
             if (candidate) {
                 if (!r.by_name) value = candidate;
                 else if (CKObject* named = retail_entity_of(context, candidate)) value = named;
             }
+            if (changed && array.GetElementObject(0, r.column) != value) *changed = true;
             array.SetElementObject(0, r.column, value);
             if (r.by_name) return;
             auto* block = CKBehavior::Cast(context->GetObject(r.block));
@@ -1344,6 +1424,7 @@ namespace bmmo::game {
                 return;
             CKObject* latched = context->GetObject(latched_id);
             if (latched && (latched == candidate || latched == value)) return;
+            if (changed) *changed = true;
             block->SetOutputParameterObject(0, value);
             ++relatched_;
             note_script_write();   // a selected script's output written: no record reuse across it (T3C e3 review)
