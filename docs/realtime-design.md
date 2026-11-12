@@ -2088,3 +2088,99 @@ cut's run, 0 mismatches; fast LBM light 38/38, the same rows; fast LBM as shippe
 retail at K = 20, L12 and L11 at human key rates, light with the reuse verifies and light alone, 0 mismatches,
 FINAL rows bit-equal to the restore skip's sessions with L11's 32 trafo pieces; x64 and x86 builds, the Arch
 server; one review, no defects (its points: what verify does not exercise, the cost meter, the open class).
+
+## Built (a delayed link in flight live taken out at the restore; the live tick's pending adds taken back, 2026-11-12)
+
+**The census** (SimTool `--delayed-links`: every link of the selection with an initial delay above one frame and
+the blocks its fire can reach, levels 1-13). Two links, nothing else (no trafo script has one): (1)
+Gameplay_SectorManager `Deactivate Sector.Out 0 -> Set Cell.In`, delay 4, every level - its Set Cell
+(CurrentLevel[0][4]) leads into Activate Sector: Set World Matrix, Show, Physicalize, Activate Script with reset of
+the sector's modules, so a stray fire is a physics and script-activation divergence; (2) every fan's
+`PlaySound / Wave Player.End Playing -> Set Cell.In`, delay 2 (P_Modul18_ActiveSounds[row][1] = 0, read by the
+fans' sound slots only): audio. The per-slot unit copies and the trafo copies carry their originals' links (an inference: the census
+walks a session-less load, where the per-slot copies do not exist; the restore walks a copy's links like its
+original's). Custom maps were not censused.
+
+**The sector manager's link in practice.** A stray fire of (1) would be a physics divergence, but a pass begins
+with the manager activated WITH reset (the union's pass always, `sector_activation.hpp`; a pass a game script asked
+for is re-issued with the reset flag it was recorded with), a reset empties the graph's delayed list, and the frame
+that resets is the frame that queues the link - so no record has the link idle after the reset and before the
+queue, and a link left in flight by the live world is cleared by the replayed pass's reset before it can fire.
+SimTool rounds that rewind to the idle record while the live world has the link in flight (L2 and L13,
+`--savestate-check --frames --drop P_Ball_Wood_MF 0 --drop-settle 2 --ticks 40 --savestate-lead 0
+--savestate-rounds 2:1:6,2:2:5,2:3:4,3:2:3,2:3:4,3:1:4 --session-recipe`: live countdown 3/4, 2/4 and 1/4, anchor
+2, then the follow across the fire at 6) are exact with the switches off (`live_pending=4`) and on (`withdrawn=4`,
+`Gameplay_SectorManager ... 1 link(s) from link 4`: a stray in the middle of the manager's link array, the suffix
+moved), 6 of 6 rounds and 26 of 26 follow ticks as the straight pass on both levels, the link firing once, at 6.
+So (1) was harmless before this step whenever the pass resets (every pass seen), and the withdrawal is what covers
+a pass re-issued without reset; the case that tells the two restores apart is the fan's link.
+
+**Fault B fixed** (`restore_behavior`, `withdraw_links`; `BMMO_LIVE_LINKS` off | on, on when unset). A link in
+flight in the live world (0 < countdown < initial) and idle at the record stayed in its graph's delayed list and
+fired inside the replay. The SDK has no call for the list, but `RemoveSubBehaviorLink` takes a link out of it
+with the graph's link array, and `AddSubBehaviorLink` appends one with its in-list flag cleared; retail CK2.dll
+does exactly what the reimplementation does (disassembled: the graph data at +0x5c, the array at +0x18 and the list
+at +0x24 erased with an order-keeping memmove, the flag bit 0 of the link's +0x18 cleared, then AddIfNotHere).
+The restore removes every link from the first stray one on and appends them again in order, so the array (the
+records' and CheckIOsActivation's order) is unchanged; then each stray link takes the record's countdown. It is
+then as at the record - idle, out of the list, the record's countdown - and fires only when the replay queues it,
+at the delay a live queue gives it, whatever the window, a second rewind, a rebased one or a reset inside it. A selected script the record does not
+have (`unrecorded`: born inside the window) is not written and keeps its live links, uncounted, as before.
+The other links of the moved suffix leave the list too: no change for a re-armed one (its source output is on;
+the graph's next CheckIOsActivation queues it again keeping its countdown, as the list kept it) or an idle one.
+Refused, and counted as before (`links_live_pending`, inexact), when a link after the first stray one is in
+flight in both worlds with its re-arm refused (it must stay in the list); a moved array that does not read back
+in order counts `links_unrestorable`. Paths that do not walk links (the restore plan, the held and dormant trafo
+scripts) are scripts quiet since a record equal to this one, so their countdowns are the record's; a script the
+restore does not write (the v14 rule) keeps its live links by design. Counter: `delayed links: rearmed=
+unrestorable= withdrawn= live_pending=` at the headless session's end, with the first cases named.
+
+**Fault A fixed** (`take_back_live_adds`; `BMMO_LIVE_ADDS` off | on, on when unset). At a live frame's first
+restore the selection's owners' positive pending counts - the live tick's own adds, since its
+ManageObjectsActivity consumed the table - are set to 0: the replay runs that tick again and makes again what the
+corrected tick makes (the rewind's end re-issues the outside activations through CKScene::Activate, which adds
+again), so no replay reads the live tick's adds and a stale one does not reach the next live frame. Later
+restores of the frame take back the earlier replays' nets (FX1) and not the live adds again (the ledger's
+`live_taken`). An owner with a script the restore does not write active or to be activated keeps its count (its
+maker may be outside the replay). Counters on the membership line: `live_adds_taken=`, `live_adds_kept=`.
+
+**Verify** now compares the written-cell sections too (`diff`'s `cells`, asked through `diff_scripts`'
+`logical` in-value by sparse verify only; the replay's own check against the live record still leaves them out,
+decision Q4). L6 re-drive in `BMMO_REPLAY_LAST=verify`: with both switches off (HEAD's restore, the cells
+compared) 56 631 anchors, 36 differing (24 of A, 12 of B: the one stray fan link of 12 clients, `live_pending=1`
+each), 0 float, 109 stale, no third class; with both on, 56 631, **0** differing, 0, 109 (`withdrawn=1` and
+`live_adds_taken=1` on 12 clients each: client 8 withdrew none, client 4 took back none,
+as their rewinds fell). Light with the four reuse switches in verify: 0 mismatches. Every session's
+`mism` 0 in all four runs, and every client's and the server's journal equal past the build id to HEAD's runs of
+the same recipes (the fan's cell and the Particle flag are journaled nowhere). The cell compare's own check: its
+counters (`cells: ... compared= differed=`) read 470-503 sections compared a client in verify; a scratch build that
+flipped one cell of the second record found every one (`written cells: array #45635 [3][1] 0 vs 16777216`), and a
+scratch build that asked for the cells in the replay's own check too (live against replayed) found none differ.
+A record with a written-cell section against one without counts as a difference (the review's point).
+Sparse verify only asks for the walk when the two records' bytes differ, so with both fixes on the L6 re-drive's
+`compared=` reads 0: all 56 631 anchors are byte-equal, the cells with them.
+
+Not exercised by any run: a re-armed link in a moved suffix, the refusal, two strays in one graph, a second
+restore in one live frame (FX1's `replayed_taken_back` 0; the replay's re-issue of outside activations,
+`manager_activations::replay`, adds outside FX1's bracket, so a second rewind of the frame still reads the first
+replay's re-issue adds), a manager pass re-issued without reset.
+
+**Retail.** The retail host prints the counters at a session's end (`Physics session: delayed links: ...;
+live_adds_taken= live_adds_kept=`). The withdrawal ran on the retail CK2.dll: L12 at K = 20 with
+`BMMO_REPLAY_LAST=light`, one client `withdrawn=1` (`All_Gameplay / Gameplay_SectorManager: 1 link(s) from link
+4`, the link array read back in order), FINAL rows bit-equal to the restore skip's session; L11 as shipped, one
+client `live_adds_taken=1`, FINAL rows bit-equal with the 32 trafo pieces.
+
+**Gate (the delayed links).** 847/847 (one new test); the L6 re-drive in `BMMO_REPLAY_LAST=verify` on the final
+tree, 56 631 anchors, 0 differing, 0 float, 109 stale, `withdrawn=12`, `live_adds_taken=12`, every session's `mism`
+0; the same light with `BMMO_SCRIPT_REUSE`, `BMMO_SLOT_MEMO`, `BMMO_RESTORE_PLAN` and `BMMO_TRAFO_HELD` in verify, 0
+mismatches; fast LBM in `BMMO_REPLAY_LAST=verify` 38/38 twins FINAL exact, every criteria row equal to the resync
+cut's run, 419 anchors compared over the arms, 0 differing in every arm (`rearmed=9`, no stray met,
+`live_adds_kept=4` in the death arms); fast LBM as shipped (whole) 38/38, the same rows; fast LBM light with the
+four reuse switches in verify 38/38, the same rows, 0 mismatches; retail at K = 20, L12 and L11 at human key
+rates, as shipped and light, 0 mismatches, FINAL rows bit-equal to the restore skip's sessions with L11's 32 trafo
+pieces; SimTool's manager rounds above; x64 and x86 builds, the Arch server (SimTool's counter line was added after
+the gate's runs: x64 built and the tests run again); one review, no defects - its points (the retail calls read
+from the DLL again by the orchestrator: both overloads of RemoveSubBehaviorLink erase from the two arrays with a
+memmove and nothing else, AddSubBehaviorLink clears bit 0 and appends; the manager's link; the retail counters;
+the one-sided cell section; the census's limits) are in.

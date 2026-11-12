@@ -168,6 +168,7 @@ namespace {
         long long exact_to = -1;
         std::string dump_array;        // --dump-array NAME: print every cell of a CKDataArray
         bool script_feeds = false;     // --script-feeds: the parameter links that cross root scripts (game/script_feeds.hpp)
+        bool delayed_links = false;    // --delayed-links: the selection's links of more than one frame's delay
         std::string dump_entity;       // --dump-entity NAME: world matrix of a 3D entity at --dump-at (replay: before and after that frame)
         // --beam X Y Z FRAME: put the current ball there at rest before that
         // replay frame, mirroring the client automation verb "beam", so a
@@ -812,6 +813,7 @@ namespace {
         }
         else if (arg == "--probe-trace") out.probe_trace = true;
         else if (arg == "--script-feeds") out.script_feeds = true;
+        else if (arg == "--delayed-links") out.delayed_links = true;
         else if (arg == "--depth-test-rule") {   // FULL step PRX (parse()'s chain is full: C1061)
             if (!(v = next())) return false;
             const std::string mode = v;
@@ -1365,6 +1367,87 @@ namespace {
         }
         std::printf("summary: script-feeds links=%zu pairs=%zu selected=%zu fed_selected=%zu\n", feeds.size(), pairs.size(),
                     selected.size(), sel.fed.size());
+        std::fflush(stdout);
+    }
+
+    // --delayed-links: every link of more than one frame's delay (its initial
+    // delay: the current one is 0 once it fired) in the selection's scripts,
+    // trafo scripts included, and the blocks its fire can reach - through
+    // building blocks to every output, into a sub-graph by its inner links
+    // and out of one by its parent's.  The census of docs/realtime-design.md
+    // ('Built (a delayed link in flight live taken out at the restore)'):
+    // what a stray fire could write.
+    void dump_delayed_links(const bmmo::sim::headless_engine& engine) {
+        CKContext* context = engine.context();
+        const auto name = [](CKObject* o) { return std::string(o && o->GetName() ? o->GetName() : "?"); };
+        const auto proto = [](CKBehavior* b) {
+            return std::string(b && b->IsUsingFunction() && b->GetPrototypeName() ? b->GetPrototypeName() : "graph");
+        };
+        // The links of a script, every graph's, by the IO they leave from.
+        std::multimap<CKBehaviorIO*, CKBehaviorLink*> leaving;
+        std::function<void(CKBehavior*)> collect = [&](CKBehavior* beh) {
+            if (!beh || beh->IsUsingFunction()) return;
+            for (int i = 0; i < beh->GetSubBehaviorLinkCount(); ++i)
+                if (CKBehaviorLink* link = beh->GetSubBehaviorLink(i)) leaving.emplace(link->GetInBehaviorIO(), link);
+            for (int i = 0; i < beh->GetSubBehaviorCount(); ++i) collect(beh->GetSubBehavior(i));
+        };
+        const auto reach = [&](CKBehaviorIO* start) {
+            std::set<CKBehaviorIO*> seen;
+            std::set<CKBehavior*> blocks;
+            std::vector<CKBehaviorIO*> todo{start};
+            while (!todo.empty()) {
+                CKBehaviorIO* io = todo.back();
+                todo.pop_back();
+                if (!io || !seen.insert(io).second) continue;
+                CKBehavior* owner = io->GetOwner();
+                if (owner && owner->IsUsingFunction() && io->GetType() == CK_BEHAVIORIO_IN) {
+                    blocks.insert(owner);
+                    for (int k = 0; k < owner->GetOutputCount(); ++k) todo.push_back(owner->GetOutput(k));
+                    continue;
+                }
+                for (auto [it, end] = leaving.equal_range(io); it != end; ++it) todo.push_back(it->second->GetOutBehaviorIO());
+            }
+            return blocks;
+        };
+        const bmmo::game::script_replay::selection sel = bmmo::game::script_replay::select(context, true);
+        int found = 0;
+        std::function<void(CKBehavior*, CKBehavior*, const std::string&)> walk = [&](CKBehavior* script, CKBehavior* graph,
+                                                                                     const std::string& path) {
+            if (!graph || graph->IsUsingFunction()) return;
+            for (int i = 0; i < graph->GetSubBehaviorLinkCount(); ++i) {
+                CKBehaviorLink* link = graph->GetSubBehaviorLink(i);
+                if (!link || link->GetInitialActivationDelay() <= 1) continue;
+                ++found;
+                CKBehaviorIO* from = link->GetInBehaviorIO();
+                CKBehaviorIO* to = link->GetOutBehaviorIO();
+                CKBehavior* source = from ? from->GetOwner() : nullptr;
+                CKBehavior* target = to ? to->GetOwner() : nullptr;
+                std::printf("[delayed] %s of %s | %s | %s.%s [%s #%u] -> %s.%s [%s #%u] | delay %d\n", name(script).c_str(),
+                            name(script->GetOwner()).c_str(), path.c_str(), name(source).c_str(), name(from).c_str(),
+                            proto(source).c_str(), static_cast<unsigned>(source ? source->GetID() : 0), name(target).c_str(),
+                            name(to).c_str(), proto(target).c_str(), static_cast<unsigned>(target ? target->GetID() : 0),
+                            link->GetInitialActivationDelay());
+                for (CKBehavior* block: reach(to)) {
+                    std::string pins;
+                    for (int k = 0; k < block->GetInputParameterCount(); ++k)
+                        if (CKParameterIn* in = block->GetInputParameter(k))
+                            pins += std::string(pins.empty() ? "" : ", ") + name(in) + "=" + parameter_text(in->GetRealSource());
+                    std::printf("[delayed]     reaches %s [%s #%u] (%s)\n", name(block).c_str(), proto(block).c_str(),
+                                static_cast<unsigned>(block->GetID()), pins.c_str());
+                }
+            }
+            for (int i = 0; i < graph->GetSubBehaviorCount(); ++i)
+                if (CKBehavior* sub = graph->GetSubBehavior(i); sub && !sub->IsUsingFunction())
+                    walk(script, sub, path + "/" + name(sub));
+        };
+        for (CK_ID id: sel.scripts) {
+            auto* script = CKBehavior::Cast(context->GetObject(id));
+            if (!script) continue;
+            leaving.clear();
+            collect(script);
+            walk(script, script, name(script));
+        }
+        std::printf("summary: delayed-links scripts=%zu links=%d\n", sel.scripts.size(), found);
         std::fflush(stdout);
     }
 
@@ -2014,6 +2097,7 @@ namespace {
         if (args.list_callback_blocks && args.dump_at < 0) eg0::list_callback_blocks(engine);   // step EG0
         if (!args.dump_array.empty() && args.dump_at < 0) dump_array(engine, args.dump_array);
         if (args.script_feeds) dump_script_feeds(engine);
+        if (args.delayed_links) dump_delayed_links(engine);
         if (args.list_trafos && args.dump_at < 0) list_trafos(engine);
         if (trafo) return trafo->finish();
         return 0;
@@ -2706,6 +2790,7 @@ namespace {
         if (!settle_scene(args, world)) return 1;   // settle_world plus the S3 switches (step S3)
         if (!args.dump_array.empty()) dump_array(world.engine(), args.dump_array);
         if (args.script_feeds) dump_script_feeds(world.engine());
+        if (args.delayed_links) dump_delayed_links(world.engine());
         return 0;
     }
 
@@ -4117,8 +4202,10 @@ namespace {
         // another round's end, or re-made: the t0 restore leaves them too)
         // has its own history's; it takes e's before the round, where
         // neither it nor e's record has the link in flight.  A link in
-        // flight in the stand-in is left alone (restore_behavior's
-        // links_live_pending case, counted).  The links are the same set
+        // flight in the stand-in is left alone here: the round's restore
+        // takes it out of flight when the anchor's record has it idle
+        // (restore_behavior's withdraw_links; links_live_pending with
+        // BMMO_LIVE_LINKS off).  The links are the same set
         // restore_behavior walks (initial delay above one frame, the graph's
         // links and its sub-behaviours'; the order here is links first, which
         // only has to agree between note and take - both index this vector).
@@ -5153,6 +5240,11 @@ namespace {
                         " rounds %d, countdowns put %llu, in flight in the live world (left) %llu\n", delayed_links.size(),
                         countdown_rounds, static_cast<unsigned long long>(countdowns_put),
                         static_cast<unsigned long long>(countdowns_live_in_flight));
+        {   // the restores' delayed links in this process (re-armed, refused, taken out of flight, left in flight)
+            const auto& links = bmmo::game::script_replay::link_totals();
+            std::printf("savestate-check: %s\n", links.line().c_str());
+            for (const std::string& note: links.notes) std::printf("savestate-check: delayed links: %s\n", note.c_str());
+        }
         if (trafo) {
             std::printf("savestate-check: trafo births logged %zu, lifetimes changed %zu, inputs %zu, sets %zu\n",
                         trafo_birth_count, trafo_generations.size(), trafo->log().size(), trafo->registry().sets().size());

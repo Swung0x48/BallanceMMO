@@ -278,7 +278,8 @@ namespace bmmo::session {
             return ok;
         };
         world.diff_scripts = [o, context, selection](const std::vector<uint8_t>& a, const std::vector<uint8_t>& c, bool& logical) {
-            const auto d = bmmo::game::script_replay::diff(context, *selection, a, c);
+            // `logical` in: the written-cell sections are compared too.
+            const auto d = bmmo::game::script_replay::diff(context, *selection, a, c, nullptr, logical);
             logical = d.logical;
             // Step RK2: equal but for the written-cell section (decision Q4,
             // never compared): the empty answer, not a mismatch (rollback.hpp).

@@ -140,6 +140,22 @@ namespace bmmo::game {
         static const script_reuse_mode mode = parse_script_reuse_mode(std::getenv("BMMO_TRAFO_HELD"), script_reuse_mode::on);
         return mode;
     }
+    // BMMO_LIVE_LINKS, read once per process (on when unset): a restore
+    // takes a delayed link in flight live but not at the record out of its
+    // graph's list (script_replay restore_behavior); off leaves it to fire.
+    inline bool live_links_from_env() {
+        static const bool on = parse_script_reuse_mode(std::getenv("BMMO_LIVE_LINKS"), script_reuse_mode::on)
+                               != script_reuse_mode::off;
+        return on;
+    }
+    // BMMO_LIVE_ADDS, read once per process (on when unset): a live frame's
+    // first restore takes the live tick's own pending adds back
+    // (script_replay take_back_live_adds); off leaves them for the replay.
+    inline bool live_adds_from_env() {
+        static const bool on = parse_script_reuse_mode(std::getenv("BMMO_LIVE_ADDS"), script_reuse_mode::on)
+                               != script_reuse_mode::off;
+        return on;
+    }
     // BMMO_COPY_PLAN, read once per process (on when unset).
     inline bool copy_plan_from_env() {
         static const bool on = parse_script_reuse_mode(std::getenv("BMMO_COPY_PLAN"), script_reuse_mode::on)

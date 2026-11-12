@@ -6450,3 +6450,43 @@ TEST(RollbackEngine, SparseCaptureRecordsTheReplaysLastTickLightOnRequest) {
     EXPECT_EQ(verified.stats().sparse_verify_mismatches, 0u);
     EXPECT_EQ(verified_world.serialize(), control_world.serialize());
 }
+
+// Sparse capture's verify compares two replays of one tick, which must agree
+// in the records' written-cell sections too (a stray Set Cell must not hide
+// there): it asks diff_scripts for them (`logical` in true), and the replay's
+// own check against the live record does not (decision Q4: false).
+TEST(RollbackEngine, SparseVerifyAsksForTheWrittenCellsAndTheReplaysCheckDoesNot) {
+    fake_world world;
+    world.bodies["Plate"].position[0] = 40.0;
+    world.bodies["Plate"].linear[1] = -0.5f;
+    rollback_engine engine;
+    engine.set_sparse_capture(4, true);
+    engine.set_replay_last_light(true);
+    auto w = world.adapter();
+    uint8_t captures = 0;   // every capture's "cells" differ from every other's
+    w.capture_scripts = [&](std::vector<uint8_t>& out) {
+        out = {7, ++captures};
+        return true;
+    };
+    w.restore_scripts = [](const std::vector<uint8_t>&, uint32_t) { return true; };
+    std::vector<bool> asked;
+    w.diff_scripts = [&](const std::vector<uint8_t>&, const std::vector<uint8_t>&, bool& logical) {
+        asked.push_back(logical);
+        return logical ? std::string("written cells: differ") : std::string();
+    };
+    rollback_tracked tracked;
+    tracked.mechanisms = {"Plate"};
+    for (uint32_t tick = 1; tick <= 14; ++tick) {
+        w.step();
+        engine.record(w, tick, tracked, {});
+    }
+    ASSERT_TRUE(engine.rewind_to(w, 10, 14, no_input, "first"));
+    w.step();
+    engine.record(w, 15, tracked, {});
+    ASSERT_TRUE(engine.rewind_to(w, 14, 15, no_input, "second"));   // rebased from 12: verify at 14
+    EXPECT_EQ(engine.stats().sparse_verified, 1u);
+    EXPECT_EQ(engine.stats().sparse_verify_mismatches, 1u) << "the cells differ";
+    EXPECT_EQ(engine.stats().script_mismatches, 0u) << "the replay's own check leaves them out";
+    EXPECT_EQ(std::count(asked.begin(), asked.end(), true), 1) << "the anchor's compare only";
+    EXPECT_GE(std::count(asked.begin(), asked.end(), false), 1) << "the last ticks' checks";
+}

@@ -4593,6 +4593,13 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
                       static_cast<unsigned long long>(t.cache_verified), static_cast<unsigned long long>(t.cache_mismatches));
         logger_->Info("Physics session: %s", proximity_host.union_.lookup_line().c_str());   // place's candidates by name
     }
+    {   // the restores' delayed links and the live tick's pending adds taken back, since the process started
+        const auto& links = bmmo::game::script_replay::link_totals();
+        const auto& m = bmmo::game::script_replay::membership();
+        logger_->Info("Physics session: %s; live_adds_taken=%llu live_adds_kept=%llu", links.line().c_str(),
+                      static_cast<unsigned long long>(m.live_adds_taken), static_cast<unsigned long long>(m.live_adds_kept));
+        for (const std::string& note: links.notes) logger_->Info("Physics session: delayed links: %s", note.c_str());
+    }
     if (host.core && host.core->session_phase() != bs::client_core_state::phase::idle) host.core->end(reason);
     // Step WG4 (world-agreement-gaps design 2.3 "Release"): the level
     // outlives the session, so the union's sources go back now - vanilla play

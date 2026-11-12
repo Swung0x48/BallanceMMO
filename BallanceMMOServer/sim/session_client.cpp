@@ -5104,10 +5104,12 @@ namespace {
             // Step RK2: the records' written-cell section in this process.
             {
                 const auto& w = bmmo::game::script_replay::written_cells_stats();
-                logf("cells: captured=%llu columns=%llu rows=%llu restores=%llu restored_rows=%llu skipped=%llu",
+                logf("cells: captured=%llu columns=%llu rows=%llu restores=%llu restored_rows=%llu skipped=%llu compared=%llu"
+                     " differed=%llu",
                      static_cast<unsigned long long>(w.captured), static_cast<unsigned long long>(w.captured_columns),
                      static_cast<unsigned long long>(w.captured_rows), static_cast<unsigned long long>(w.restores),
-                     static_cast<unsigned long long>(w.rows), static_cast<unsigned long long>(w.skipped));
+                     static_cast<unsigned long long>(w.rows), static_cast<unsigned long long>(w.skipped),
+                     static_cast<unsigned long long>(w.compared), static_cast<unsigned long long>(w.differed));
             }
             // Step OPB: the written-cell columns' memo (hits, re-walks by
             // cause, verify mismatches, the watch list's size).
@@ -5138,12 +5140,19 @@ namespace {
             {
                 const auto& m = bmmo::game::script_replay::membership();
                 logf("membership: reregistered=%llu flags_kept=%llu unregistered=%llu settled=%llu replayed_adds=%llu"
-                     " replayed_removes=%llu replayed_taken_back=%llu replayed_kept=%llu replayed_unrecoverable=%llu",
+                     " replayed_removes=%llu replayed_taken_back=%llu replayed_kept=%llu replayed_unrecoverable=%llu"
+                     " live_adds_taken=%llu live_adds_kept=%llu",
                      static_cast<unsigned long long>(m.reregistered), static_cast<unsigned long long>(m.flags_kept),
                      static_cast<unsigned long long>(m.unregistered), static_cast<unsigned long long>(m.settled),
                      static_cast<unsigned long long>(m.replayed_adds), static_cast<unsigned long long>(m.replayed_removes),
                      static_cast<unsigned long long>(m.replayed_taken_back),
-                     static_cast<unsigned long long>(m.replayed_kept), static_cast<unsigned long long>(m.replayed_unrecoverable));
+                     static_cast<unsigned long long>(m.replayed_kept), static_cast<unsigned long long>(m.replayed_unrecoverable),
+                     static_cast<unsigned long long>(m.live_adds_taken), static_cast<unsigned long long>(m.live_adds_kept));
+                // The restores' delayed links (re-armed, refused, taken out
+                // of flight, left in flight).
+                const auto& links = bmmo::game::script_replay::link_totals();
+                logf("%s", links.line().c_str());
+                for (const std::string& note: links.notes) logf("delayed links: %s", note.c_str());
             }
             // Step RLC: the joint ledger - constraints named by their image in
             // the records, made again or replaced at a restore, in this process.

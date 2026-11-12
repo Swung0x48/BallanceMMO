@@ -397,7 +397,9 @@ namespace bmmo::session {
         // - a float parameter that follows the physics by an ulp is reported
         // in the text but is not a logical difference.  The engine counts a
         // mismatch only when this says the difference is logical (or when it
-        // is absent and the bytes differ).
+        // is absent and the bytes differ).  `logical` in: whether the
+        // records' written-cell sections are compared too (true only for
+        // sparse capture's verify, two replays of one tick).
         std::function<std::string(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, bool& logical)> diff_scripts;
         std::function<void(const std::string&)> log;
         // Optional: every decision the engine takes about a snapshot, so the
@@ -2699,6 +2701,7 @@ namespace bmmo::session {
                         && state.scripts != live_scripts) {
                     script_differs = true;
                     if (world.diff_scripts) {
+                        script_logical = false;   // not the written cells (decision Q4)
                         script_where = world.diff_scripts(live_scripts, state.scripts, script_logical);
                         // An empty answer: the bytes differ only in what the
                         // hook does not compare (step RK2: the record's
@@ -3826,7 +3829,7 @@ namespace bmmo::session {
             std::string script_floats;
             if (old.have_scripts != fresh.have_scripts) add("scripts (presence)");
             else if (old.have_scripts && old.scripts != fresh.scripts) {
-                bool logical = true;
+                bool logical = true;   // the written cells too
                 std::string where = world.diff_scripts ? world.diff_scripts(old.scripts, fresh.scripts, logical) : "bytes";
                 // Float parameters only (the replay's own script check counts
                 // them apart too: script_float_mismatches): counted, not a

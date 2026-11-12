@@ -265,6 +265,7 @@ namespace bmmo::game {
         // them in its cells: line, SimTool in its savestate-check summary.
         struct written_cells_counters {
             uint64_t captured = 0, captured_columns = 0, captured_rows = 0, restores = 0, rows = 0, skipped = 0;
+            uint64_t compared = 0, differed = 0;   // two records' sections compared by `diff` (asked: `cells`), found apart
         };
         static written_cells_counters& written_cells_stats() {
             static written_cells_counters counters;
@@ -529,9 +530,11 @@ namespace bmmo::game {
         // their anchor absence, joints the anchor had and the live world has
         // lost (nothing can make those), delayed links re-armed, links that
         // could not be (their output has a plain link too), live in-flight
-        // links the anchor did not have (the SDK cannot clear a graph's list).
+        // links the anchor did not have and the restore could not take out
+        // of flight, and those it took out (links_withdrawn).
         struct restore_counters {
             uint32_t joints_reset = 0, joints_missing = 0, links_rearmed = 0, links_unrestorable = 0, links_live_pending = 0;
+            uint32_t links_withdrawn = 0;
             uint32_t links_inexact = 0;   // of `inexact`: a delayed link re-armed, or left at another countdown
             uint32_t cells_written = 0;
             // Step RK2: the written-cell section's rows written back, and its
@@ -717,9 +720,34 @@ namespace bmmo::game {
             uint64_t replayed_taken_back = 0;
             uint64_t replayed_kept = 0;
             uint64_t replayed_unrecoverable = 0;
+            // The live frame's own pending adds of the selection's owners,
+            // taken back at its first restore (the replay makes them again),
+            // and those left because a script of the owner the restore does
+            // not write is active or to be activated (take_back_live_adds).
+            uint64_t live_adds_taken = 0;
+            uint64_t live_adds_kept = 0;
         };
         static membership_counters& membership() {
             static membership_counters counters;
+            return counters;
+        }
+        // The restores' delayed links in this process: re-armed, refused a
+        // re-arm, taken out of flight (in flight live, not at the record),
+        // and left in flight because a link after them in the graph could
+        // not be taken out with them; the first cases of the last two named.
+        struct link_counters {
+            uint64_t rearmed = 0, unrestorable = 0, withdrawn = 0, live_pending = 0;
+            std::vector<std::string> notes;
+            void note(const std::string& what) {
+                if (notes.size() < 16) notes.push_back(what);
+            }
+            std::string line() const {
+                return "delayed links: rearmed=" + std::to_string(rearmed) + " unrestorable=" + std::to_string(unrestorable)
+                     + " withdrawn=" + std::to_string(withdrawn) + " live_pending=" + std::to_string(live_pending);
+            }
+        };
+        static link_counters& link_totals() {
+            static link_counters counters;
             return counters;
         }
         // Whether the live frame would process `beh`'s next-frame flags and
@@ -794,9 +822,11 @@ namespace bmmo::game {
             CKDWORD frame = 0;   // the live frame the entries belong to
             std::vector<registration> entries;
             std::vector<replayed_add> replayed;   // step FX1
+            bool live_taken = false;              // take_back_live_adds ran in this live frame
             void clear() {
                 entries.clear();
                 replayed.clear();
+                live_taken = false;
             }
         };
         static registration_ledger& registrations() {
@@ -1018,6 +1048,39 @@ namespace bmmo::game {
                 it = ledger.replayed.erase(it);
             }
             return taken;
+        }
+        // The live frame's own pending adds, taken back at its first restore
+        // (BMMO_LIVE_ADDS, on when unset).  The table holds what the live
+        // tick's scripts added after its ManageObjectsActivity consumed the
+        // last one; the replay runs that tick again and makes again what the
+        // corrected tick makes, so a replay never reads the live tick's adds
+        // (owner_pending_add admitted the owner of a script the live tick's
+        // Activate Script had added, and the replay resolved a pending
+        // DEACTIVATENEXTFRAME that replays run in other frames keep), and a
+        // live add the corrected tick no longer makes does not reach the next
+        // live frame.  Only the selection's owners, and only a positive count
+        // (a removal is the live ExecuteBehaviors', which no replay makes
+        // again).  An owner with a script the restore does not write active
+        // or to be activated keeps its count: that script's activation may be
+        // the add's maker, outside the replay (RLM's rule).  Later restores of
+        // the same live frame take back the earlier replays' adds instead
+        // (take_back_replayed_adds), so nothing is taken twice.  The host's
+        // re-issue at the rewind's end (live_cells_guard) activates through
+        // CKScene::Activate, which adds again.
+        static void take_back_live_adds(CKContext* context, const selection& sel, const std::vector<CKBehavior*>& written) {
+            registration_ledger& ledger = current_registrations(context);
+            CKBehaviorManager* manager = context ? context->GetBehaviorManager() : nullptr;
+            if (ledger.live_taken || !manager) return;
+            ledger.live_taken = true;
+            for (const replayed_add& owner: owner_pending_counts(context, sel)) {
+                if (owner.adds <= 0) continue;
+                const uint64_t units = static_cast<uint64_t>(owner.adds);
+                if (owner_keeps(context, owner.owner, &written)) {
+                    membership().live_adds_kept += units;
+                    continue;
+                }
+                if (pending_set(manager, owner.owner, 0)) membership().live_adds_taken += units;
+            }
         }
         // G1: a root script the restore wrote back active (or about to be
         // activated) whose owner the live frame would not run.  Returns true
@@ -2249,8 +2312,10 @@ namespace bmmo::game {
             // back first - one written back finished must not find its owner
             // still pending from a rewind of the same live frame.
             if (live_membership()) {
-                // Step FX1: the earlier replays' pending adds first.
+                // Step FX1: the earlier replays' pending adds first, then
+                // (at the live frame's first restore) the live tick's own.
                 take_back_replayed_adds(context, written);
+                if (live_adds_from_env()) take_back_live_adds(context, sel, written);
                 membership().unregistered += take_back_registrations(context, written);
                 for (CKBehavior* beh: written)
                     if (reregister(context, beh)) ++membership().reregistered;
@@ -2416,10 +2481,26 @@ namespace bmmo::game {
         // read both records to their ends with nothing counted is equal: a
         // difference the walk does not count (trailing bytes, a truncated
         // record) keeps `any`.
+        // `cells`: the written-cell sections are compared too (sparse
+        // capture's verify: two replays of one tick, which must agree there
+        // as anywhere; the replay's own check against the live record does
+        // not ask, decision Q4).
         static difference diff(CKContext* context, const selection& sel, const std::vector<uint8_t>& a,
-                               const std::vector<uint8_t>& b, const std::map<CK_ID, uint32_t>* masks = nullptr) {
+                               const std::vector<uint8_t>& b, const std::map<CK_ID, uint32_t>* masks = nullptr,
+                               bool cells = false) {
             bool complete = false;
             difference d = diff_walk(context, sel, a, b, masks, complete);
+            if (cells && complete) {
+                const std::string what = written_difference(a, d.cells_a, b, d.cells_b);
+                if (!what.empty()) {
+                    ++written_cells_stats().differed;
+                    d.any = d.logical = true;
+                    ++d.logical_count;
+                    d.note(what);
+                    if (d.where.empty()) d.where = what;
+                    return d;
+                }
+            }
             if (masks && complete && d.logical_count == 0 && d.float_count == 0 && d.where.empty()) d.any = false;
             // Step RK2 (decision Q4, "no check compares it"): two records
             // equal but for their written-cell sections (and the header words
@@ -2430,6 +2511,33 @@ namespace bmmo::game {
                                   b.begin() + static_cast<std::ptrdiff_t>(d.body_b)))
                 d.any = false;
             return d;
+        }
+        // The first difference of two written-cell sections at a[pa] and
+        // b[pb] (a record's end when it has none: nothing when neither has
+        // one, a difference when one has).
+        static std::string written_difference(const std::vector<uint8_t>& a, size_t pa, const std::vector<uint8_t>& b, size_t pb) {
+            const bool has_a = pa < a.size(), has_b = pb < b.size();
+            if (!has_a && !has_b) return std::string();
+            ++written_cells_stats().compared;
+            if (has_a != has_b) return "written cells: in one record only";
+            uint16_t ca = 0, cb = 0;
+            if (!get_u16(a, pa, ca) || !get_u16(b, pb, cb)) return "written cells: truncated";
+            if (ca != cb) return "written cells: the column counts differ";
+            for (uint16_t i = 0; i < ca; ++i) {
+                uint32_t aa = 0, ka = 0, ra = 0, ab = 0, kb = 0, rb = 0;
+                if (!get_u32(a, pa, aa) || !get_u32(a, pa, ka) || !get_u32(a, pa, ra) || !get_u32(b, pb, ab) || !get_u32(b, pb, kb)
+                        || !get_u32(b, pb, rb))
+                    return "written cells: truncated";
+                if (aa != ab || ka != kb || ra != rb) return "written cells: column " + std::to_string(i) + " differs in its header";
+                for (uint32_t r = 0; r < ra; ++r) {
+                    uint32_t va = 0, vb = 0;
+                    if (!get_u32(a, pa, va) || !get_u32(b, pb, vb)) return "written cells: truncated";
+                    if (va != vb)
+                        return "written cells: array #" + std::to_string(aa) + " [" + std::to_string(r) + "][" + std::to_string(ka)
+                             + "] " + std::to_string(va) + " vs " + std::to_string(vb);
+                }
+            }
+            return std::string();
         }
         static difference diff_walk(CKContext* context, const selection& sel, const std::vector<uint8_t>& a,
                                     const std::vector<uint8_t>& b, const std::map<CK_ID, uint32_t>* masks,
@@ -4493,7 +4601,8 @@ namespace bmmo::game {
                 const restore_counters& now = last_restore();
                 ++stats.restore_plan_verified;
                 if (now.links_rearmed != before.links_rearmed || now.links_unrestorable != before.links_unrestorable
-                        || now.links_live_pending != before.links_live_pending || now.links_inexact != before.links_inexact)
+                        || now.links_live_pending != before.links_live_pending || now.links_inexact != before.links_inexact
+                        || now.links_withdrawn != before.links_withdrawn)
                     stats.restore_note("restore_plan mismatch: " + owner_name(beh) + " / " + (beh->GetName() ? beh->GetName() : "")
                                        + " (#" + std::to_string(beh->GetID()) + "): the walk handled a delayed link, the plan has none");
                 if (walked != parts || pos != end)
@@ -4590,6 +4699,13 @@ namespace bmmo::game {
             for (int i = 0; i < links; ++i)
                 if (CKBehaviorLink* link = beh->GetSubBehaviorLink(i); link && link->GetInitialActivationDelay() > 1) ++now_delayed;
             if (delayed != now_delayed) return fail(error, "delayed link count");
+            // The links in flight live and not at the record (strays: the
+            // first one's index and their number), and the last link that
+            // stays in the graph's list as it is (in flight in both, its
+            // re-arm refused).  `links_at`: the record's countdowns.
+            int first_stray = -1, last_kept = -1;
+            uint32_t strays = 0;
+            const size_t links_at = pos;
             for (int i = 0; i < links; ++i) {
                 CKBehaviorLink* link = beh->GetSubBehaviorLink(i);
                 if (!link || link->GetInitialActivationDelay() <= 1) continue;
@@ -4600,6 +4716,11 @@ namespace bmmo::game {
                 const int live = link->GetActivationDelay();
                 const bool pending_recorded = recorded > 0 && recorded < initial;
                 const bool pending_live = live > 0 && live < initial;
+                if (pending_live && !pending_recorded && live_links_from_env()) {
+                    if (first_stray < 0) first_stray = i;   // taken out below (withdraw_links)
+                    ++strays;
+                    continue;
+                }
                 if (pending_recorded) {
                     // Re-armed: the countdown set to the anchor's, the source
                     // output active again; the next execution of this graph
@@ -4611,16 +4732,20 @@ namespace bmmo::game {
                         link->SetActivationDelay(recorded);
                         owner->ActivateOutput(index, TRUE);
                         ++last_restore().links_rearmed;
+                        ++link_totals().rearmed;
                         ++last_restore().inexact;   // the source's output is on, the record's is not
                         ++last_restore().links_inexact;
                         last_rearmed_outputs().emplace_back(owner->GetID(), index);   // step B2SX (Q5)
                     } else {
                         ++last_restore().links_unrestorable;
+                        ++link_totals().unrestorable;
+                        if (pending_live) last_kept = i;   // stays in the list, at the live countdown
                     }
                 } else if (pending_live) {
-                    // In flight live, not at the anchor: the graph's list is
-                    // not reachable through the SDK, so it fires anyway.
+                    // In flight live, not at the anchor, left (BMMO_LIVE_LINKS
+                    // off): it fires inside the replay.
                     ++last_restore().links_live_pending;
+                    ++link_totals().live_pending;
                 }
                 // A countdown nothing wrote stays the live one.
                 if (link->GetActivationDelay() != recorded) {
@@ -4628,7 +4753,69 @@ namespace bmmo::game {
                     ++last_restore().links_inexact;
                 }
             }
+            if (strays) withdraw_links(beh, in, links_at, first_stray, last_kept, strays);
             return true;
+        }
+        // The stray links of `graph` (in flight live, not at the record;
+        // their countdowns already the record's) taken out of its delayed
+        // list.  The SDK has no call for the list, but RemoveSubBehaviorLink
+        // takes a link out of it with the graph's link array (retail CK2.dll
+        // as the reimplementation: m_SubBehaviorLinks then m_Links, both
+        // order-keeping erases) and AddSubBehaviorLink appends to the array
+        // with the link's in-list flag cleared.  Every link from the first
+        // stray on is removed and appended again, so the array ends in its
+        // own order (the records' and CheckIOsActivation's order); the
+        // others among them leave the list too, which is no change for a
+        // link the restore re-armed (its source output is on: the graph's
+        // next CheckIOsActivation queues it again, keeping its countdown,
+        // as it would keep it in the list) or one not in flight.  Then each
+        // stray takes the record's countdown (0 or the initial delay: a
+        // queue keeps a non-zero countdown, so the stale one would shorten
+        // the replay's own delay), and is as at the record - idle, out of
+        // the list - firing only when the replay queues it, as a live queue
+        // would.  Refused when a link after the first stray must stay in the
+        // list (in flight in both, its re-arm refused): the strays are left
+        // to fire as before and counted (links_live_pending, inexact).
+        static void withdraw_links(CKBehavior* graph, const std::vector<uint8_t>& in, size_t at, int first, int kept,
+                                   uint32_t strays) {
+            const int count = graph->GetSubBehaviorLinkCount();
+            CKBehaviorLink* head = graph->GetSubBehaviorLink(first);
+            CKBehaviorLink* tail = graph->GetSubBehaviorLink(count - 1);
+            if (kept > first) {
+                last_restore().links_live_pending += strays;
+                last_restore().inexact += strays;
+                last_restore().links_inexact += strays;
+                link_totals().live_pending += strays;
+                link_totals().note("left in flight: " + owner_name(graph) + " / " + (graph->GetName() ? graph->GetName() : "")
+                                   + " (#" + std::to_string(graph->GetID()) + "): " + std::to_string(strays)
+                                   + " link(s), a re-arm refused after them");
+                return;
+            }
+            for (int i = first; i < count; ++i) graph->AddSubBehaviorLink(graph->RemoveSubBehaviorLink(first));
+            if (graph->GetSubBehaviorLinkCount() != count || graph->GetSubBehaviorLink(first) != head
+                    || graph->GetSubBehaviorLink(count - 1) != tail) {
+                // Not the engine this was read from: counted as not restored.
+                last_restore().links_unrestorable += strays;
+                last_restore().inexact += strays;
+                last_restore().links_inexact += strays;
+                link_totals().unrestorable += strays;
+                link_totals().note("link order changed: " + owner_name(graph) + " / " + (graph->GetName() ? graph->GetName() : ""));
+                return;
+            }
+            for (int i = 0; i < count; ++i) {
+                CKBehaviorLink* link = graph->GetSubBehaviorLink(i);
+                if (!link || link->GetInitialActivationDelay() <= 1) continue;
+                uint16_t recorded = 0;
+                get_u16(in, at, recorded);   // read once already
+                const int initial = link->GetInitialActivationDelay(), live = link->GetActivationDelay();
+                if (live > 0 && live < initial && !(recorded > 0 && recorded < initial)) link->SetActivationDelay(recorded);
+            }
+            last_restore().links_withdrawn += strays;
+            link_totals().withdrawn += strays;
+            if (link_totals().withdrawn <= 8)
+                link_totals().note("withdrawn: " + owner_name(graph) + " / " + (graph->GetName() ? graph->GetName() : "") + " (#"
+                                   + std::to_string(graph->GetID()) + "): " + std::to_string(strays) + " link(s) from link "
+                                   + std::to_string(first));
         }
 
         static bool fail(std::string* error, const char* why) {
