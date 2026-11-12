@@ -358,6 +358,10 @@ namespace bmmo::game {
             static const CKGUID guid(0x56e20c57, 0xb926068);   // SetPhysicsForce (physics_RT/Behaviors/PhysicsForce.cpp)
             return guid;
         }
+        static const CKGUID& listener_block_guid() {
+            static const CKGUID guid(0x7435488d, 0x201d1188);   // PhysicsCollDetection (physics_RT)
+            return guid;
+        }
         static const CKGUID& dynamic_position_guid() {
             static const CKGUID guid(0xfd4755f, 0x7de22dc8);   // TT Set Dynamic Position (TT_Toolbox_RT/Behaviors/SetDynamicPosition.cpp)
             return guid;
@@ -413,6 +417,31 @@ namespace bmmo::game {
             // root's activation words against the built bytes
             // (dormant_guard_trips counts the capture's misses).
             mutable std::vector<uint8_t> dormant;
+            // The held scripts (script_slots.hpp): beside each ledger entry,
+            // a plan over the block the script is KNOWN to hold when that is
+            // not its built state.  One state with the entry: every write of
+            // the entry (set_dormant - each place above that can change the
+            // script, and the capture's and the restore's own) drops it, and
+            // only two places set it right afterwards - a capture that walked
+            // the script and a restore that wrote it exactly (hold_trafo).
+            // `seen`: one such finding since the entry was last cleared; the
+            // second in a row leaves the plan, so a script that runs every
+            // tick never pays for one; a script with a live collision
+            // listener gets none (the listener writes its block's outputs
+            // during the physics step, the script not running).  Two readers,
+            // as the entry has: the
+            // capture, which emits the block from the plan, and the restore
+            // skip, which leaves the script when the record's block is the
+            // plan's bytes; both check the root's activation words first.
+            struct held_block {
+                script_slots::plan plan;
+                bool seen = false;
+            };
+            mutable std::vector<held_block> held;
+            const script_slots::plan* held_plan(size_t i) const {
+                return i < held.size() && held[i].plan.valid ? &held[i].plan : nullptr;
+            }
+            bool held_seen(size_t i) const { return i < held.size() && held[i].seen; }
             // Each script's plan over its built bytes (trafo_plan: the
             // restore plan), made at first use; the built bytes never change.
             mutable std::map<CK_ID, script_slots::plan> plans;
@@ -423,8 +452,14 @@ namespace bmmo::game {
             }
             bool is_dormant(size_t i) const { return i < dormant.size() && dormant[i] != 0; }
             void set_dormant(size_t i, bool known) const {
-                if (dormant.size() != scripts.size()) dormant.assign(scripts.size(), 0);
-                if (i < dormant.size()) dormant[i] = known ? 1 : 0;
+                if (dormant.size() != scripts.size()) {
+                    dormant.assign(scripts.size(), 0);
+                    held.assign(scripts.size(), held_block{});
+                }
+                if (i < dormant.size()) {
+                    dormant[i] = known ? 1 : 0;
+                    held[i] = held_block{};
+                }
             }
             void touch(CK_ID id) const { set_dormant(index_of(id), false); }
             // A script that runs can write another script of its set through
@@ -442,7 +477,10 @@ namespace bmmo::game {
                     if (auto* other = CKBehavior::Cast(context->GetObject(scripts[j])); other && other->GetOwner() == owner)
                         set_dormant(j, false);
             }
-            void forget_all() const { dormant.clear(); }
+            void forget_all() const {
+                dormant.clear();
+                held.clear();
+            }
         };
         // Record v3's per-script byte for a trafo script in its set's built
         // state (RC4): no block follows, and the restore writes the built
@@ -1519,6 +1557,7 @@ namespace bmmo::game {
                 put_u32(out, static_cast<uint32_t>(value));
             }
             if (v3) {
+                const script_reuse_mode held_mode = trafo_held_mode_from_env();
                 put_u32(out, static_cast<uint32_t>(trafo->scripts.size()));
                 for (size_t i = 0; i < trafo->scripts.size(); ++i) {
                     const CK_ID id = trafo->scripts[i];
@@ -1544,6 +1583,51 @@ namespace bmmo::game {
                     }
                     put_u8(out, 1);
                     const size_t at = out.size();
+                    // The held scripts: a script known to hold a block that
+                    // is not its built state is emitted from its plan (its
+                    // tails read now), the guard first; verify walks it as
+                    // well, compares and keeps the plan's bytes.
+                    if (const script_slots::plan* held = held_mode == script_reuse_mode::off ? nullptr : trafo->held_plan(i)) {
+                        slot_memo_stats& stats = slot_memo_totals();
+                        const uint64_t imaged_before = joint_stats().imaged;
+                        if (!root_activation_is(beh, held->statics)) {
+                            ++stats.held_guard;
+                        } else if (!emit_plan(context, *held, hooks, out)) {
+                            out.resize(at);
+                            joint_stats().imaged = imaged_before;   // the walk below images them again
+                            ++stats.held_gone;
+                        } else {
+                            ++stats.held_captured;
+                            if (held_mode == script_reuse_mode::verify) {
+                                ++stats.held_verified;
+                                const uint64_t imaged = joint_stats().imaged;
+                                const size_t mid = out.size();
+                                capture_behavior(beh, hooks, out);
+                                joint_stats().imaged = imaged;
+                                const size_t emitted = mid - at, fresh = out.size() - mid;
+                                if (fresh != emitted || !std::equal(out.begin() + static_cast<std::ptrdiff_t>(at),
+                                                                    out.begin() + static_cast<std::ptrdiff_t>(mid),
+                                                                    out.begin() + static_cast<std::ptrdiff_t>(mid)))
+                                    stats.note("trafo_held mismatch: " + owner_name(beh) + " / " + (beh->GetName() ? beh->GetName() : "")
+                                               + " (#" + std::to_string(id) + "): the walk (" + std::to_string(fresh)
+                                               + " bytes) differs from the held block at byte "
+                                               + std::to_string(first_difference(out.data() + mid, fresh, out.data() + at, emitted)));
+                                out.resize(mid);
+                            }
+                            // The walk's rule: a block that reads as the built
+                            // state (a tail came back to it) is recorded so.
+                            if (has_built && out.size() - at == built->second.size()
+                                    && std::equal(built->second.begin(), built->second.end(), out.begin() + static_cast<std::ptrdiff_t>(at))) {
+                                trafo->set_dormant(i, true);
+                                out.resize(at - 1);
+                                put_u8(out, kTrafoDormant);
+                                ++dormancy().healed;
+                            }
+                            continue;
+                        }
+                        trafo->set_dormant(i, false);   // not what the entry knew: walked as unknown
+                    }
+                    const bool seen = trafo->held_seen(i);
                     capture_behavior(beh, hooks, out);
                     const bool as_built = has_built && out.size() - at == built->second.size()
                                        && std::equal(built->second.begin(), built->second.end(), out.begin() + static_cast<std::ptrdiff_t>(at));
@@ -1554,6 +1638,7 @@ namespace bmmo::game {
                         ++dormancy().healed;
                     } else {
                         ++dormancy().walked;
+                        hold_trafo(*trafo, i, seen, beh, hooks, out, at, out.size());
                     }
                 }
             }
@@ -2014,13 +2099,30 @@ namespace bmmo::game {
                     }
                     if (present != 1) return fail(error, "trafo script presence");
                     const size_t at = pos;
-                    if (trafo) trafo->touch(static_cast<CK_ID>(id));   // unknown while it is written
+                    const size_t index = trafo ? trafo->index_of(static_cast<CK_ID>(id)) : 0;
                     const uint32_t inexact = last_restore().inexact;
+                    // The held scripts: a script known to hold the record's
+                    // block (the restore skip) gets its tails only.
+                    size_t end = 0;
+                    if (const script_slots::plan* held =
+                            trafo ? trafo_held_already(context, beh, hooks, *trafo, index, in, at, skip_mode, end) : nullptr) {
+                        if (!restore_block(context, beh, hooks, in, pos, end, error, true, false, true, planning ? held : nullptr,
+                                           slot_memo_totals().restore_trafo_planned))
+                            return false;
+                        if (pos != end) return fail(error, "trailing bytes in a script block");
+                        if (last_restore().inexact != inexact) trafo->set_dormant(index, false);   // no longer known
+                        continue;
+                    }
+                    const bool seen = trafo && trafo->held_seen(index);
+                    if (trafo) trafo->touch(static_cast<CK_ID>(id));   // unknown while it is written
                     if (!restore_behavior(beh, hooks, in, pos, error, true)) return false;
-                    if (trafo)
-                        trafo->set_dormant(trafo->index_of(static_cast<CK_ID>(id)),
-                                           last_restore().inexact == inexact && built && pos - at == built->size()
-                                               && std::equal(built->begin(), built->end(), in.begin() + static_cast<std::ptrdiff_t>(at)));
+                    if (trafo) {
+                        const bool exact = last_restore().inexact == inexact;
+                        const bool as_built = exact && built && pos - at == built->size()
+                                           && std::equal(built->begin(), built->end(), in.begin() + static_cast<std::ptrdiff_t>(at));
+                        trafo->set_dormant(index, as_built);
+                        if (exact && !as_built) hold_trafo(*trafo, index, seen, beh, hooks, in, at, pos);
+                    }
                 }
             }
             // v4 / v5: the queued entries of the recorded scripts (gap Q).
@@ -2282,7 +2384,7 @@ namespace bmmo::game {
             if (!context) return 0;
             const int executed = execute_scripts(context, part.scripts, delta_ms, false, nullptr, &part);
             for (size_t i = 0; i < part.scripts.size(); ++i)
-                if (part.is_dormant(i))
+                if (part.is_dormant(i) || part.held_seen(i))
                     if (auto* beh = CKBehavior::Cast(context->GetObject(part.scripts[i])); beh && (beh->GetFlags() & kFrameFlags))
                         part.set_dormant(i, false);
             return executed;
@@ -3505,6 +3607,101 @@ namespace bmmo::game {
             if (same) ++stats.restore_trafo_skipped;
             return same;
         }
+        // The held scripts (trafo_part::held): `beh`, script `index` of the
+        // part, holds the block at in[at], the tails apart - a capture's walk
+        // just emitted it there or a restore just wrote it exactly, and the
+        // entry was just written (set_dormant).  `seen`: the entry had such a
+        // finding before that write, so nothing cleared it in between, and
+        // the plan is made now: the copy's own walk over those bytes, its
+        // output dropped, without the capture hooks (trafo_plan's reasons).
+        // `end`: where the block ends.  No plan over a script with a live
+        // collision listener (listening).
+        static void hold_trafo(const trafo_part& trafo, size_t index, bool seen, CKBehavior* beh, const script_replay_hooks& hooks,
+                               const std::vector<uint8_t>& in, size_t at, size_t end) {
+            if (trafo_held_mode_from_env() == script_reuse_mode::off || index >= trafo.held.size()) return;
+            trafo_part::held_block& held = trafo.held[index];
+            held = trafo_part::held_block{};
+            held.seen = true;
+            if (!seen || listening(beh)) return;
+            plan_recorder recorder{&held.plan, 0};
+            script_replay_hooks plain = hooks;
+            plain.capture_force = nullptr;
+            plain.capture_joint = nullptr;
+            std::vector<uint8_t> out;
+            uint64_t tails = 0;
+            held.plan.valid = copy_with_fresh_tails(beh, plain, in, at, out, tails, false, &recorder) && at == end;
+            held.plan.statics.insert(held.plan.statics.end(), out.begin() + static_cast<std::ptrdiff_t>(recorder.mark), out.end());
+            if (held.plan.valid) ++slot_memo_totals().held_set;
+        }
+        // Whether a block of `beh`'s graph is a collision listener with its
+        // listener alive (physics_RT PhysicsCollDetection, its pointer local
+        // set): the listener writes the block's outputs and activates its
+        // output during the physics step, whether or not the script runs.
+        // One is made only by the block's execution, which clears the ledger's
+        // entry, so a script found without one has none while its entry stands.
+        static bool listening(CKBehavior* beh) {
+            if (!beh) return false;
+            if (beh->IsUsingFunction()) {
+                void* listener = nullptr;
+                if (beh->GetPrototypeGuid() == listener_block_guid() && beh->GetLocalParameterCount() > 0)
+                    beh->GetLocalParameterValue(0, &listener);
+                return listener != nullptr;
+            }
+            for (int i = 0; i < beh->GetSubBehaviorCount(); ++i)
+                if (listening(beh->GetSubBehavior(i))) return true;
+            return false;
+        }
+        // The restore skip for a trafo script the record has in another
+        // state than its built one: its plan when the script is known to
+        // hold the record's block at in[at] - the ledger has a plan, the
+        // root's activation words are the plan's, no delayed link is in
+        // flight in it and the block is the plan's bytes with its parts in
+        // place (`end`: where the block ends) - else null, and the script is
+        // written.  Verify (this switch's or the restore skip's) compares
+        // the record's block, copied in step with the live graph (the tails
+        // fresh: a write puts those back), with a walk, and says no.
+        static const script_slots::plan* trafo_held_already(CKContext* context, CKBehavior* beh, const script_replay_hooks& hooks,
+                                                            const trafo_part& trafo, size_t index, const std::vector<uint8_t>& in,
+                                                            size_t at, script_reuse_mode skip_mode, size_t& end) {
+            const script_reuse_mode mode = trafo_held_mode_from_env();
+            const script_slots::plan* plan =
+                mode == script_reuse_mode::off || skip_mode == script_reuse_mode::off ? nullptr : trafo.held_plan(index);
+            if (!plan) return nullptr;
+            slot_memo_stats& stats = slot_memo_totals();
+            if (!root_activation_is(beh, plan->statics)) {
+                ++stats.held_guard;
+                trafo.set_dormant(index, false);   // not what the entry knew
+                return nullptr;
+            }
+            if (plan->pending) {
+                ++stats.held_pending;
+                return nullptr;
+            }
+            std::vector<plan_mark> marks;
+            if (!locate_parts(context, *plan, in, at, in.size(), marks, &end)) {
+                ++stats.held_other;
+                return nullptr;
+            }
+            if (mode == script_reuse_mode::verify || skip_mode == script_reuse_mode::verify) {
+                ++stats.held_verified;
+                const uint64_t imaged = joint_stats().imaged;
+                std::vector<uint8_t> copied, walked;
+                uint64_t tails = 0;
+                size_t pos = at;
+                const bool copies = copy_with_fresh_tails(beh, hooks, in, pos, copied, tails) && pos == end;
+                capture_behavior(beh, hooks, walked);
+                joint_stats().imaged = imaged;
+                if (!copies || copied != walked)
+                    stats.restore_note("trafo_held mismatch: trafo script " + owner_name(beh) + " / "
+                                       + (beh->GetName() ? beh->GetName() : "") + " (#" + std::to_string(beh->GetID())
+                                       + "): the live walk (" + std::to_string(walked.size())
+                                       + " bytes) differs from the record's block, the tails apart, at byte "
+                                       + std::to_string(first_difference(walked.data(), walked.size(), copied.data(), copied.size())));
+                return nullptr;
+            }
+            ++stats.held_restored;
+            return plan;
+        }
         // The restore skip (script_slots.hpp): whether an omitted copy that a
         // restore is about to write already holds `image`.  Counts what it
         // decides; verify walks a copy it would skip, compares and says no.
@@ -4233,8 +4430,11 @@ namespace bmmo::game {
         // copied bytes compared, each part skipped.  False when the bytes are
         // not the plan's, a part's block is gone or no longer of its kind, or
         // the plan has a delayed link in flight (the walk re-arms it).
+        // `stop`: the block's end is not known - `end` only bounds it - and is
+        // returned (bytes that are the plan's, its parts skipped, are one
+        // block: the layout is read from those bytes).
         static bool locate_parts(CKContext* context, const script_slots::plan& plan, const std::vector<uint8_t>& in, size_t pos,
-                                 size_t end, std::vector<plan_mark>& marks) {
+                                 size_t end, std::vector<plan_mark>& marks, size_t* stop = nullptr) {
             marks.clear();
             if (plan.pending || end > in.size()) return false;
             size_t at = 0;
@@ -4251,7 +4451,9 @@ namespace bmmo::game {
                 marks.push_back({part.block, pos, part.images});
                 if (!(part.images ? skip_slot_images(in, pos) : skip_force_and_joint(in, pos)) || pos > end) return false;
             }
-            return copied(plan.statics.size() - at) && pos == end;
+            if (!copied(plan.statics.size() - at)) return false;
+            if (stop) *stop = pos;
+            return stop || pos == end;
         }
         // The parts locate_parts found, put back as the walk puts them back.
         static bool restore_parts(CKContext* context, const std::vector<plan_mark>& marks, const script_replay_hooks& hooks,

@@ -317,10 +317,7 @@ namespace bmmo::game {
             static const CKGUID guid(0x4c7e7bc3, 0x0b693155);   // Activate Script (Narratives)
             return guid;
         }
-        inline const CKGUID& coll_detection_guid() {
-            static const CKGUID guid(0x7435488d, 0x201d1188);   // PhysicsCollDetection (physics_RT)
-            return guid;
-        }
+        inline const CKGUID& coll_detection_guid() { return script_replay::listener_block_guid(); }   // PhysicsCollDetection
         template <typename F> void walk(CKBehavior* beh, F&& fn) {
             if (!beh) return;
             fn(beh);
@@ -1654,6 +1651,10 @@ namespace bmmo::game {
                 error = "a script of player " + std::to_string(player) + " has no built state";
                 return false;
             }
+            // The ledger's entry is written with the script (RC4): what it
+            // knew the script to hold - its built state or another block (the
+            // held scripts) - is not what it holds now.
+            registry.part().touch(id);
             if (!script_replay::restore_script_block(beh, hooks.forces, built->second, &error)) return false;
         }
         return true;

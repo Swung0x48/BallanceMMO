@@ -1834,3 +1834,94 @@ plan; FINAL rows of the shipped and the verify sessions bit-equal to the restore
 pieces; x64 and x86 builds, the Arch server; two serial reviews, no defects (verify's note of a delayed link the
 walk handled, a trafo plan made without the capture hooks, no plan looked up or made with the switch off are
 theirs).
+
+## Built (the held trafo scripts: a trafo script that did not run keeps its bytes, 2026-11-12)
+
+**What the trafo section still cost.** The restore plan left it at half: of the 104 trafo scripts of the public L6
+re-drive (13 players, K = 20) the skip left 59 at a restore and 45 were written whole, and every whole capture
+walked ~44. A census (counters only, on the public server's machine and in retail) says what the 45 are: 98.3 % of
+them already hold the record's bytes, tails apart, and nothing ran them or a script of their set since the last
+restore. They are the scripts whose state is not the built one for good once a ball has changed type -
+Ball_PaperWind and Ball_ResetPieces_Paper / _Stone / _Wood, one of each a player - so the dormant ledger, which
+knows only "built", never has them. Their walk was 0.544 ms of a 1.37 ms whole record and most of what the restore
+plan left of the trafo section.
+
+**Built** (`trafo_part::held`, `script_replay` `hold_trafo`, `trafo_held_already`, `listening`;
+`BMMO_TRAFO_HELD` off | on | verify, on when unset). Beside each dormant entry the ledger keeps a plan over the
+script's last known bytes when they are not the built ones. Every `set_dormant` drops it, so it stands under the
+dormant entry's own rule: the script and every script of its set have not run, and nothing wrote it, since. It is
+set in two places only, after a capture walked the script and after a restore wrote it exactly, and only at the
+second such finding in a row (a script that runs every tick never pays for a plan). A capture then emits the
+script's block from the plan (`emit_plan`, the copy plan's function: the copied bytes, the fresh parts read), under
+the capture's guard on the root's activation words; a block that reads as the built state is recorded as built,
+the walk's rule. A restore leaves such a script as it is when the record's block has the plan's copied bytes
+(`locate_parts`, which now also says where the block ends) and puts its fresh parts back by the restore plan's
+path. Anything else walks as before: the record's block has other bytes, a delayed link in flight in the plan, the
+guard. With the switch off no plan is made or looked up. Verify walks as ever and compares - a capture's block with
+the plan's, a restore's script with the record before it is written - and counts a difference with the memo's or
+the restore skip's mismatches. Counters on the slot_memo line: `trafo_held: mode= set= captured= restored= other=
+pending= guard= gone= checked=` (`restore_plan`'s `trafo=` counts the held scripts a plan put back too).
+
+**What the rule rests on, and its two exceptions.** "Not run, so the same bytes" holds for a trafo script as for a
+root, with its set in place of the script: a script of a set that runs writes its siblings through parameters they
+share (the dormant ledger's fault), so a run takes the whole set out of the ledger (`touch_set`), and nothing
+outside a set feeds its scripts (the fed roots' census). What is left is a writer that changes a block without any
+script running. Two such writers were found and closed. (1) `unmake_type_set` puts a set's
+scripts back to their built bytes outside the frame: it now takes the script out of the ledger first
+(`trafo_part::touch`). This is not behind the switch, so a session with the switch off is not byte for byte the
+restore plan's after an unmake; the records agree (the gate's rows). (2) A Physics Collision Detection block with a
+live listener has its outputs written, and its output activated, by the physics step: a script holding one gets no
+plan (`listening`; a listener is made only by the block's execution, which clears the entry, so a script found
+without one has none while its entry stands). The frame's end clears a held entry like a dormant one when the
+script is left with a frame flag. A guard that trips clears the entry and is counted apart (`guard=`) from a part
+whose block is gone (`gone=`); both are 0 in every run below.
+
+**Measured** on the 8845HS (the public L6 re-drive, the text-diff diagnostic off). One binary with the switch off /
+on, two interleaved pairs that agree, 13 clients on its 16 threads:
+
+| | off | on |
+|---|---|---|
+| frame p50 | 4.0 ms | 3.5 ms |
+| frame p99 | 16.1-16.3 ms | 14.4-14.7 ms |
+| the live capture a frame | 1.63 ms | 1.18 ms |
+| a replayed whole record | 1.39 ms | 0.97 ms |
+| a restore | 2.49 ms | 1.98 ms |
+| a replayed tick | 0.654 ms | 0.58 ms |
+| rewind work + capture a second | 306 ms | 249 ms |
+
+Client 0 alone on a core (33 232 frames), the restore plan's build against this:
+
+| | the restore plan | the held trafo scripts |
+|---|---|---|
+| frames over 15.15 ms | 618 (1.9 %) | 115 (0.35 %) |
+| p50 / p99 / p999 | 4.0 / 16.0 / 19.3 ms | 3.4 / 13.7 / 17.3 ms |
+| max | 31.7 ms | 30.3 ms |
+
+(The build before the reviews' changes measured 124 frames, 3.4 / 13.8 / 17.6 / 31.9 ms.)
+
+Per restore 59 trafo scripts are left as built, 43.5 by a held plan and ~1 is written; a capture walks ~1 trafo
+script where it walked ~44.
+
+**Where the frames over the budget are now.** Of the 115 frames, 105 hold one rollback: 16.8 ms = restore 2.5 + replay 11.6
+over 12.7 ticks + capture 1.1 + rest 1.6, the slowest 23.6 ms. Ten hold two rollbacks: 22.2 ms on average, 14.5
+ticks replayed in all, the slowest 30.3 ms - the run's max. 76 of the 115 are in the first 50 s, where the players
+are born and change type: a replayed tick of an over-budget frame is 0.92 ms against 0.58 on average. So what is
+left is depth (a rollback of 12-13 ticks is over the budget by itself at 0.9 ms a tick), two rollbacks in one frame,
+and the ticks with pieces alive - not the scripts' record any more.
+
+Gate: 845/845; the L6 re-drive with `BMMO_TRAFO_HELD`, `BMMO_RESTORE_PLAN`, `BMMO_SCRIPT_REUSE` and
+`BMMO_SLOT_MEMO` in verify and the restore skip on, 16.8 M held scripts walked again (13.6 M blocks a capture
+emitted from a plan, 3.17 M restore candidates), 7.02 M copies and 40.2 M memo hits, 0 mismatches, every session's
+`mism` 0; the same with `BMMO_TRAFO_HELD` on (verify of the held switch makes the restore write, so this is the run
+that checks a held script put back by its plan), 9.10 M scripts walked again beside their plan of which 3.17 M
+held, 0 mismatches, `mism` 0; the same re-drive as shipped, 3.17 M held scripts put back by a plan, 2568 refused
+for other bytes, none for the guard, a gone part or a pending link, `mism` 0; fast LBM the first way 38/38 twins
+FINAL exact, every criteria row equal to the resync cut's run, 1.29 M held scripts walked again, 0 mismatches; fast
+LBM the second way 38/38, the same rows, 72.6 k scripts walked again beside their plan, 0 mismatches; fast LBM with
+the six switches in verify 38/38, the same rows, 80.0 k skip candidates and 1.29 M held scripts, 0 mismatches; fast
+LBM 38/38, the same rows, 1.28 M blocks emitted from a held plan; retail at K = 20, L12 and L11 at human key rates,
+verify with the restore skip on 66.8 k held scripts walked again, with the held switch on 14.7 k scripts walked
+again beside their plan (790 held), 0 mismatches, as shipped 66.2 k blocks from a held plan and 792 held scripts
+put back, FINAL rows of the three ways bit-equal to the restore skip's sessions with L11's 32 trafo pieces; x64 and
+x86 builds, the Arch server; two serial reviews, no defects - their risks are the two exceptions above, the built
+encoding, the counters and the gate's second way, and the gate ran on the tree after those changes.

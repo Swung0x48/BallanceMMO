@@ -85,6 +85,17 @@
 // the record - its copied bytes compared on the way - and put back by the
 // walk's own two functions.  Verify walks as ever and compares where the
 // two found the parts.
+//
+// The held trafo scripts (BMMO_TRAFO_HELD = off | on | verify, on when unset;
+// script_replay::trafo_part): a trafo script that is not in its built state
+// was walked whole by every whole capture and written whole by every restore
+// though it had not run since - 0.5 ms of a 1.4 ms record and ~1 ms of a
+// restore in a room of 13 (after one transformation a ball's reset scripts
+// and its wind hold other bytes for good).  The dormant ledger's entry also
+// holds a plan over the block a script is known to hold: a capture emits the
+// block from it, and a restore that finds the record's block to be those
+// bytes puts back its fresh parts only (with the restore skip).  Verify
+// walks every such script and compares; a restore's verify then writes it.
 
 #include <algorithm>
 #include <cstddef>
@@ -124,6 +135,11 @@ namespace bmmo::game {
         static const script_reuse_mode mode = parse_script_reuse_mode(std::getenv("BMMO_RESTORE_PLAN"), script_reuse_mode::on);
         return mode;
     }
+    // BMMO_TRAFO_HELD, read once per process (on when unset).
+    inline script_reuse_mode trafo_held_mode_from_env() {
+        static const script_reuse_mode mode = parse_script_reuse_mode(std::getenv("BMMO_TRAFO_HELD"), script_reuse_mode::on);
+        return mode;
+    }
     // BMMO_COPY_PLAN, read once per process (on when unset).
     inline bool copy_plan_from_env() {
         static const bool on = parse_script_reuse_mode(std::getenv("BMMO_COPY_PLAN"), script_reuse_mode::on)
@@ -144,6 +160,15 @@ namespace bmmo::game {
         // The restore plan: roots and trafo scripts put back by their plan,
         // and (verify) walked with the parts compared.
         uint64_t restore_roots_planned = 0, restore_trafo_planned = 0, restore_plan_verified = 0;
+        // The held trafo scripts: plans made, blocks a capture emitted from
+        // one, scripts a restore left by one (those it put back by the plan
+        // count in restore_trafo_planned too), and what refused one - the
+        // record's block has other bytes, a delayed link in flight, the
+        // root's activation words (a capture's or a restore's: something
+        // changed them without the ledger), a part's block gone; verify's
+        // walks (a difference counts with the memo's or the restore's).
+        uint64_t held_set = 0, held_captured = 0, held_restored = 0, held_other = 0, held_pending = 0, held_guard = 0;
+        uint64_t held_gone = 0, held_verified = 0;
         std::vector<std::string> notes;
         void note(const std::string& what) {
             ++mismatches;
@@ -154,11 +179,13 @@ namespace bmmo::game {
             if (notes.size() < 16) notes.push_back(what);
         }
         std::string line(script_reuse_mode mode) const {
-            char buf[720];
+            char buf[1024];
             std::snprintf(buf, sizeof buf,
                           "slot_memo: mode=%s walked=%llu hits=%llu misses none=%llu gen=%llu run=%llu tail=%llu joint=%llu "
                           "verified=%llu mismatches=%llu restore_skip: mode=%s skipped=%llu written=%llu verified=%llu "
-                          "mismatches=%llu roots=%llu/%llu trafo=%llu restore_plan: mode=%s roots=%llu trafo=%llu checked=%llu",
+                          "mismatches=%llu roots=%llu/%llu trafo=%llu restore_plan: mode=%s roots=%llu trafo=%llu checked=%llu "
+                          "trafo_held: mode=%s set=%llu captured=%llu restored=%llu other=%llu pending=%llu guard=%llu gone=%llu "
+                          "checked=%llu",
                           script_reuse_mode_name(mode), static_cast<unsigned long long>(walked),
                           static_cast<unsigned long long>(hits), static_cast<unsigned long long>(miss_none),
                           static_cast<unsigned long long>(miss_gen), static_cast<unsigned long long>(miss_run),
@@ -173,7 +200,12 @@ namespace bmmo::game {
                           script_reuse_mode_name(restore_plan_mode_from_env()),
                           static_cast<unsigned long long>(restore_roots_planned),
                           static_cast<unsigned long long>(restore_trafo_planned),
-                          static_cast<unsigned long long>(restore_plan_verified));
+                          static_cast<unsigned long long>(restore_plan_verified),
+                          script_reuse_mode_name(trafo_held_mode_from_env()), static_cast<unsigned long long>(held_set),
+                          static_cast<unsigned long long>(held_captured), static_cast<unsigned long long>(held_restored),
+                          static_cast<unsigned long long>(held_other), static_cast<unsigned long long>(held_pending),
+                          static_cast<unsigned long long>(held_guard), static_cast<unsigned long long>(held_gone),
+                          static_cast<unsigned long long>(held_verified));
             return buf;
         }
     };
