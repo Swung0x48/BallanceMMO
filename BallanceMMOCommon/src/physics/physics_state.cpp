@@ -1457,6 +1457,74 @@ namespace bmmo::physics {
         return object && object->m_RealObject;
     }
 
+    // The counters are the listener's of PhysicsContinuousContact.cpp: one
+    // per contact point made (friction created) and lost (friction deleted)
+    // with an object of Continuous Contact ID N, in group N - 1.  A restore
+    // rebuilds the contact points with the listeners swapped out and the
+    // replay fires the events of the window again, so the count is set to
+    // the contact points the body has now.  The timed 'contact on' / 'off'
+    // is armed as the listener's edges arm it (a record at the clock's time;
+    // the contact manager's Process fires it after the delay); a record the
+    // live timeline stamped before a restore set the clock back would wait
+    // longer, so it gets the clock's time.  'active' changes only with an
+    // output fired, which stays Process's.
+    int contact_sound_resync(CKIpionManager* physics, uint32_t entity_id, bool resync, uint32_t& behavior_id,
+                             uint32_t& active_mask) {
+        behavior_id = 0;
+        active_mask = 0;
+        if (!physics || !physics->m_Context || !physics->GetEnvironment() || entity_id == 0) return -1;
+        CK3dEntity* entity = CK3dEntity::Cast(physics->m_Context->GetObject(static_cast<CK_ID>(entity_id)));
+        PhysicsObject* object = entity ? physics->GetPhysicsObject(entity) : nullptr;
+        PhysicsContactData* data = object && object->m_RealObject ? object->m_ContactData : nullptr;
+        PhysicsContactManager* contacts = physics->GetContactManager();
+        if (!data || !contacts) return -1;
+        behavior_id = static_cast<uint32_t>(data->m_BehaviorID);
+        int changed = 0;
+        if (resync && data->m_GroupOutputCount > 0) {
+            std::vector<int> points(static_cast<size_t>(data->m_GroupOutputCount), 0);
+            IVP_Real_Object* own = object->m_RealObject;
+            for (IVP_Synapse_Friction* syn = own->get_first_friction_synapse(); syn; syn = syn->get_next()) {
+                IVP_Contact_Point* cp = syn->get_contact_point();
+                IVP_Real_Object* other = cp->get_synapse(0)->get_object();
+                if (other == own) other = cp->get_synapse(1)->get_object();
+                CK3dEntity* other_entity = other ? static_cast<CK3dEntity*>(other->client_data) : nullptr;
+                if (!other_entity) continue;
+                const int index = contacts->GetContactID(other_entity) - 1;
+                if (index >= 0 && index < data->m_GroupOutputCount) ++points[static_cast<size_t>(index)];
+            }
+            const IVP_Time now = physics->GetSimulationTime();
+            for (int i = 0; i < data->m_GroupOutputCount; ++i) {
+                PhysicsContactData::GroupOutput& output = data->m_GroupOutputs[i];
+                const int count = points[static_cast<size_t>(i)];
+                PhysicsContactRecord* pending = nullptr;
+                for (int r = 0; r < contacts->GetRecordCount() && !pending; ++r) {
+                    PhysicsContactRecord* record = contacts->GetRecord(r);
+                    if (record->m_PhysicsObject == object && record->m_Index == i) pending = record;
+                }
+                bool fixed = false;
+                if (output.number != count) {
+                    output.number = count;
+                    fixed = true;
+                }
+                if (pending && pending->m_Time - now > 0) {
+                    pending->m_Time = now;
+                    fixed = true;
+                }
+                // Active with no point: friction_deleted's arming at 0.  Not
+                // active with points: friction_created's 0 -> 1 edge with no
+                // record to take (none is pending), which adds one.
+                if (!pending && (output.active ? count == 0 : count > 0)) {
+                    contacts->AddRecord(object, i, now);
+                    fixed = true;
+                }
+                if (fixed) ++changed;
+            }
+        }
+        for (int i = 0; i < data->m_GroupOutputCount && i < 32; ++i)
+            if (data->m_GroupOutputs[i].active) active_mask |= 1u << i;
+        return changed;
+    }
+
     bool get_body_state(CKIpionManager* physics, const char* entity_name, body_state& out,
                         std::string& error) {
         error.clear();

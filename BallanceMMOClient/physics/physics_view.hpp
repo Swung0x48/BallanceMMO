@@ -199,6 +199,10 @@ namespace bmmo::physics {
         bool has_body(const char* entity_name) const;
         // The same answer for the entity with this CK id (bridge v36).
         bool has_body_id(uint32_t entity_id) const;
+        // The roll sound's contact counters of the entity's body (bridge v38,
+        // contact_sound_resync): -1 without a body, counters or the bridge
+        // call, else the groups `resync` changed.
+        int contact_sound_resync(uint32_t entity_id, bool resync, uint32_t& behavior_id, uint32_t& active_mask) const;
         bool trafo_set_register(uint32_t player, const uint32_t frames[3], const uint32_t* explosions, int explosion_count,
                                 bmmo_physics_trafo_set_report& out, std::string& error) const;
         bool trafo_set_unregister(uint32_t player, std::string& error) const;

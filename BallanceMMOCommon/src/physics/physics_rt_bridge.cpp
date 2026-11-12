@@ -378,6 +378,18 @@ namespace {
         return manager && bmmo::physics::has_body_id(static_cast<CKIpionManager*>(manager), entity_id) ? 1 : 0;
     }
 
+    // v38 (step RSC): the roll sound's contact counters of a body.
+    int32_t api_contact_sound_resync(void* manager, uint32_t entity_id, int32_t resync, uint32_t* behavior_id,
+                                     uint32_t* active_mask) {
+        uint32_t behavior = 0, active = 0;
+        const int changed = manager ? bmmo::physics::contact_sound_resync(static_cast<CKIpionManager*>(manager),
+                                                                          entity_id, resync != 0, behavior, active)
+                                    : -1;
+        if (behavior_id) *behavior_id = behavior;
+        if (active_mask) *active_mask = active;
+        return changed;
+    }
+
     // v31 (FULL step SRT2B): the record capture's entity lookup scope.
     int32_t api_lookup_scope(void* manager, int32_t begin, uint32_t flags, bmmo_physics_lookup_totals* totals) {
         if (!manager) return 0;
@@ -1149,6 +1161,7 @@ namespace {
         api_airship_zone_release,
         api_capture_world_hash_tick,
         api_has_body_id,
+        api_contact_sound_resync,
     };
 }
 

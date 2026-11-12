@@ -4086,3 +4086,56 @@ recorded indices, the pre-rewind order; no rebuild, no hold or rebuild
 failure), `cbqx=0/93`, `sv=93/0/0`, no refusal. The part of #20 that moves
 entries has now run in Player.exe. (The forced move is a test override the
 server never hears of: that run's own ball is off the server by design.)
+
+## As built (step RSC, 2026-11-12): the roll sound's contact counters after a rewind
+
+**The report.** In a session the rolling sound was sometimes the wrong floor's: a wood ball on the road played the
+plank roll loop (a player's report from the public test; the transformer's and the hit sounds were right).
+
+**The cause.** Sound_Manager's Physics Continuous Contact block plays a floor group's roll loop from 'contact on N'
+to 'contact off N'. physics_RT fires those from a count of the ball's contact points per group
+(`PhysicsContactData::m_GroupOutputs[i].number`: + 1 on `friction_created`, - 1 clamped at 0 on
+`friction_deleted`; 0 -> 1 arms the timed 'on', reaching 0 arms the timed 'off'). The counts are in no savestate. A
+restore rebuilds the contact points with the collision listeners swapped out (the restore's mute), and the replay
+fires the window's created and deleted events again, so the count walks away from the real number of points: a
+group left above 0 never fires its 'off' and its loop plays on, at the ball's speed, on any floor; a group brought
+to 0 early goes silent. Two more of the same state: a body remade or re-armed (R6B) gets counters at 0 on points it
+already has; and a replay longer than the 0.3 s delays can fire a group's 'on' and 'off' both before Sound_Manager
+(not selected, live frames only) takes them - its looping Wave Player handles Play, returns, and the Stop is
+stranded. Single player has no restore, so none of it happens there. The design had left these counters out on
+purpose ("the continuous-contact outputs drive sounds only", ivp-savestate-design.md); that stays true - they are
+put right on the host instead.
+
+**Built** (bridge v38 `contact_sound_resync`, `physics_state.cpp`; `core_host.cpp` `sound_contact_frame`; retail
+only - the headless hosts play no sound and do not get the call). At the end of a frame that restored the world
+(the core's rollbacks, frozen restores, resyncs or savestates put back moved) or that ran the re-arm's bind check,
+after the frame's last replay: the own body's counts are set from its friction synapses' contact points (the other
+object's Continuous Contact ID), a group that is active with no point and no pending record gets the 'off' record
+`friction_deleted` would arm, a group that is not active with points and no record gets the 'on' record of the
+0 -> 1 edge, and a pending record stamped after the clock's time gets the clock's time. It fires no output and
+changes no 'active' flag: the contact manager's Process does, at the next step, by its own rules. Every frame, for
+the block the own body's counters belong to: when a group's 'on' and 'off' outputs are both up, the one that
+contradicts the group's last fired output is withdrawn before Sound_Manager's next pass. Nothing recorded,
+restored, hashed or journaled is touched: the contact data has no reader outside physics_RT, the block is in
+Sound_Manager only, and no IVP state is written. `physics_RT.dll` and the mod must be installed together (the
+bridge version).
+
+Counters: `contact resync at tick T on <ball>: n groups fixed, m stranded` (the first 32), a summary at the
+session's end and in `session own-births status`: `contact resync: calls= groups_fixed= no_counters= stranded=`.
+
+**Seen.** Retail at K = 20, L12 and L11 at human key rates (two clients, one-way 150 ms): 56 and 76 calls, 9 and 15
+groups put right, no stranded pair - the counts do drift in an ordinary session. FINAL rows bit-equal to the restore
+skip's sessions with L11's 32 trafo pieces. Not covered: the paper ball's block sends all three groups into one
+Wave Player, so an 'on' of one group with an 'off' of another in one frame is not caught. Whether the loop now
+sounds right is a play test (a wood ball across planks onto the road, then a paper ball): nothing here can hear it.
+
+**Found by the same survey, not fixed here.** A replayed sector pass acts again on the sector's collectibles (Show
+(Hierarchy) + Activate Script on P_Extra_* rows, whose own scripts are outside the replay): the suspected cause of
+the red glow left by a collected extra point (the floor glow of a "flying" extra, which TT Extra hides at
+Initialize only). The fan's particles and rotor advance on every replayed tick (P_Modul_18_Particle Script is
+selected). A rollback across a trafo explosion leaves the pieces' collision-sound listeners dead in the set's
+Ball_CollSound_Pieces copy. Other players' piece, floor-stopper and soft-bridge sounds are not positional.
+
+Gate: 845/845; fast LBM 38/38 twins FINAL exact with every criteria row equal to the resync cut's run (one arm,
+a10x_on, left no summary in the first run and was exact with an equal row when run again); retail as above; x64 and
+x86 builds, the Arch server; one review, no defects (its restore-trigger point is in).

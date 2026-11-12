@@ -1036,6 +1036,13 @@ namespace bmmo::physics {
         return available() && api_->has_body_id && api_->has_body_id(manager_, entity_id) != 0;
     }
 
+    int physics_view::contact_sound_resync(uint32_t entity_id, bool resync, uint32_t& behavior_id,
+                                           uint32_t& active_mask) const {
+        behavior_id = active_mask = 0;
+        if (!available() || !api_->contact_sound_resync) return -1;
+        return api_->contact_sound_resync(manager_, entity_id, resync ? 1 : 0, &behavior_id, &active_mask);
+    }
+
     bool physics_view::has_body(const char* entity_name) const {
         if (!available() || !entity_name || !entity_name[0]) return false;
         bmmo_physics_body_state state{};

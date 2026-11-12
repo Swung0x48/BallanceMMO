@@ -212,6 +212,13 @@ namespace bmmo::physics {
     // get_body_state gives for the entity, without its lookup by name (T3C,
     // bridge API v36: the trafo effect check's original pieces, every tick).
     bool has_body_id(CKIpionManager* physics, uint32_t entity_id);
+    // The roll sound's contact counters of the body of the 3D entity with
+    // this id (physics_RT's Physics Continuous Contact), read and, with
+    // `resync`, brought in step with the contact points the body has now by
+    // the listener's own rules (bridge API v38, the retail host after a
+    // rewind).  -1 without a body or counters, else the groups changed.
+    int contact_sound_resync(CKIpionManager* physics, uint32_t entity_id, bool resync, uint32_t& behavior_id,
+                             uint32_t& active_mask);
     // One body, by CK3dEntity name.
     bool get_body_state(CKIpionManager* physics, const char* entity_name, body_state& out,
                         std::string& error);

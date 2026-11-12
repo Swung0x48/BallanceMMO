@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 37u  /* v37: find_entity's name cache and its totals, lookup_scope's read-only call (T3C) (v36: whether an entity has a body, by CK id (T3C: the trafo effect check) (v35: the world hash without the surface signature, for the per-tick journal record (T3C step S1) (v34: the airship zone's ghost span released at a stamped tick, or the release undone (step AZX) (v33: the recipes of a muted frame kept and drained (FULL step AUD3) (v32: a leaver's spawn ghost group forgotten (FULL step GHF) (v31: the record capture's entity lookup scope, with a verify mode (FULL step SRT2B) (v30: a named hull compiled from a template body (FULL step H1X) (v29: a savestate blob's physics globals read for a resync re-step (step H7X) (v28: the physics globals - time factor and gravity - read and written for a rollback (record-format-gaps design C3, step RK1) (v27: a joint block's constraint read as an image and re-made from one (step RLC) (v26: the own ball's player group before its birth tick's PSIs (step OWG) (v25: the spawn ghost (steps SPGH, SPGH2) (v24: the airship zone (step BALA) (v23: the PreSimulate queue read, rebuilt, held out of a replay and compared in a scope (rollback-engine-gaps design gap Q, engine change #20, step B7EG) (v22: the savestate's controller alias for the retail host (trafo-replication design, step T4) (v21: the trafo sets' registry, seeds, unmake and piece filter (trafo-replication design, step T1) (v20: savestate_set_travelling restores another process's blob (the resync state, resync design A3) (v19: set_body_matrix puts a body where its Physicalize made it (v18: savestate_set names the bodies whose contacts it dropped (v17: the IVP savestate; v16: the collision recheck as a pass of its own; v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) ) ) ) ) ) ) ) ) ) ) ) ) ) ) */
+#define BMMO_PHYSICS_API_VERSION 38u  /* v38: the roll sound's contact counters of a body read and brought in step with its contact points (COSM) (v37: find_entity's name cache and its totals, lookup_scope's read-only call (T3C) (v36: whether an entity has a body, by CK id (T3C: the trafo effect check) (v35: the world hash without the surface signature, for the per-tick journal record (T3C step S1) (v34: the airship zone's ghost span released at a stamped tick, or the release undone (step AZX) (v33: the recipes of a muted frame kept and drained (FULL step AUD3) (v32: a leaver's spawn ghost group forgotten (FULL step GHF) (v31: the record capture's entity lookup scope, with a verify mode (FULL step SRT2B) (v30: a named hull compiled from a template body (FULL step H1X) (v29: a savestate blob's physics globals read for a resync re-step (step H7X) (v28: the physics globals - time factor and gravity - read and written for a rollback (record-format-gaps design C3, step RK1) (v27: a joint block's constraint read as an image and re-made from one (step RLC) (v26: the own ball's player group before its birth tick's PSIs (step OWG) (v25: the spawn ghost (steps SPGH, SPGH2) (v24: the airship zone (step BALA) (v23: the PreSimulate queue read, rebuilt, held out of a replay and compared in a scope (rollback-engine-gaps design gap Q, engine change #20, step B7EG) (v22: the savestate's controller alias for the retail host (trafo-replication design, step T4) (v21: the trafo sets' registry, seeds, unmake and piece filter (trafo-replication design, step T1) (v20: savestate_set_travelling restores another process's blob (the resync state, resync design A3) (v19: set_body_matrix puts a body where its Physicalize made it (v18: savestate_set names the bodies whose contacts it dropped (v17: the IVP savestate; v16: the collision recheck as a pass of its own; v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -899,6 +899,26 @@ typedef struct bmmo_physics_api_v2 {
     /* v36 (T3C): 1 when the 3D entity with this CK id has a physics body now
      * (get_body_state's answer for it, without the lookup by name), else 0. */
     int32_t (*has_body_id)(void* ipion_manager, uint32_t entity_id);
+    /* v38 (step RSC): the roll sound's contact counters (physics_RT's Physics
+     * Continuous Contact: per floor sound group, the contact points its
+     * listener counted and whether the group's 'contact on' is the last
+     * output fired) of the body of the 3D entity with this CK id.  A restore
+     * rebuilds the contacts with the listeners swapped out and a replay
+     * fires their created / deleted events again, so the counts drift from
+     * the body's contact points.  `resync` 1: each group's count set to the
+     * contact points the body has now (the other object's Continuous Contact
+     * ID, as the listener reads it), and a group whose 'active' disagrees
+     * with it gets the timed record the listener would have armed; a
+     * record stamped later than the simulation clock gets the clock's time.
+     * No output is activated (the contact manager's Process fires them at
+     * the next step) and no IVP state is touched.  `behavior_id` (may be
+     * null): the block the counters belong to; `active_mask` (may be null):
+     * bit i set when group i is active (the first 32 groups).  Returns the
+     * groups changed (0 with resync 0); -1 when the entity has no body or
+     * the body no counters (no block bound to it).  BMMO bridge code over
+     * physics_RT's public contact data: no engine change. */
+    int32_t (*contact_sound_resync)(void* ipion_manager, uint32_t entity_id, int32_t resync, uint32_t* behavior_id,
+                                    uint32_t* active_mask);
 } bmmo_physics_api_v2;
 
 /* savestate_set flags: the same values as SAVESTATE_STRICT and

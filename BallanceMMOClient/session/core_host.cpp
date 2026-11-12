@@ -596,6 +596,13 @@ namespace {
                  sound_skipped_queued = 0, sound_reset_failed = 0;
         uint64_t sound_checks = 0, sound_bound = 0, sound_unbound = 0;
         int sound_rearm_check = 0;
+        // Step RSC: the roll sound's contact counters brought in step after a
+        // frame that restored the world (`sound_restores_seen`: the core's
+        // restore counters at the last look), and the outputs
+        // a deep replay left both up ('contact on' and 'off' of one group).
+        uint64_t sound_restores_seen = 0;
+        uint64_t sound_contact_calls = 0, sound_contact_fixed = 0, sound_contact_none = 0, sound_stranded = 0;
+        uint32_t sound_contact_lines = 0;
         bool own_group_set = false;
         bool body_guard = false;
         std::string body_guard_entity;
@@ -1305,6 +1312,9 @@ namespace {
         host.sound_skipped_queued = host.sound_reset_failed = 0;
         host.sound_checks = host.sound_bound = host.sound_unbound = 0;
         host.sound_rearm_check = 0;
+        host.sound_restores_seen = 0;
+        host.sound_contact_calls = host.sound_contact_fixed = host.sound_contact_none = host.sound_stranded = 0;
+        host.sound_contact_lines = 0;
         host.own_replica = {};
         host.revive_navigations.clear();
         host.own_group_set = false;
@@ -1481,6 +1491,68 @@ namespace {
             logger->Info("Physics session core: sound listeners %s at tick %u on %s: %u bound, %u unbound, %u off",
                          counted ? "after a re-arm" : "at the session's end", tick, own_entity.c_str(), bound, unbound,
                          off);
+    }
+
+    // Step RSC: the own ball's roll sound after a rewind.  Sound_Manager's
+    // Physics Continuous Contact block plays a floor's roll loop from 'contact
+    // on N' to 'contact off N', which physics_RT fires from per-group counts
+    // of the ball's contact points.  The counts are in no savestate: a
+    // restore rebuilds the contacts silently and the replay counts the
+    // window's again, so a group stays above 0 (its loop plays on another
+    // floor) or reaches 0 early; a re-armed body starts at 0 on points it
+    // already has.  `resync` (a frame that restored the world, or ran the
+    // re-arm's bind check): the counts set from the body's contact points
+    // (bridge v38), the timed outputs left to physics_RT's next step.
+    // Every frame: a replay deeper than the 0.3 s delays can fire a group's
+    // 'on' and 'off' both before Sound_Manager takes them, and the looping
+    // Wave Player then plays and leaves the Stop stranded.  This runs at the
+    // end of OnProcess (BML's PostProcess, after the frame's physics step and
+    // every replay), and the block's outputs go to its links only when it
+    // executes in the next frame's behaviour pass, before that frame's step:
+    // the output that contradicts the group's last fired one ('active') is
+    // taken back here.  Outside any replay; Sound_Manager is not selected.
+    void sound_contact_frame(CKContext* context, const bmmo::physics::physics_view& view, logger_wrapper* logger,
+                             const std::string& own_entity, uint32_t tick, bool resync) {
+        // Output 2i is 'contact on i+1', 2i+1 'contact off i+1' (the block's
+        // prototype and its settings callback, PhysicsContinuousContact.cpp).
+        bool doubled = false;
+        for (const uint32_t id: host.sound_blocks) {
+            auto* behavior = CKBehavior::Cast(context->GetObject(id));
+            if (!behavior || behavior->GetPrototypeGuid() != kSoundContactGuid) continue;
+            for (int i = 0; i + 1 < behavior->GetOutputCount() && !doubled; i += 2)
+                doubled = behavior->IsOutputActive(i) && behavior->IsOutputActive(i + 1);
+            if (doubled) break;
+        }
+        if (!resync && !doubled) return;
+        auto* own = own_entity.empty() ? nullptr
+                  : CK3dEntity::Cast(context->GetObjectByNameAndParentClass(const_cast<CKSTRING>(own_entity.c_str()),
+                                                                           CKCID_3DENTITY, nullptr));
+        if (!own) return;
+        uint32_t behavior_id = 0, active = 0;
+        const int changed = view.contact_sound_resync(own->GetID(), resync, behavior_id, active);
+        if (resync) {
+            ++host.sound_contact_calls;
+            if (changed < 0) ++host.sound_contact_none;
+            else host.sound_contact_fixed += static_cast<uint64_t>(changed);
+        }
+        // Only the block the own body's counters belong to: its 'active'
+        // flags say which output of a group was fired last.
+        uint32_t stranded = 0;
+        auto* block = doubled && changed >= 0 ? CKBehavior::Cast(context->GetObject(behavior_id)) : nullptr;
+        if (block && std::find(host.sound_blocks.begin(), host.sound_blocks.end(), behavior_id) != host.sound_blocks.end()) {
+            for (int group = 0; group < 32 && 2 * group + 1 < block->GetOutputCount(); ++group) {
+                if (!block->IsOutputActive(2 * group) || !block->IsOutputActive(2 * group + 1)) continue;
+                block->ActivateOutput((active >> group) & 1u ? 2 * group + 1 : 2 * group, FALSE);
+                ++stranded;
+            }
+        }
+        host.sound_stranded += stranded;
+        if ((changed > 0 || stranded) && host.sound_contact_lines++ < 32)
+            logger->Info("Physics session core: contact resync at tick %u on %s: %d groups fixed, %u stranded "
+                         "(calls %llu, groups fixed %llu, stranded %llu)", tick, own_entity.c_str(), changed > 0 ? changed : 0,
+                         stranded, static_cast<unsigned long long>(host.sound_contact_calls),
+                         static_cast<unsigned long long>(host.sound_contact_fixed),
+                         static_cast<unsigned long long>(host.sound_stranded));
     }
 
     // Step BMX: the shared mirror rule checked on the spirit ball about to
@@ -4283,13 +4355,24 @@ void BallanceMMOClient::core_host_frame() {
     // binding is checked.  Never inside a replay: Sound_Manager is outside
     // the script selection.
     if (core_session_running() && !host.sound_blocks.empty()) {
+        bool bind_checked = false;
         if (host.own_bodies_made != host.sound_made_seen) {
             host.sound_made_seen = host.own_bodies_made;
             sound_rearm(m_bml->GetCKContext(), physics_view_, logger_, host.core->own_body_entity(),
                         host.core->current_tick());
         } else if (host.sound_rearm_check > 0 && --host.sound_rearm_check == 0) {
             sound_bind_check(m_bml->GetCKContext(), logger_, host.core->own_body_entity(), host.core->current_tick());
+            bind_checked = true;
         }
+        // Step RSC: every restore the frame made (a rewind, a frozen
+        // clock's, a resync's, any savestate put back), the last replay
+        // finished.
+        const auto& rs = host.core->rollback_stats();
+        const uint64_t restores = rs.rollbacks + rs.frozen + rs.resyncs + rs.savestates_restored;
+        const bool restored = restores != host.sound_restores_seen;
+        host.sound_restores_seen = restores;
+        sound_contact_frame(m_bml->GetCKContext(), physics_view_, logger_, host.core->own_body_entity(),
+                            host.core->current_tick(), restored || bind_checked);
     }
 }
 
@@ -4330,6 +4413,11 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
                       static_cast<unsigned long long>(host.sound_reset_failed),
                       static_cast<unsigned long long>(host.sound_checks), static_cast<unsigned long long>(host.sound_bound),
                       static_cast<unsigned long long>(host.sound_unbound));
+        logger_->Info("Physics session core: contact resync: calls=%llu groups_fixed=%llu no_counters=%llu stranded=%llu",
+                      static_cast<unsigned long long>(host.sound_contact_calls),
+                      static_cast<unsigned long long>(host.sound_contact_fixed),
+                      static_cast<unsigned long long>(host.sound_contact_none),
+                      static_cast<unsigned long long>(host.sound_stranded));
     }
     core_pause_chain.clock_restore(m_bml->GetCKContext());   // FULL step LGM: the core host's own edits
     core_pause_chain.scripts_restore(m_bml->GetCKContext());
@@ -5987,13 +6075,15 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
         }
         if (!value.empty() && value != "status") return "error usage: session own-births parked|remade|status";
         return std::format("ok own-births next={} running={} own_bodies_made={} unmade={} sound: blocks={} rearms={} "
-                           "rearmed={} off={} target={} queued={} reset_failed={} checks={} bound={} unbound={}",
+                           "rearmed={} off={} target={} queued={} reset_failed={} checks={} bound={} unbound={} "
+                           "contact resync: calls={} groups_fixed={} no_counters={} stranded={}",
                            own_births_parked_next.load() ? "parked" : "remade",
                            core_session_running() ? (host.core->config.own_births_parked ? "parked" : "remade") : "none",
                            host.own_bodies_made, host.own_bodies_unmade, host.sound_blocks.size(), host.sound_rearms,
                            host.sound_rearmed, host.sound_skipped_off, host.sound_skipped_target,
                            host.sound_skipped_queued, host.sound_reset_failed, host.sound_checks, host.sound_bound,
-                           host.sound_unbound);
+                           host.sound_unbound, host.sound_contact_calls, host.sound_contact_fixed,
+                           host.sound_contact_none, host.sound_stranded);
     }
     if (what == "cadence") {
         // Step A2: 'session cadence N|status' (core_config::
