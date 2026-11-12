@@ -4982,6 +4982,10 @@ namespace {
                         bmmo::physics::outside_controllers::controller_names(outside_force_blocks_), true, 3, true);
                 return bmmo::session::savestate_replay_difference{d.where, d.named};
             };
+            // BMMO_REPLAY_DIFF=off drops the diagnostic: a timing run measures
+            // frames the mod has, and the first eight diffs cost 10-20 ms each
+            // (sparse capture's verify then compares the blobs byte for byte).
+            if (const char* diff = std::getenv("BMMO_REPLAY_DIFF"); diff && std::strcmp(diff, "off") == 0) world.diff_savestate = nullptr;
             // The clock before a restore, for the report line above (--trace).
             if (args_.trace && world.set_savestate) {
                 const auto inner = world.set_savestate;

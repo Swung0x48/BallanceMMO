@@ -413,6 +413,9 @@ namespace bmmo::game {
             // root's activation words against the built bytes
             // (dormant_guard_trips counts the capture's misses).
             mutable std::vector<uint8_t> dormant;
+            // Each script's plan over its built bytes (trafo_plan: the
+            // restore plan), made at first use; the built bytes never change.
+            mutable std::map<CK_ID, script_slots::plan> plans;
             size_t index_of(CK_ID id) const {
                 for (size_t i = 0; i < scripts.size(); ++i)
                     if (scripts[i] == id) return i;
@@ -491,6 +494,7 @@ namespace bmmo::game {
         // links the anchor did not have (the SDK cannot clear a graph's list).
         struct restore_counters {
             uint32_t joints_reset = 0, joints_missing = 0, links_rearmed = 0, links_unrestorable = 0, links_live_pending = 0;
+            uint32_t links_inexact = 0;   // of `inexact`: a delayed link re-armed, or left at another countdown
             uint32_t cells_written = 0;
             // Step RK2: the written-cell section's rows written back, and its
             // columns left alone (array gone, type or row count changed).
@@ -1771,6 +1775,7 @@ namespace bmmo::game {
             }
             const size_t links = pos;
             if (!get_u16(in, pos, delayed) || delayed != delayed_link_count(beh) || !skip(in, pos, 2u * delayed)) return false;
+            if (recorder && delayed && link_in_flight(beh, in, links + 2)) recorder->plan->pending = true;
             copy_from(links);
             return true;
         }
@@ -1790,11 +1795,11 @@ namespace bmmo::game {
         // recorded script.  Fails, naming the place, when they do not match
         // the graph.
         static bool restore_script_block(CKBehavior* script, const script_replay_hooks& hooks,
-                                         const std::vector<uint8_t>& bytes, std::string* error, bool same = false) {
+                                         const std::vector<uint8_t>& bytes, std::string* error) {
             if (error) error->clear();
             if (!script) return fail(error, "no script");
             size_t pos = 0;
-            if (!restore_behavior(script, hooks, bytes, pos, error, true, false, same)) return false;
+            if (!restore_behavior(script, hooks, bytes, pos, error, true)) return false;
             return pos == bytes.size() || fail(error, "trailing bytes in a script block");
         }
 
@@ -1894,6 +1899,7 @@ namespace bmmo::game {
             // The restore skip, roots: the kept source under the generation
             // this restore starts with.
             const script_reuse_mode skip_mode = restore_skip_mode_from_env();
+            const bool planning = restore_plan_mode_from_env() != script_reuse_mode::off;   // the restore plan
             const std::vector<uint8_t>* kept =
                 armed.slots && reuse_kept_from_env() ? hooks.slots->kept_source(script_write_generation()) : nullptr;
             record_index kept_index;
@@ -1946,8 +1952,13 @@ namespace bmmo::game {
                     const bool held = keeping && write && scripts && !sel.is_fed(id)
                                    && read_script_root_words(in.data() + pos, in.size() - pos, words);
                     const uint32_t inexact = last_restore().inexact;
-                    const bool same = kept && scripts && write && root_unchanged(beh, hooks, *kept, kept_index, k, in, pos, skip_mode);
-                    if (!restore_behavior(beh, hooks, in, pos, error, write, images, same)) return false;
+                    size_t length = 0;
+                    const bool same = kept && scripts && write
+                                      && root_unchanged(beh, hooks, *kept, kept_index, k, in, pos, skip_mode, &length);
+                    if (!restore_block(context, beh, hooks, in, pos, pos + length, error, write, images, same,
+                                       same && images && planning ? hooks.slots->plan_at_restore(static_cast<uint32_t>(id)) : nullptr,
+                                       slot_memo_totals().restore_roots_planned))
+                        return false;
                     if (held) ++held_roots;
                     if (held && last_restore().inexact == inexact) {
                         exact.push_back(words);
@@ -1991,7 +2002,12 @@ namespace bmmo::game {
                         const bool same = trafo_built_already(beh, hooks, *trafo, index, *built, skip_mode);
                         if (!same) trafo->set_dormant(index, false);   // unknown while it is written
                         const uint32_t inexact = last_restore().inexact;
-                        if (!restore_script_block(beh, hooks, *built, error, same)) return false;
+                        size_t at = 0;
+                        if (!restore_block(context, beh, hooks, *built, at, built->size(), error, true, false, same,
+                                           same && planning ? trafo_plan(*trafo, static_cast<CK_ID>(id), beh, hooks, *built) : nullptr,
+                                           slot_memo_totals().restore_trafo_planned))
+                            return false;
+                        if (at != built->size()) return fail(error, "trailing bytes in a script block");
                         trafo->set_dormant(index, last_restore().inexact == inexact);   // known when written exactly
                         ++dormancy().restored_built;
                         continue;
@@ -3432,11 +3448,12 @@ namespace bmmo::game {
         // the live graph (step OPC2's copy), with a walk, and says no.
         static bool root_unchanged(CKBehavior* beh, const script_replay_hooks& hooks, const std::vector<uint8_t>& kept,
                                    const record_index& kept_index, size_t k, const std::vector<uint8_t>& in, size_t pos,
-                                   script_reuse_mode mode) {
+                                   script_reuse_mode mode, size_t* length = nullptr) {
             const uint32_t id = static_cast<uint32_t>(beh->GetID());
             slot_memo_stats& stats = slot_memo_totals();
             size_t size = 0;
             const uint8_t* block = recorded_block(kept, kept_index, k, static_cast<CK_ID>(id), size);
+            if (length) *length = size;   // the record's block is as long when it is the same
             bool same = mode != script_reuse_mode::off && block && hooks.slots->restore_quiet(id)
                         && hooks.slots->quiet_since_kept(id) && pos + size <= in.size()
                         && std::memcmp(in.data() + pos, block, size) == 0;
@@ -3992,7 +4009,8 @@ namespace bmmo::game {
             }
             return true;
         }
-        static bool skip_tail(const std::vector<uint8_t>& in, size_t& pos, bool portable, bool images = false) {
+        // Past a block's force and joint tail.
+        static bool skip_force_and_joint(const std::vector<uint8_t>& in, size_t& pos) {
             uint8_t has = 0;
             if (!get_u8(in, pos, has) || (has && !skip(in, pos, 49))) return false;
             if (!get_u8(in, pos, has)) return false;
@@ -4000,6 +4018,10 @@ namespace bmmo::game {
                 uint8_t handle = 0;
                 if (!get_u8(in, pos, handle) || (handle == kJointImaged && !skip(in, pos, 8))) return false;
             }
+            return true;
+        }
+        static bool skip_tail(const std::vector<uint8_t>& in, size_t& pos, bool portable, bool images = false) {
+            if (!skip_force_and_joint(in, pos)) return false;
             if (images && !skip_slot_images(in, pos)) return false;
             uint16_t children = 0, delayed = 0;
             if (!get_u16(in, pos, children)) return false;
@@ -4120,30 +4142,9 @@ namespace bmmo::game {
             }
         }
 
-        // `same` (the restore skip): the block and every block under it hold
-        // the record's parameters and activation words already, so those are
-        // not written; the force and joint tails, the omitted copies and the
-        // delayed links are handled as in any write.
-        static bool restore_behavior(CKBehavior* beh, const script_replay_hooks& hooks, const std::vector<uint8_t>& in,
-                                     size_t& pos, std::string* error, bool write = true, bool images = false, bool same = false) {
-            uint32_t id = 0, flags = 0, in_mask = 0, out_mask = 0;
-            if (!get_u32(in, pos, id) || id != static_cast<uint32_t>(beh->GetID())) return fail(error, "block id");
-            if (!get_u32(in, pos, flags) || !get_u32(in, pos, in_mask) || !get_u32(in, pos, out_mask))
-                return fail(error, "truncated block");
-            const int inputs = beh->GetInputCount(), outputs = beh->GetOutputCount();
-            const bool words = write && !same;   // the activation words and the parameters are written
-            if (words) {
-                beh->ModifyFlags(flags & kRuntimeFlags, kRuntimeFlags & ~flags);
-                for (int i = 0; i < inputs && i < 32; ++i) beh->ActivateInput(i, ((in_mask >> i) & 1u) != 0);
-                for (int i = 0; i < outputs && i < 32; ++i) beh->ActivateOutput(i, ((out_mask >> i) & 1u) != 0);
-            }
-            uint16_t locals = 0, outs = 0, children = 0;
-            if (!get_u16(in, pos, locals) || locals != beh->GetLocalParameterCount()) return fail(error, "local parameter count");
-            for (int i = 0; i < locals; ++i)
-                if (!restore_parameter(words ? beh->GetLocalParameter(i) : nullptr, in, pos, error)) return false;
-            if (!get_u16(in, pos, outs) || outs != beh->GetOutputParameterCount()) return fail(error, "output parameter count");
-            for (int i = 0; i < outs; ++i)
-                if (!restore_parameter(words ? beh->GetOutputParameter(i) : nullptr, in, pos, error)) return false;
+        // A block's force and joint tail at in[pos], read and put back.
+        static bool restore_tail(CKBehavior* beh, const script_replay_hooks& hooks, const std::vector<uint8_t>& in, size_t& pos,
+                                 std::string* error, bool write) {
             uint8_t has_force = 0;
             if (!get_u8(in, pos, has_force)) return fail(error, "truncated force");
             if (has_force) {
@@ -4169,6 +4170,12 @@ namespace bmmo::game {
                     restore_joint(beh, hooks, had_handle != 0, image_hash,
                                   {static_cast<int16_t>(places[0]), static_cast<int16_t>(places[1])});
             }
+            return true;
+        }
+        // A block's slot image section at in[pos] (`images`) read, and its
+        // omitted copies put back.  `omitted`: set when the block has one.
+        static bool restore_omitted(CKBehavior* beh, const script_replay_hooks& hooks, const std::vector<uint8_t>& in, size_t& pos,
+                                    std::string* error, bool write, bool images, bool* omitted = nullptr) {
             // R1: the unbound slot copies among the sub-behaviours, each
             // written with its base or base + the record's delta,
             // unconditionally (an unbound copy runs with its module: its
@@ -4189,15 +4196,13 @@ namespace bmmo::game {
                     slot_images.push_back(std::move(entry));
                 }
             }
-            if (!get_u16(in, pos, children)) return fail(error, "truncated children");
-            const auto live_children = recorded_children(beh, hooks.slots);
-            if (children != live_children.size()) return fail(error, "sub-behaviour count");
             if (hooks.slots && !beh->IsUsingFunction()) {
                 size_t next = 0;
                 std::unique_ptr<script_replay_hooks> plain;
                 for (int index = 0; index < beh->GetSubBehaviorCount(); ++index) {
                     CKBehavior* child = beh->GetSubBehavior(index);
                     if (!child || !hooks.slots->omit(child->GetID())) continue;
+                    if (omitted) *omitted = true;
                     const std::vector<uint8_t>* image = hooks.slots->base(child->GetID());
                     if (next < slot_images.size() && slot_images[next].id == static_cast<uint32_t>(child->GetID()))
                         image = &slot_images[next++].image;
@@ -4213,12 +4218,168 @@ namespace bmmo::game {
             } else if (!slot_images.empty()) {
                 return fail(error, "slot image section");
             }
+            return true;
+        }
+
+        // The restore plan (script_slots.hpp).  A fresh part of a block in a
+        // record: whose it is, where it starts, which of the two it is.
+        struct plan_mark {
+            uint32_t block = 0;
+            size_t at = 0;
+            bool images = false;
+            bool operator==(const plan_mark& other) const { return block == other.block && at == other.at && images == other.images; }
+        };
+        // Where `plan`'s fresh parts lie in the block at in[pos, end): its
+        // copied bytes compared, each part skipped.  False when the bytes are
+        // not the plan's, a part's block is gone or no longer of its kind, or
+        // the plan has a delayed link in flight (the walk re-arms it).
+        static bool locate_parts(CKContext* context, const script_slots::plan& plan, const std::vector<uint8_t>& in, size_t pos,
+                                 size_t end, std::vector<plan_mark>& marks) {
+            marks.clear();
+            if (plan.pending || end > in.size()) return false;
+            size_t at = 0;
+            const auto copied = [&](size_t n) {
+                if (n > end - pos || (n && std::memcmp(in.data() + pos, plan.statics.data() + at, n) != 0)) return false;
+                pos += n;
+                at += n;
+                return true;
+            };
+            for (const script_slots::plan_part& part: plan.parts) {
+                if (!copied(part.statics)) return false;
+                CKBehavior* block = CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(part.block)));
+                if (!block || (!part.images && !is_force_block(block) && !is_joint_block(block))) return false;
+                marks.push_back({part.block, pos, part.images});
+                if (!(part.images ? skip_slot_images(in, pos) : skip_force_and_joint(in, pos)) || pos > end) return false;
+            }
+            return copied(plan.statics.size() - at) && pos == end;
+        }
+        // The parts locate_parts found, put back as the walk puts them back.
+        static bool restore_parts(CKContext* context, const std::vector<plan_mark>& marks, const script_replay_hooks& hooks,
+                                  const std::vector<uint8_t>& in, std::string* error) {
+            for (const plan_mark& mark: marks) {
+                CKBehavior* block = CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(mark.block)));
+                size_t pos = mark.at;
+                if (!(mark.images ? restore_omitted(block, hooks, in, pos, error, true, true)
+                                  : restore_tail(block, hooks, in, pos, error, true)))
+                    return false;
+            }
+            return true;
+        }
+        // A script's block at in[pos, end) put back.  `plan`: the plan of a
+        // script the restore skip leaves as it is (`same`), else null.  With
+        // one that fits the record the script goes by it - `planned` counts -
+        // and the graph is not walked; verify walks as ever, compares where
+        // the walk and the plan found the fresh parts, and notes a delayed
+        // link the walk re-armed or found changed (the plan handles none).
+        static bool restore_block(CKContext* context, CKBehavior* beh, const script_replay_hooks& hooks,
+                                  const std::vector<uint8_t>& in, size_t& pos, size_t end, std::string* error, bool write,
+                                  bool images, bool same, const script_slots::plan* plan, uint64_t& planned) {
+            const script_reuse_mode mode = restore_plan_mode_from_env();
+            std::vector<plan_mark> parts;
+            if (mode == script_reuse_mode::off || !plan || !locate_parts(context, *plan, in, pos, end, parts)) plan = nullptr;
+            if (plan && mode == script_reuse_mode::on) {
+                if (!restore_parts(context, parts, hooks, in, error)) return false;
+                pos = end;
+                ++planned;
+                return true;
+            }
+            std::vector<plan_mark> walked;
+            const restore_counters before = last_restore();
+            if (!restore_behavior(beh, hooks, in, pos, error, write, images, same, plan ? &walked : nullptr)) return false;
+            if (plan) {
+                slot_memo_stats& stats = slot_memo_totals();
+                const restore_counters& now = last_restore();
+                ++stats.restore_plan_verified;
+                if (now.links_rearmed != before.links_rearmed || now.links_unrestorable != before.links_unrestorable
+                        || now.links_live_pending != before.links_live_pending || now.links_inexact != before.links_inexact)
+                    stats.restore_note("restore_plan mismatch: " + owner_name(beh) + " / " + (beh->GetName() ? beh->GetName() : "")
+                                       + " (#" + std::to_string(beh->GetID()) + "): the walk handled a delayed link, the plan has none");
+                if (walked != parts || pos != end)
+                    stats.restore_note("restore_plan mismatch: " + owner_name(beh) + " / " + (beh->GetName() ? beh->GetName() : "")
+                                       + " (#" + std::to_string(beh->GetID()) + "): the walk put back " + std::to_string(walked.size())
+                                       + " fresh parts and ended at " + std::to_string(pos) + ", the plan names "
+                                       + std::to_string(parts.size()) + " and ends at " + std::to_string(end));
+            }
+            return true;
+        }
+        // A trafo script's plan over its built bytes, made at the first
+        // restore that leaves the script as it is and kept with the part:
+        // the copy's own walk, its output dropped, without the capture hooks
+        // (where the parts lie does not depend on what a tail holds, and the
+        // joint ledger is not fed at a moment each world has for itself).
+        static const script_slots::plan* trafo_plan(const trafo_part& trafo, CK_ID id, CKBehavior* beh,
+                                                    const script_replay_hooks& hooks, const std::vector<uint8_t>& built) {
+            const auto [found, made] = trafo.plans.try_emplace(id);
+            script_slots::plan& plan = found->second;
+            if (made) {
+                plan_recorder recorder{&plan, 0};
+                script_replay_hooks plain = hooks;
+                plain.capture_force = nullptr;
+                plain.capture_joint = nullptr;
+                std::vector<uint8_t> out;
+                uint64_t tails = 0;
+                size_t pos = 0;
+                plan.valid = copy_with_fresh_tails(beh, plain, built, pos, out, tails, false, &recorder) && pos == built.size();
+                plan.statics.insert(plan.statics.end(), out.begin() + static_cast<std::ptrdiff_t>(recorder.mark), out.end());
+            }
+            return plan.valid ? &plan : nullptr;
+        }
+        // Whether one of a block's delayed links is in flight in the
+        // countdowns recorded at in[at] (restore_behavior re-arms such a link).
+        static bool link_in_flight(CKBehavior* beh, const std::vector<uint8_t>& in, size_t at) {
+            const int links = beh->IsUsingFunction() ? 0 : beh->GetSubBehaviorLinkCount();
+            for (int i = 0; i < links; ++i) {
+                CKBehaviorLink* link = beh->GetSubBehaviorLink(i);
+                if (!link || link->GetInitialActivationDelay() <= 1) continue;
+                uint16_t recorded = 0;
+                if (!get_u16(in, at, recorded) || (recorded > 0 && recorded < link->GetInitialActivationDelay())) return true;
+            }
+            return false;
+        }
+
+        // `same` (the restore skip): the block and every block under it hold
+        // the record's parameters and activation words already, so those are
+        // not written; the force and joint tails, the omitted copies and the
+        // delayed links are handled as in any write.  `marks`: every fresh
+        // part the walk meets (the restore plan's verify).
+        static bool restore_behavior(CKBehavior* beh, const script_replay_hooks& hooks, const std::vector<uint8_t>& in,
+                                     size_t& pos, std::string* error, bool write = true, bool images = false, bool same = false,
+                                     std::vector<plan_mark>* marks = nullptr) {
+            uint32_t id = 0, flags = 0, in_mask = 0, out_mask = 0;
+            if (!get_u32(in, pos, id) || id != static_cast<uint32_t>(beh->GetID())) return fail(error, "block id");
+            if (!get_u32(in, pos, flags) || !get_u32(in, pos, in_mask) || !get_u32(in, pos, out_mask))
+                return fail(error, "truncated block");
+            const int inputs = beh->GetInputCount(), outputs = beh->GetOutputCount();
+            const bool words = write && !same;   // the activation words and the parameters are written
+            if (words) {
+                beh->ModifyFlags(flags & kRuntimeFlags, kRuntimeFlags & ~flags);
+                for (int i = 0; i < inputs && i < 32; ++i) beh->ActivateInput(i, ((in_mask >> i) & 1u) != 0);
+                for (int i = 0; i < outputs && i < 32; ++i) beh->ActivateOutput(i, ((out_mask >> i) & 1u) != 0);
+            }
+            uint16_t locals = 0, outs = 0, children = 0;
+            if (!get_u16(in, pos, locals) || locals != beh->GetLocalParameterCount()) return fail(error, "local parameter count");
+            for (int i = 0; i < locals; ++i)
+                if (!restore_parameter(words ? beh->GetLocalParameter(i) : nullptr, in, pos, error)) return false;
+            if (!get_u16(in, pos, outs) || outs != beh->GetOutputParameterCount()) return fail(error, "output parameter count");
+            for (int i = 0; i < outs; ++i)
+                if (!restore_parameter(words ? beh->GetOutputParameter(i) : nullptr, in, pos, error)) return false;
+            if (marks && (is_force_block(beh) || is_joint_block(beh))) marks->push_back({id, pos, false});
+            if (!restore_tail(beh, hooks, in, pos, error, write)) return false;
+            // The omitted copies before the children are counted: the order
+            // only shows in a restore that fails.
+            const size_t section = pos;
+            bool omitted = false;
+            if (!restore_omitted(beh, hooks, in, pos, error, write, images, &omitted)) return false;
+            if (marks && omitted) marks->push_back({id, section, true});
+            if (!get_u16(in, pos, children)) return fail(error, "truncated children");
+            const auto live_children = recorded_children(beh, hooks.slots);
+            if (children != live_children.size()) return fail(error, "sub-behaviour count");
             for (int i = 0; i < children; ++i) {
                 uint8_t present = 0;
                 if (!get_u8(in, pos, present)) return fail(error, "truncated child");
                 CKBehavior* child = live_children[static_cast<size_t>(i)];
                 if (present != (child ? 1 : 0)) return fail(error, "sub-behaviour presence");
-                if (child && !restore_behavior(child, hooks, in, pos, error, write, images, same)) return false;
+                if (child && !restore_behavior(child, hooks, in, pos, error, write, images, same, marks)) return false;
             }
             uint16_t delayed = 0;
             if (!get_u16(in, pos, delayed)) return fail(error, "truncated links");
@@ -4249,6 +4410,7 @@ namespace bmmo::game {
                         owner->ActivateOutput(index, TRUE);
                         ++last_restore().links_rearmed;
                         ++last_restore().inexact;   // the source's output is on, the record's is not
+                        ++last_restore().links_inexact;
                         last_rearmed_outputs().emplace_back(owner->GetID(), index);   // step B2SX (Q5)
                     } else {
                         ++last_restore().links_unrestorable;
@@ -4259,7 +4421,10 @@ namespace bmmo::game {
                     ++last_restore().links_live_pending;
                 }
                 // A countdown nothing wrote stays the live one.
-                if (link->GetActivationDelay() != recorded) ++last_restore().inexact;
+                if (link->GetActivationDelay() != recorded) {
+                    ++last_restore().inexact;
+                    ++last_restore().links_inexact;
+                }
             }
             return true;
         }

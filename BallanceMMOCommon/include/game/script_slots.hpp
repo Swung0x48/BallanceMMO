@@ -74,6 +74,17 @@
 // that root are emitted from it.  BMMO_SCRIPT_REUSE's verify walks every
 // such copy; a restore keeps a plan only with the restore skip on (not in
 // its verify, which leaves no root as it was).
+//
+// The restore plan (BMMO_RESTORE_PLAN = off | on | verify, on when unset;
+// with the restore skip): a script the skip leaves as it is was still walked
+// block by block for its tails and omitted copies - 1.2 ms of a 2.9 ms
+// script restore for the roots and 1.2 ms for the trafo scripts in a room of
+// 13.  With a plan that held at the restore's start (a root's copy plan; a
+// trafo script's over its built bytes, script_replay::trafo_plan) and no
+// delayed link in flight in it, only the plan's fresh parts are located in
+// the record - its copied bytes compared on the way - and put back by the
+// walk's own two functions.  Verify walks as ever and compares where the
+// two found the parts.
 
 #include <algorithm>
 #include <cstddef>
@@ -108,6 +119,11 @@ namespace bmmo::game {
                                != script_reuse_mode::off;
         return on;
     }
+    // BMMO_RESTORE_PLAN, read once per process (on when unset).
+    inline script_reuse_mode restore_plan_mode_from_env() {
+        static const script_reuse_mode mode = parse_script_reuse_mode(std::getenv("BMMO_RESTORE_PLAN"), script_reuse_mode::on);
+        return mode;
+    }
     // BMMO_COPY_PLAN, read once per process (on when unset).
     inline bool copy_plan_from_env() {
         static const bool on = parse_script_reuse_mode(std::getenv("BMMO_COPY_PLAN"), script_reuse_mode::on)
@@ -125,6 +141,9 @@ namespace bmmo::game {
         // The roots a restore left (their tails apart) and wrote though it
         // had a kept source to judge by, and the dormant trafo scripts left.
         uint64_t restore_roots_skipped = 0, restore_roots_written = 0, restore_trafo_skipped = 0;
+        // The restore plan: roots and trafo scripts put back by their plan,
+        // and (verify) walked with the parts compared.
+        uint64_t restore_roots_planned = 0, restore_trafo_planned = 0, restore_plan_verified = 0;
         std::vector<std::string> notes;
         void note(const std::string& what) {
             ++mismatches;
@@ -135,11 +154,11 @@ namespace bmmo::game {
             if (notes.size() < 16) notes.push_back(what);
         }
         std::string line(script_reuse_mode mode) const {
-            char buf[560];
+            char buf[720];
             std::snprintf(buf, sizeof buf,
                           "slot_memo: mode=%s walked=%llu hits=%llu misses none=%llu gen=%llu run=%llu tail=%llu joint=%llu "
                           "verified=%llu mismatches=%llu restore_skip: mode=%s skipped=%llu written=%llu verified=%llu "
-                          "mismatches=%llu roots=%llu/%llu trafo=%llu",
+                          "mismatches=%llu roots=%llu/%llu trafo=%llu restore_plan: mode=%s roots=%llu trafo=%llu checked=%llu",
                           script_reuse_mode_name(mode), static_cast<unsigned long long>(walked),
                           static_cast<unsigned long long>(hits), static_cast<unsigned long long>(miss_none),
                           static_cast<unsigned long long>(miss_gen), static_cast<unsigned long long>(miss_run),
@@ -150,7 +169,11 @@ namespace bmmo::game {
                           static_cast<unsigned long long>(restore_mismatches),
                           static_cast<unsigned long long>(restore_roots_skipped),
                           static_cast<unsigned long long>(restore_roots_written),
-                          static_cast<unsigned long long>(restore_trafo_skipped));
+                          static_cast<unsigned long long>(restore_trafo_skipped),
+                          script_reuse_mode_name(restore_plan_mode_from_env()),
+                          static_cast<unsigned long long>(restore_roots_planned),
+                          static_cast<unsigned long long>(restore_trafo_planned),
+                          static_cast<unsigned long long>(restore_plan_verified));
             return buf;
         }
     };
@@ -301,6 +324,7 @@ namespace bmmo::game {
             std::vector<plan_part> parts;
             uint64_t seq = 0, writes = 0, mask = 0;
             uint32_t tails = 0;     // the force and joint blocks among the parts
+            bool pending = false;   // a delayed link in flight in the copied bytes (a restore re-arms it)
             bool valid = false;
         };
         plan& plan_of(uint32_t root) { return plans_[root]; }
@@ -315,13 +339,19 @@ namespace bmmo::game {
             else if (quiet_since(root) > found->second.seq) refused = "run";
             return refused ? nullptr : &found->second;
         }
-        // The restore skip left `root` as it was: its plan, good at the
-        // restore's start, is good after it.  Whether there was one.
-        bool keep_plan(uint32_t root) {
+        // `root`'s plan when it held at the armed restore's start, under
+        // the mask now; null otherwise.
+        const plan* plan_at_restore(uint32_t root) const {
             const auto found = plans_.find(root);
-            if (!restore_armed_ || found == plans_.end() || !found->second.valid || found->second.writes != restore_writes_
-                    || quiet_since(root) > found->second.seq)
-                return false;
+            return restore_armed_ && found != plans_.end() && found->second.valid && found->second.writes == restore_writes_
+                           && found->second.mask == bound_ && quiet_since(root) <= found->second.seq
+                       ? &found->second : nullptr;
+        }
+        // The restore skip left `root` as it was: its plan, good at the
+        // restore's start under the record's mask, is good after it.
+        // Whether there was one.
+        bool keep_plan(uint32_t root) {
+            if (!plan_at_restore(root)) return false;
             kept_plans_.push_back(root);
             return true;
         }

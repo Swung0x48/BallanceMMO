@@ -1762,3 +1762,75 @@ mismatches, FINAL rows of the shipped and the verify sessions bit-equal to the r
 32 trafo pieces; x64 and x86 builds, the Arch server; two serial reviews, no defects (the premise written at the
 plan, the check of a tail part's block, one rule for a block with an omitted copy, a plan kept only for a root
 still exact are theirs).
+
+## Built (the restore plan: a restore without the graph, 2026-11-11)
+
+**What a restore still cost.** The restore skip leaves a quiet root's parameters and a dormant trafo script's as
+they are, but each such script was still walked block by block: a force or joint block's tail, a block's omitted
+copies and a delayed link are put back in any write. Of a 2.94 ms script restore on the public server's machine (the
+public L6 re-drive, 13 players, K = 20) that walk was 1.16 ms for the 22 roots the skip leaves and most of the trafo
+section's 1.17 ms.
+
+**Built** (`script_replay` `restore_block`, `locate_parts`, `restore_parts`, `trafo_plan`;
+`script_slots::plan_at_restore`; `BMMO_RESTORE_PLAN` off | on | verify, on when unset, with the restore skip). A
+script the skip leaves goes by a plan when it has one that held at the restore's start: a root's copy plan (stored
+under the restore's host-write generation and the record's slot mask, the root quiet since), a trafo script's plan
+over its built bytes (made once, at the first restore that leaves the script as it is, by the copy's own walk with
+its output dropped and without the capture hooks; kept with the part - the built bytes never change). The plan's
+copied bytes are compared with the record's block on the way (`locate_parts`), each fresh part is found where the
+plan says, and the parts are put back by the walk's own two functions (`restore_tail`, `restore_omitted`, taken out
+of `restore_behavior`). The graph is not walked. Anything else walks as before: bytes that are not the plan's, a
+part whose block is gone or no longer of its kind, a plan with a delayed link in flight in its bytes
+(`plan.pending`: the walk re-arms such a link, a plan handles none). A restore that left a root as it was keeps its
+copy plan only when that plan held at the restore's start (`keep_plan`). With the switch off no plan is looked up
+or made. Verify walks as ever, compares where the walk and the plan found the fresh parts, and reports a delayed
+link the walk re-armed or found changed. Counters on the script_reuse line: `restore_plan: mode= roots= trafo=
+checked=`.
+
+**The start's diagnostic frames** (`BMMO_REPLAY_DIFF=off`, the headless client). The eight slowest frames of a run
+(ticks 228-235, 25-37 ms) were the headless client's savestate text diff before a restore, which the mod does not
+have. The switch drops it for timing runs; sparse capture's verify compares the blobs byte for byte anyway. The
+numbers below are with it off, so the max is the first one that is the product's.
+
+**Measured** on the 8845HS, with the build before the review's changes (after it a trafo plan is made without the
+capture hooks and no plan is looked up with the switch off; the restore's path with the switch on is the same). One
+binary with the switch off / on, two interleaved pairs that agree, 13 clients on its 16 threads, the diagnostic off:
+
+| | off | on |
+|---|---|---|
+| a restore | 3.37 ms | 2.49 ms |
+| rewind work a second | 211 ms | 198 ms |
+| frame p99 | 16.85 ms | 16.25 ms |
+
+Client 0 alone on a core (33 232 frames), the copy plan's build against this:
+
+| | the copy plan | the restore plan, diagnostic off |
+|---|---|---|
+| frames over 15.15 ms | 1173 (3.5 %) | 618 (1.9 %) |
+| p50 / p99 / p999 | 4.0 / 16.9 / 20.2 ms | 4.0 / 16.0 / 19.3 ms |
+| max | 36.9 ms (a diagnostic frame) | 31.7 ms |
+
+**Half of what the walk cost.** The trafo section did not fall as the roots did: of the 104 trafo scripts ~44 are
+not left by the skip at a restore, and each of those is written whole and walked whole by every whole capture.
+Whether they hold other than their built bytes for good once a ball has changed type, or their set was touched
+inside the window, is not established yet. Bringing them under a rule like the roots' ("not run since the record,
+so the record's bytes") is the next step on both sides.
+
+**Where the frames over the budget are now.** A frame over the budget is 16.5 ms: restore 2.65 + replay 10.9 over
+12.8 ticks + capture 1.37 + rest 1.6. Of the five slowest frames four hold two rollbacks (25-32 ms, 16-20 ticks
+replayed in all); the others are frames after a ball's explosion with its pieces alive (1.3-1.8 ms a replayed
+tick).
+
+Gate: 845/845; the L6 re-drive with `BMMO_RESTORE_PLAN`, `BMMO_SCRIPT_REUSE` and `BMMO_SLOT_MEMO` in verify and the
+restore skip on, 5.93 M scripts walked again beside their plan and 7.02 M copies, 0 mismatches, every session's
+`mism` 0; the same re-drive as shipped, 1.60 M roots and 4.33 M trafo scripts put back by a plan, `mism` 0; fast LBM
+the first way 38/38 twins FINAL exact, every criteria row equal to the resync cut's run, 68.7 k scripts walked again
+beside their plan and 6.37 M copies, 0 mismatches; fast LBM with the five switches in verify 38/38, the same rows,
+80 k skip candidates and 6.37 M copies, 0 mismatches (there no script goes by a plan: the restore skip's verify
+leaves none as it was); fast LBM 38/38, the same rows, 20.3 k roots and 48.3 k trafo scripts by a plan; retail at K
+= 20, L12 and L11 at human key rates, verify with the restore skip on, 13.8 k scripts walked again beside their
+plan, 617 k copies and 3.54 M memo hits, 0 mismatches; as shipped 11.4 k roots and 2.5 k trafo scripts put back by a
+plan; FINAL rows of the shipped and the verify sessions bit-equal to the restore skip's sessions with L11's 32 trafo
+pieces; x64 and x86 builds, the Arch server; two serial reviews, no defects (verify's note of a delayed link the
+walk handled, a trafo plan made without the capture hooks, no plan looked up or made with the switch off are
+theirs).
