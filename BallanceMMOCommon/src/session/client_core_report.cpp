@@ -343,6 +343,7 @@ namespace bmmo::session {
         // Step SRT4 (realtime-design 4 a2): sparse=k[v] light=records/ms
         // whole=records/ms (the replays' whole records) rebased=rewinds+extra ticks unanch=refused
         // verify=compared/differing/float script parameters only/stale (not compared) - only while sparse capture is on.
+        // Step RLL: replay_last=whole|light/the replays whose last tick was recorded light (BMMO_REPLAY_LAST).
         // FULL step N3K (host-platform audit D3): the manager's runs outside
         // every union pass and the checkpoint hold's re-holds, from a host
         // that counts them (both session clients; every other status line is
@@ -360,14 +361,16 @@ namespace bmmo::session {
             static_cast<unsigned long long>(s.hint_rewinds_), static_cast<unsigned long long>(s.hint_wrong_),
             static_cast<unsigned long long>(s.hint_late_), static_cast<unsigned long long>(s.hint_bytes_));
         const std::string sparse = s.rollback_.sparse_capture() <= 1 ? std::string() : textf(
-            " sparse=%u%s light=%llu/%.0f whole=%llu/%.0f rebased=%llu+%llu unanch=%llu verify=%llu/%llu/%llu/%llu",
+            " sparse=%u%s light=%llu/%.0f whole=%llu/%.0f rebased=%llu+%llu unanch=%llu verify=%llu/%llu/%llu/%llu"
+            " replay_last=%s/%llu",
             s.rollback_.sparse_capture(), s.rollback_.sparse_capture_verify() ? "v" : "",
             static_cast<unsigned long long>(rs.sparse_light), static_cast<double>(rs.sparse_light_us) / 1000.0,
             static_cast<unsigned long long>(rs.replay_whole), static_cast<double>(rs.replay_whole_us) / 1000.0,
             static_cast<unsigned long long>(rs.sparse_rebased), static_cast<unsigned long long>(rs.sparse_extra_ticks),
             static_cast<unsigned long long>(rs.sparse_unanchored),
             static_cast<unsigned long long>(rs.sparse_verified), static_cast<unsigned long long>(rs.sparse_verify_mismatches),
-            static_cast<unsigned long long>(rs.sparse_verify_float), static_cast<unsigned long long>(rs.sparse_verify_stale));
+            static_cast<unsigned long long>(rs.sparse_verify_float), static_cast<unsigned long long>(rs.sparse_verify_stale),
+            s.rollback_.replay_last_light() ? "light" : "whole", static_cast<unsigned long long>(rs.replay_last_light));
         return textf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu piggy=%llu/%llu/%llu/%zu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu/%llu/%llu odm=%llu/%llu/%llu/%llu overtaken=%llu superseded=%llu/%llu remake=%llu/%llu mlives=%llu/%llu/%llu/%llu/%llu olives=%llu/%llu/%llu/%llu/%llu snapshots=%llu/%llu/%llu "
                      "life=%llu/%llu inrew=%llu/%llu bodiless=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu/%llu lag=%u/%u subst=%llu/%llu/%llu/%llu/%llu/%llu subst_skip=%llu/%llu/%llu subst_missed=%llu subst_coalesce=%llu/%llu/%llu/%llu acked=%u held_total=%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
                      "lead_adj=%llu lead_offset=%d slew=%d lead_forced=%llu lead_skip=%llu/%llu/%llu "

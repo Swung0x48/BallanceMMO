@@ -6395,3 +6395,58 @@ TEST(RollbackEngine, SparseCaptureRefusesALightAnchorWithNoWholeRecordBeforeIt) 
     EXPECT_TRUE(engine.restorable(8));
     EXPECT_TRUE(engine.restorable(14)) << "the replay's last tick is whole";
 }
+
+// Step RLL: with set_replay_last_light the replay's last tick takes the rule
+// of the others - light unless a multiple of k - and a later rewind anchored
+// there restores the whole record before it, arriving at the world the
+// whole-last engine has (and, in verify, at the anchor's record).
+TEST(RollbackEngine, SparseCaptureRecordsTheReplaysLastTickLightOnRequest) {
+    const auto run = [](bool last_light, bool verify, fake_world& world, rollback_engine& engine) {
+        world.savestates = true;
+        world.bodies["Own"].linear[0] = 1.0f;
+        world.bodies["Plate"].position[0] = 40.0;
+        world.bodies["Plate"].linear[1] = -0.5f;
+        engine.set_sparse_capture(4, verify);
+        engine.set_replay_last_light(last_light);
+        rollback_tracked tracked;
+        tracked.own_entity = "Own";
+        tracked.mechanisms = {"Plate"};
+        auto w = world.adapter();
+        for (uint32_t tick = 1; tick <= 14; ++tick) {
+            w.step();
+            engine.record(w, tick, tracked, {});
+        }
+        EXPECT_TRUE(engine.rewind_to(w, 10, 14, no_input, "first"));   // replays 11..14
+        w.step();
+        engine.record(w, 15, tracked, {});
+        EXPECT_TRUE(engine.rewind_to(w, 14, 15, no_input, "second"));
+    };
+    fake_world control_world;
+    rollback_engine control;
+    run(false, false, control_world, control);
+    EXPECT_EQ(control.stats().replay_last_light, 0u);
+    EXPECT_EQ(control.stats().sparse_rebased, 0u) << "the whole last tick is its own base";
+
+    fake_world world;
+    rollback_engine engine;
+    run(true, false, world, engine);
+    EXPECT_TRUE(engine.replay_last_light());
+    // The first replay's last tick 14 is light; the second rewind, anchored
+    // there, restores 12 and replays 13..15 (15 is its last tick: light too).
+    EXPECT_EQ(engine.stats().replay_last_light, 2u);
+    EXPECT_EQ(engine.stats().sparse_rebased, 1u);
+    EXPECT_EQ(engine.stats().sparse_extra_ticks, 2u);
+    EXPECT_FALSE(engine.restorable(14));
+    EXPECT_FALSE(engine.restorable(15));
+    EXPECT_TRUE(engine.restorable(12));
+    EXPECT_EQ(world.serialize(), control_world.serialize()) << "the rebased replay arrives at the whole-last world";
+
+    fake_world verified_world;
+    rollback_engine verified;
+    run(true, true, verified_world, verified);
+    EXPECT_FALSE(verified.restorable(14)) << "verify decides as light does";
+    EXPECT_NE(verified.recorded_savestate(14), nullptr) << "...and captures the last tick whole all the same";
+    EXPECT_EQ(verified.stats().sparse_verified, 1u);
+    EXPECT_EQ(verified.stats().sparse_verify_mismatches, 0u);
+    EXPECT_EQ(verified_world.serialize(), control_world.serialize());
+}

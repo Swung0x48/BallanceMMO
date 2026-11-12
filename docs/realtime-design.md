@@ -2001,3 +2001,90 @@ mismatches; fast LBM 38/38, the same rows; retail at K = 20, L12 and L11 at huma
 48 k skipped passes checked again, 0 mismatches, as shipped the same; FINAL rows of the four sessions bit-equal to
 the restore skip's sessions with L11's 32 trafo pieces; x64 and x86 builds, the Arch server; one review, no defects
 (its points: the by-name premise stated, the switch read once, the matrix cache cleared per level).
+
+## Built (the replay's last tick recorded light, behind a switch, 2026-11-12)
+
+**What it was.** A replay recorded its last tick whole (SRT4's rule: `t == current_tick`), and the frame's live tick
+is recorded whole right after, so a rollback frame paid two whole records back to back. On the public L6 re-drive
+(13 players, K = 20) the replays made 1.67 whole records a rewind, one of them the last tick's.
+
+**What reads that record** (rollback.hpp unless named). (1) The live capture that follows: never as "t - 1" - the
+restore's barrier bumps `engine_writes_` on the way out (`restore_and_replay`, `write_barrier_on_exit`), so
+`capture`'s cache and OPC's source test (`it->write_generation == engine_writes_`) refuse it. Its script reuse
+copies from the kept source (`script_replay` capture: `kept_source(writes)`), which a whole capture sets
+(`keep_source` at the capture's end) and a restore sets (`script_slots::restored`); with the last tick light the
+source is the last whole replayed record or the restore's, and the ledger, which light records observe
+(`observe_scripts`, `observe_roots`), says whether a root stayed quiet since. A root that ran in between is walked
+by the live capture instead of by the last tick's - one walk either way. A host write in between (a relatch, a
+sector pass) leaves the older source on another generation and the live capture walks: the captures with no source
+go 1061 -> 1086 over the run's 13 clients (a net figure over every capture), and the slowest live capture of a
+client (`t_cap`'s max) is 2-16 ms in both arms, no pattern between them. (2) The replay's own check at its last tick: the re-executed scripts against
+the live record's (`script_mismatches` / `script_float_mismatches`, the status line's `scr=`) and the blob's
+capped diff (`savestate_replay_mismatches`) need a whole capture; they are diagnostics no gate reads (with
+snapshots off, `metrics.mism` is `stats_.mismatched`, counted only by `on_snapshot`). On the re-drive they counted
+422 logical and 5682 float differences, by design (a replay that corrects an input differs from the live record);
+light, 24 and 787 (the last ticks another rule keeps whole). (3) A later rewind anchored there: `restore_base`
+takes the whole record before it and replays the difference - SRT4's path, which sparse verify checks. (4) The
+resync's anchor (always the first record of a new history), a snapshot (sparse capture runs without them),
+`amend_record` (the live tick only), the journal's rows and `retire_observer` (bodies, kept by a light record), the
+union's records (by tick, the base's), `--dump-savestate` / `--compare-scripts` (sparse capture off with them).
+
+**Built** (`rollback_engine::set_replay_last_light`, `capture_replayed`; `BMMO_REPLAY_LAST` = whole | light |
+verify, read once in `client_core.cpp`, whole when unset; the engine's default is whole, so the tools and the unit
+tests' engines are unchanged). Light: the last tick takes the rule of the other replayed ticks (whole only when a
+multiple of k, a birth record, rows, no record before it). Verify: light, with sparse capture's verify turned on
+with it - every light record captured whole all the same, so the last tick's own check still runs and every
+rebased rewind's anchor is compared. Counter: ` replay_last=whole|light/N` at the end of the status line's sparse
+section (the replays whose last tick ended light).
+
+**Measured** on the dev machine (the L6 re-drive, one binary, `BMMO_REPLAY_LAST` whole / light interleaved twice,
+medians over the 13 clients, `work/PERF/kp_compare.py`):
+
+| | whole | light |
+|---|---|---|
+| whole records a rewind | 1.67 | 0.80 |
+| the replay of a rewind | 3.16 / 3.14 ms | 2.34 / 2.31 ms |
+| a replayed tick | 0.354 ms | 0.258 / 0.254 ms |
+| the live capture a frame | 0.979 / 0.981 ms | 0.974 / 0.969 ms |
+| rewind work + capture a second | 180 ms | 160 / 159 ms |
+| depth mean | 8.85 ticks | 9.09 ticks |
+| frame p50 / p99 | 2.6 / 10.7, 9.9 ms | 2.6, 2.5 / 8.5, 8.4 ms |
+| frame p999 / max | 17.9, 15.2 / 32.8, 25.1 ms | 13.2, 12.6 / 20.4, 19.8 ms |
+
+On the 8845HS (one binary, `BMMO_REPLAY_LAST` unset / light, two interleaved pairs that agree, 13 clients on its 16
+threads): the replay of a rewind 4.10-4.15 -> 3.19-3.21 ms, a replayed tick 0.46 -> 0.35 ms, rewind work 145-147 ->
+124-125 ms a second, frame p99 12.2-12.4 -> 10.9 ms, p999 18.5 -> 16.5 ms, depth mean 8.85 -> 9.09 ticks, the live
+capture unchanged (1.18-1.19 ms a frame). Client 0 alone on a core with light (33 232 frames), against the slot
+cells' build: frames over 15.15 ms 37 -> 22 (0.066 %), p50 3.2, p99 11.5 -> 10.2, p999 15.6 -> 14.4, max 25.9 ->
+22.5 ms; the 22 are between ticks 983 and 1937 (16 with one rollback, 16.5 ms on average; six with two, the
+slowest 22.5). The calibrated reach cap read the same in both runs (the headless hosts' cost clock); on retail the
+meter now times a cheaper replay, so the cap may rise - to be logged before the default changes.
+
+**Why the default stays whole: what sparse verify's differing anchors are.** Verify's 35 (HEAD's rule) / 36 (light)
+differing anchors of the L6 re-drive are two older faults of the replay, neither of them sparse capture's; verify
+shows them because it compares two replays of one tick made in different live frames. (A) `execute_scripts` admits
+a script's owner into a replayed frame through `owner_pending_add`, which reads the behaviour manager's pending
+table as it stands in the live frame: the live tick's own Activate Script makes a replay run in that frame resolve
+a pending DEACTIVATENEXTFRAME that replays of other frames leave (P_Modul_18_Particle Script, ticks 235-237). The
+word differs only in that bit on a script that is inactive either way: no reader of the bit computes anything else
+from it - representation only. (B) A delayed link in flight in the live world but not at the restored record
+cannot be cancelled by the restore (`restore_behavior` counts it, `links_live_pending`) and fires inside the
+replay: seen at tick 1297, a fan's 'Wave Player End Playing -> Set Cell' (delay 2) freeing its sound slot four to
+five ticks early. On that graph the cell is read by the fans' sound slots only (audio), which is why the journals
+agree; but the mechanism is open to any selected script with a link of more than one frame's delay
+(Gameplay_SectorManager has one of four), and a rebased rewind turns a link the restore would have re-armed into
+one that fires astray - light makes rebased rewinds 6 % more frequent. So: first a census of such links on the 13
+levels, the restore taught to take a live-only link out of flight (or to undo its fire), the pending adds of the
+live tick taken back at a restore, and sparse verify reading 0 with the written cells compared too; then the
+default goes to light.
+
+**Gate.** 846/846 (one new: `SparseCaptureRecordsTheReplaysLastTickLightOnRequest`); the L6 re-drive light with
+`BMMO_SCRIPT_REUSE`, `BMMO_SLOT_MEMO`, `BMMO_RESTORE_PLAN` and `BMMO_TRAFO_HELD` in verify (the run where the live
+capture copies from an older source - `BMMO_REPLAY_LAST=verify` captures whole and so does not take that path),
+0 mismatches, every session's `mism` 0; the same in `BMMO_REPLAY_LAST=verify`, 0 reuse mismatches, 56 631 anchors
+compared, the 36 above; every client's and the server's journal byte-equal across the whole and light runs; fast
+LBM light with the four reuse switches in verify 38/38 twins FINAL exact, every criteria row equal to the resync
+cut's run, 0 mismatches; fast LBM light 38/38, the same rows; fast LBM as shipped (whole) 38/38, the same rows;
+retail at K = 20, L12 and L11 at human key rates, light with the reuse verifies and light alone, 0 mismatches,
+FINAL rows bit-equal to the restore skip's sessions with L11's 32 trafo pieces; x64 and x86 builds, the Arch
+server; one review, no defects (its points: what verify does not exercise, the cost meter, the open class).

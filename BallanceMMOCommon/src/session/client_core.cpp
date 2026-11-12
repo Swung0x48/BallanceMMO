@@ -15,12 +15,33 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <map>
 #include <stdexcept>
 #include <string>
 #include <utility>
 
 namespace bmmo::session {
+    namespace {
+        // Step RLL: BMMO_REPLAY_LAST = whole | light | verify, read once per
+        // process (whole when unset or unknown; rollback_engine::
+        // set_replay_last_light).  verify records the last tick light and
+        // turns sparse capture's verify on with it: every light record is
+        // captured whole all the same, so the replay's own check of the
+        // last tick against the live record still runs, and every rebased
+        // rewind's anchor - the last ticks among them - is compared.
+        enum class replay_last_mode : uint8_t { whole, light, verify };
+        replay_last_mode replay_last_from_env() {
+            static const replay_last_mode mode = [] {
+                const char* text = std::getenv("BMMO_REPLAY_LAST");
+                if (text && !std::strcmp(text, "light")) return replay_last_mode::light;
+                if (text && !std::strcmp(text, "verify")) return replay_last_mode::verify;
+                return replay_last_mode::whole;
+            }();
+            return mode;
+        }
+    }
 
     session_client_core::session_client_core(session_platform platform, session_capabilities caps)
         : platform_(std::move(platform)), caps_(caps) {
@@ -409,8 +430,10 @@ namespace bmmo::session {
         // snapshots only (core_config::sparse_capture) - and not in the
         // body-set-corrections control arm, whose full snapshots still land
         // on the records of their ticks (review finding 3).
+        const replay_last_mode last = replay_last_from_env();
         s.rollback_.set_sparse_capture(snapshots_run() || config.body_set_corrections ? 1u : config.sparse_capture,
-                                       config.sparse_capture_verify);
+                                       config.sparse_capture_verify || last == replay_last_mode::verify);
+        s.rollback_.set_replay_last_light(last != replay_last_mode::whole);
         s.input_delay_ = msg.input_delay;
         s.sector_lead_ = msg.sector_lead;
         s.seed_ = msg.seed;

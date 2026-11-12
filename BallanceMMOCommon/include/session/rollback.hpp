@@ -956,6 +956,9 @@ namespace bmmo::session {
         // the time they took - with sparse_light_us, a replayed tick's
         // capture share, measured at any k.)
         uint64_t replay_whole = 0, replay_whole_us = 0;
+        // (Step RLL: replays whose last tick was recorded light - with
+        // set_replay_last_light, a last tick no other rule keeps whole.)
+        uint64_t replay_last_light = 0;
         uint64_t unmatched = 0;        // snapshot tick not in the history
         uint64_t captures_never_made = 0;   // a deferred record (capture_now false) no amend_record captured
         uint64_t too_far = 0;          // a snapshot or a rewind deeper than max_resim_ticks: refused, nothing written
@@ -2912,6 +2915,22 @@ namespace bmmo::session {
             sparse_every_ = std::min(every, kSparseCaptureMax);
             sparse_verify_ = verify && sparse_every_ > 1;
         }
+        // Step RLL: the replay's last tick under the same rule as the others
+        // (light unless a multiple of `every`, a birth record, rows or no
+        // record before it make it whole), where SRT4 recorded it whole.
+        // Nothing reads that record whole: the live capture that follows is
+        // behind the restore's barrier (no cache or reuse source of t - 1),
+        // its script reuse copies from the kept source - the last whole
+        // replayed record or the restore's - while the ledger, which light
+        // records observe, says a root stayed quiet; a later rewind anchored
+        // there restores the whole record before it and replays the
+        // difference (restore_base).  What goes is the replay's own check of
+        // the re-executed scripts and blob against the live record of that
+        // tick, which needs a whole capture; sparse verify keeps it (a light
+        // record captured whole) and compares every rebased anchor.  Off by
+        // default (the tools and the unit tests' engines).
+        void set_replay_last_light(bool light) { replay_last_light_ = light; }
+        bool replay_last_light() const { return replay_last_light_; }
         uint32_t sparse_capture() const { return sparse_every_ > 1 ? sparse_every_ : 1u; }
         bool sparse_capture_verify() const { return sparse_verify_; }
         // The tick a rewind to `anchor` restores: `anchor` when its record
@@ -3713,7 +3732,8 @@ namespace bmmo::session {
         void capture_replayed(const rollback_world& world, tick_state& state, const tick_state* recorded,
                               uint32_t current_tick) {
             const uint32_t t = state.tick;
-            bool whole = sparse_every_ <= 1 || t == current_tick || t % sparse_every_ == 0
+            const bool last = t == current_tick;
+            bool whole = sparse_every_ <= 1 || (last && !replay_last_light_) || t % sparse_every_ == 0
                       || !recorded || !recorded->rows.empty();
             const tick_state* before = whole ? nullptr : find_const(t - 1);
             if (!whole && !before) whole = true;
@@ -3745,6 +3765,7 @@ namespace bmmo::session {
                 return;
             }
             state.full = false;
+            if (last) ++stats_.replay_last_light;
             ++stats_.sparse_light;
             stats_.sparse_light_us += static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count());
@@ -4137,6 +4158,7 @@ namespace bmmo::session {
         // the capped log lines of the sparse path.
         uint32_t sparse_every_ = 0;
         bool sparse_verify_ = false;
+        bool replay_last_light_ = false;   // step RLL
         uint32_t sparse_logs_ = 0;
         // Verify mode: the light anchor of the rebased rewind under way,
         // compared when its replay re-records it (cleared when it ends).
