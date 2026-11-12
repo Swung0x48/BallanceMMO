@@ -141,6 +141,11 @@ namespace bmmo::game {
         uint64_t kept_captured = 0, kept_restored = 0, kept_reused = 0, kept_roots = 0, kept_refused = 0;
         // Walks of a root another script writes (script_replay::selection::fed).
         uint64_t walked_fed = 0;
+        // The copy plan (script_slots.hpp): copies emitted from a plan (of
+        // `reused`), plans a restore kept, and the copies no plan served by
+        // why (none, generation, mask, run; one that then failed and was
+        // walked is counted too).
+        uint64_t planned = 0, plans_kept = 0, plan_none = 0, plan_gen = 0, plan_mask = 0, plan_run = 0;
         std::vector<std::string> notes;
         static constexpr size_t kNotes = 16;
         void note(const std::string& what) {
@@ -149,11 +154,12 @@ namespace bmmo::game {
         }
         std::string line(script_reuse_mode mode) const {
             const uint64_t scripts = reused + walked + walked_unrecorded + walked_structure + walked_fed;
-            char buf[760];
+            char buf[960];
             std::snprintf(buf, sizeof buf,
                           "script_reuse: mode=%s captures=%llu with_previous=%llu index_failed=%llu scripts=%llu reused=%llu "
                           "(%.1f%%) tails=%llu walked=%llu unrecorded=%llu structure=%llu verified=%llu mismatches=%llu "
-                          "kept: captured=%llu restored=%llu reused=%llu roots=%llu refused=%llu fed=%llu",
+                          "kept: captured=%llu restored=%llu reused=%llu roots=%llu refused=%llu fed=%llu "
+                          "plans: emitted=%llu kept=%llu none=%llu gen=%llu mask=%llu run=%llu",
                           script_reuse_mode_name(mode), static_cast<unsigned long long>(captures),
                           static_cast<unsigned long long>(with_previous), static_cast<unsigned long long>(index_failed),
                           static_cast<unsigned long long>(scripts), static_cast<unsigned long long>(reused),
@@ -164,7 +170,10 @@ namespace bmmo::game {
                           static_cast<unsigned long long>(verified), static_cast<unsigned long long>(mismatches),
                           static_cast<unsigned long long>(kept_captured), static_cast<unsigned long long>(kept_restored),
                           static_cast<unsigned long long>(kept_reused), static_cast<unsigned long long>(kept_roots),
-                          static_cast<unsigned long long>(kept_refused), static_cast<unsigned long long>(walked_fed));
+                          static_cast<unsigned long long>(kept_refused), static_cast<unsigned long long>(walked_fed),
+                          static_cast<unsigned long long>(planned), static_cast<unsigned long long>(plans_kept),
+                          static_cast<unsigned long long>(plan_none), static_cast<unsigned long long>(plan_gen),
+                          static_cast<unsigned long long>(plan_mask), static_cast<unsigned long long>(plan_run));
             return buf;
         }
     };

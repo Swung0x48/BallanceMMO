@@ -1427,7 +1427,37 @@ namespace bmmo::game {
                     size_t pos = static_cast<size_t>(block - source->data());
                     const size_t end = pos + size;
                     uint64_t tails = 0;
-                    if (!copy_with_fresh_tails(beh, hooks, *source, pos, out, tails, with_slots) || pos != end) {
+                    // The copy plan (script_slots.hpp): the last copy of this
+                    // root, cut at its fresh bytes, emitted without the source
+                    // or the graph; a copy without one leaves one.
+                    const bool planning = keeping && hooks.slots->observing() && copy_plan_from_env();
+                    const char* refused = nullptr;
+                    const script_slots::plan* planned =
+                        planning ? hooks.slots->plan_for(static_cast<uint32_t>(id), writes, refused) : nullptr;
+                    if (refused)
+                        ++(refused[0] == 'n' ? reuse_stats.plan_none : refused[0] == 'g' ? reuse_stats.plan_gen
+                           : refused[0] == 'm' ? reuse_stats.plan_mask : reuse_stats.plan_run);
+                    plan_recorder recorder{planning && !planned ? &hooks.slots->plan_of(static_cast<uint32_t>(id)) : nullptr, at};
+                    if (recorder.plan) *recorder.plan = script_slots::plan{};
+                    bool copied = false;
+                    if (planned && emit_plan(context, *planned, hooks, out)) {
+                        tails = planned->tails;
+                        ++reuse_stats.planned;
+                        copied = true;
+                    } else if (!planned) {
+                        copied = copy_with_fresh_tails(beh, hooks, *source, pos, out, tails, with_slots, &recorder) && pos == end;
+                        if (copied && recorder.plan) {
+                            script_slots::plan& made = *recorder.plan;
+                            made.statics.insert(made.statics.end(), out.begin() + static_cast<std::ptrdiff_t>(recorder.mark), out.end());
+                            made.seq = hooks.slots->seq();
+                            made.writes = writes;
+                            made.mask = hooks.slots->mask();
+                            made.tails = static_cast<uint32_t>(tails);
+                            made.valid = true;
+                        }
+                    }
+                    if (!copied) {
+                        if (planning) hooks.slots->plan_of(static_cast<uint32_t>(id)) = script_slots::plan{};
                         out.resize(at);
                         joint_stats().imaged = imaged_before;   // the walk below images them again
                         // T3C e3: the walk below is the slot memo's one counted
@@ -1466,7 +1496,7 @@ namespace bmmo::game {
                                              + (beh->GetName() ? beh->GetName() : "") + " (#" + std::to_string(id)
                                              + ") at tick " + std::to_string(reuse->tick) + ": a fresh walk ("
                                              + std::to_string(fresh) + " bytes) differs from the copy of "
-                                             + (from_kept ? "the kept source's" : "record t - 1's") + " block ("
+                                             + (planned ? "its plan's" : from_kept ? "the kept source's" : "record t - 1's") + " block ("
                                              + std::to_string(copied) + " bytes, " + std::to_string(tails)
                                              + " physics tails fresh) at byte " + std::to_string(where) + "; recorded the copy");
                         }
@@ -1645,8 +1675,44 @@ namespace bmmo::game {
         // The block layout is capture_behavior's, read here and by skip_tail /
         // skip_v2_block: a change to one must be made in all three, or every
         // copy falls back to the walk (structure= rises; output stays exact).
+        // `recorder` (the copy plan, script_slots.hpp): the bytes copied
+        // since `mark` are added to the plan before each fresh part, which
+        // the plan names; the caller adds the rest when the copy ends well.
+        struct plan_recorder {
+            script_slots::plan* plan = nullptr;
+            size_t mark = 0;
+            // `out` from `begin` on is `block`'s fresh part, just emitted.
+            void fresh(const std::vector<uint8_t>& out, size_t begin, CKBehavior* block, bool images) {
+                plan->statics.insert(plan->statics.end(), out.begin() + static_cast<std::ptrdiff_t>(mark),
+                                     out.begin() + static_cast<std::ptrdiff_t>(begin));
+                plan->parts.push_back({static_cast<uint32_t>(begin - mark), static_cast<uint32_t>(block->GetID()), images});
+                mark = out.size();
+            }
+        };
+        // A plan's bytes: its copied bytes, each fresh part emitted where the
+        // copy emitted it, by the same calls.  False when a part's block is
+        // gone or no longer of its kind (`out` partly written: the caller
+        // cuts it back and walks).
+        static bool emit_plan(CKContext* context, const script_slots::plan& plan, const script_replay_hooks& hooks,
+                              std::vector<uint8_t>& out) {
+            size_t at = 0;
+            for (const script_slots::plan_part& part: plan.parts) {
+                out.insert(out.end(), plan.statics.begin() + static_cast<std::ptrdiff_t>(at),
+                           plan.statics.begin() + static_cast<std::ptrdiff_t>(at + part.statics));
+                at += part.statics;
+                CKBehavior* block = CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(part.block)));
+                if (!block) return false;
+                if (part.images) put_omitted_images(block, hooks, out);
+                else if (is_force_block(block) || is_joint_block(block)) put_force_and_joint(block, hooks, out, true);
+                else return false;
+            }
+            out.insert(out.end(), plan.statics.begin() + static_cast<std::ptrdiff_t>(at), plan.statics.end());
+            return true;
+        }
         static bool copy_with_fresh_tails(CKBehavior* beh, const script_replay_hooks& hooks, const std::vector<uint8_t>& in,
-                                          size_t& pos, std::vector<uint8_t>& out, uint64_t& tails, bool images = false) {
+                                          size_t& pos, std::vector<uint8_t>& out, uint64_t& tails, bool images = false,
+                                          plan_recorder* recorder = nullptr) {
+            if (recorder && !recorder->plan) recorder = nullptr;
             const auto copy_from = [&](size_t from) {
                 out.insert(out.end(), in.begin() + static_cast<std::ptrdiff_t>(from), in.begin() + static_cast<std::ptrdiff_t>(pos));
             };
@@ -1667,7 +1733,9 @@ namespace bmmo::game {
             if (has_joint && (!get_u8(in, pos, handle) || (handle == kJointImaged && !skip(in, pos, 8)))) return false;
             const bool force = is_force_block(beh), joint = is_joint_block(beh);
             if (force || joint) {
+                const size_t fresh = out.size();
                 put_force_and_joint(beh, hooks, out, true);
+                if (recorder) recorder->fresh(out, fresh, beh, false);
                 tails += (force ? 1u : 0u) + (joint ? 1u : 0u);
             } else {
                 if (has_force || has_joint) return false;   // the record had a tail this block cannot have
@@ -1678,7 +1746,8 @@ namespace bmmo::game {
             // (exact by construction; OPC's verify compares it too).
             if (images) {
                 if (!skip_slot_images(in, pos)) return false;
-                put_omitted_images(beh, hooks, out);
+                const size_t fresh = out.size();
+                if (put_omitted_images(beh, hooks, out) && recorder) recorder->fresh(out, fresh, beh, true);
             }
             uint16_t children = 0, delayed = 0;
             if (!get_u16(in, pos, children)) return false;
@@ -1698,7 +1767,7 @@ namespace bmmo::game {
                 uint8_t present = 0;
                 if (!get_u8(in, pos, present) || present != (child ? 1 : 0)) return false;
                 put_u8(out, present);
-                if (child && !copy_with_fresh_tails(child, hooks, in, pos, out, tails, images)) return false;
+                if (child && !copy_with_fresh_tails(child, hooks, in, pos, out, tails, images, recorder)) return false;
             }
             const size_t links = pos;
             if (!get_u16(in, pos, delayed) || delayed != delayed_link_count(beh) || !skip(in, pos, 2u * delayed)) return false;
@@ -1843,6 +1912,7 @@ namespace bmmo::game {
                 ~forget_unless_kept() { if (slots) slots->forget(); }
             } forgetting{keeping ? hooks.slots : nullptr};
             std::vector<script_root_words> exact;
+            std::vector<uint32_t> left;   // of `exact`, the roots the restore skip left as they were
             size_t held_roots = 0, scripts_end = 0;
             std::vector<CKBehavior*> written;   // the root scripts written back (G1, live_membership)
             // Gap Q (design 2.2.3): a selected script the record has no
@@ -1879,7 +1949,10 @@ namespace bmmo::game {
                     const bool same = kept && scripts && write && root_unchanged(beh, hooks, *kept, kept_index, k, in, pos, skip_mode);
                     if (!restore_behavior(beh, hooks, in, pos, error, write, images, same)) return false;
                     if (held) ++held_roots;
-                    if (held && last_restore().inexact == inexact) exact.push_back(words);
+                    if (held && last_restore().inexact == inexact) {
+                        exact.push_back(words);
+                        if (same) left.push_back(static_cast<uint32_t>(id));
+                    }
                     if (write && scripts && replayed) replayed->push_back(id);
                     if (write && scripts) written.push_back(beh);
                 }
@@ -2078,6 +2151,12 @@ namespace bmmo::game {
                 });
                 script_reuse_totals().kept_roots += exact.size();
                 script_reuse_totals().kept_refused += held_roots - exact.size();
+                // A root left as it was and still exact: its copy plan holds
+                // after this restore too.
+                for (uint32_t root: left)
+                    if (std::any_of(exact.begin(), exact.end(), [root](const script_root_words& words) { return words.id == root; })
+                            && hooks.slots->keep_plan(root))
+                        ++script_reuse_totals().plans_kept;
                 hooks.slots->restored(*tick, exact, in.data(), scripts_end, writes);
                 forgetting.slots = nullptr;
             }
@@ -3240,11 +3319,14 @@ namespace bmmo::game {
         // skip walkers need no graph), then for each sub-behaviour the
         // record leaves out, in index order, whose live image is not its
         // base: u32 id, u32 base hash, script_slots' delta.  A copy's image
-        // is walked as its base was (no slot map, no section).
-        static void put_omitted_images(CKBehavior* beh, const script_replay_hooks& hooks, std::vector<uint8_t>& out) {
+        // is walked as its base was (no slot map, no section).  Whether the
+        // block has a sub-behaviour the record leaves out: without one the
+        // section is the bare count of 0 (the copy plan's static bytes).
+        static bool put_omitted_images(CKBehavior* beh, const script_replay_hooks& hooks, std::vector<uint8_t>& out) {
             const size_t count_at = out.size();
             put_u16(out, 0);
-            if (!hooks.slots || beh->IsUsingFunction()) return;
+            if (!hooks.slots || beh->IsUsingFunction()) return false;
+            bool omitted = false;
             uint16_t count = 0;
             std::unique_ptr<script_replay_hooks> plain;
             std::vector<uint8_t> image, tail;
@@ -3258,6 +3340,7 @@ namespace bmmo::game {
                 CKBehavior* child = beh->GetSubBehavior(index);
                 script_slots::copy* c = child ? hooks.slots->find(static_cast<uint32_t>(child->GetID())) : nullptr;
                 if (!c || !hooks.slots->omitted(*c)) continue;
+                omitted = true;
                 if (!plain) {
                     plain = std::make_unique<script_replay_hooks>(hooks);
                     plain->slots = nullptr;
@@ -3313,6 +3396,7 @@ namespace bmmo::game {
             }
             out[count_at] = static_cast<uint8_t>(count & 0xff);
             out[count_at + 1] = static_cast<uint8_t>(count >> 8);
+            return omitted;
         }
 
         // T3C e3: every force tail of `c`'s memo as it reads now, against the

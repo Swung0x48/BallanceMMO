@@ -1715,3 +1715,50 @@ at K = 20 (L12, L11 at human key rates) in verify, 619 k copies and 3.48 M memo 
 `fed=0`, FINAL rows of the shipped and the verify sessions bit-equal to the restore skip's sessions with L11's 32
 trafo pieces; x64 and x86 builds, the Arch server; two serial reviews (the operation's case, the comments, the tool
 printing the selection's own set are theirs).
+
+## Built (the copy plan: a copy without the graph, 2026-11-11)
+
+**What a copy still cost.** A root the capture copies (step OPC, the kept source) was still walked in step with its
+source's bytes, block by block, to find the few bytes it reads fresh - a force or joint block's tail, the slot image
+section of a block with an omitted copy - and to check the structure: ~0.6 ms of a 1.9 ms whole record on the
+public server's machine (the public L6 re-drive, 13 players, K = 20).
+
+**Built** (`script_slots::plan`, `script_replay` `plan_recorder` / `emit_plan`; `BMMO_COPY_PLAN` off | on, on when
+unset, with the kept source). The first copy of a root by an observing capture leaves a plan: the bytes it copied,
+end to end, and after how many of them which block's fresh part was emitted. The next copies of that root append
+those bytes and make the same `put_force_and_joint` / `put_omitted_images` calls in the same order - no source
+bytes, no graph. A plan serves under the memo's rule (the host-write generation it was stored under, the root quiet
+since) and the same slot mask; a copy block added drops every plan; a restore that left the root as it was, and
+found it exact, keeps its plan (`keep_plan`, `restored`). A plan checks no structure: it rests on every change of a
+selected root's graph bumping the host-write generation or going through `add()` (the proximity union's rewiring
+and the placement's copies do); `emit_plan` only checks that a part's block is there and still of its kind, and
+walks otherwise. `BMMO_SCRIPT_REUSE`'s verify walks every root a plan emitted and compares. Counters on the
+`script_reuse` line: `plans: emitted= kept= none= gen= mask= run=`.
+
+**Measured** on the 8845HS (one binary, `BMMO_COPY_PLAN` off / on, two interleaved pairs that agree; 13 clients on
+its 16 threads): a replayed whole record 1.92 -> 1.37 ms, the live capture 2.22 -> 1.61 ms a frame, a rewind's
+replay 6.41 -> 5.31 ms, rewind work + capture 383 -> 316 ms a second, frame p50 4.75 -> 4.0, p99 18.7 -> 16.7,
+p999 25.0 -> 23.5 ms; 99.7 % of the copies come from a plan. With client 0 alone on a core (33 232 frames): p50
+4.6 -> 4.0, p99 17.9 -> 16.9, p999 22.0 -> 20.2 ms, frames over 15.15 ms 1606 -> 1173 (3.5 %).
+
+**The slowest frames, read again** (the same run with every rollback hook timed, `work/PERF/apply_hooks_diag.py`).
+The eight slowest frames of the start (ticks 228-235, 25-37 ms) are not the product's: the headless client's
+savestate text diff (`world.diff_savestate`, its first eight differing replays; the mod has none) runs in them -
+the ninth such frame, twelve ticks deep, is 12.8 ms. After the start the slowest (23-29 ms) hold five to seven
+whole records (5-10 ms), two of them two rewinds. An ordinary frame over the budget (690 of them, 16.6 ms,
+12.3 ticks): script restore 2.5 ms, place_probes 2.3, pre_step 1.5, the savestate's capture 1.0 and restore 0.7,
+step 0.9, the rest captures and the live frame. A script restore by parts (`work/PERF/apply_rs_diag3.py`): 2.94 ms
+= the 22 roots the skip leaves, still walked for their tails, 1.16 + the trafo section 1.17 + the 9 roots written
+0.27 + hold, cells, queue and anchoring 0.2.
+
+Gate: 845/845; the L6 re-drive with BMMO_SCRIPT_REUSE and BMMO_SLOT_MEMO in verify and the restore skip on, 7.02 M
+copies walked again of which 6.99 M came from a plan and 1.60 M plans kept across restores, 0 mismatches, every
+session's `mism` 0; fast LBM the same way 38/38 twins FINAL exact, every criteria row equal to the resync cut's
+run, 6.37 M copies walked again (6.36 M from a plan, 20 k plans kept), 0 mismatches; fast LBM with the four
+switches in verify 38/38, the same rows, 0 mismatches (there no plan outlives a restore: the restore skip's verify
+leaves no root as it was); fast LBM 38/38, the same rows; retail at K = 20 (L12, L11 at human key rates), verify
+with the restore skip on: 618 k copies walked again (617 k from a plan, 11.5 k plans kept) and 3.54 M memo hits, 0
+mismatches, FINAL rows of the shipped and the verify sessions bit-equal to the restore skip's sessions with L11's
+32 trafo pieces; x64 and x86 builds, the Arch server; two serial reviews, no defects (the premise written at the
+plan, the check of a tail part's block, one rule for a block with an omitted copy, a plan kept only for a root
+still exact are theirs).

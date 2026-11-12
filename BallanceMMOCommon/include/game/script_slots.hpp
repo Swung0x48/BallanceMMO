@@ -66,6 +66,14 @@
 // source and every run.
 // BMMO_SCRIPT_REUSE's and BMMO_SLOT_MEMO's verify walk every such copy and
 // memo hit too.
+//
+// The copy plan (BMMO_COPY_PLAN = off | on, on when unset; with the kept
+// source): a copy still walked the root's graph in step with its source's
+// bytes to find the few it reads fresh - 0.6 ms of a 1.9 ms record in a room
+// of 13.  A copy leaves a plan (struct plan below) and the next copies of
+// that root are emitted from it.  BMMO_SCRIPT_REUSE's verify walks every
+// such copy; a restore keeps a plan only with the restore skip on (not in
+// its verify, which leaves no root as it was).
 
 #include <algorithm>
 #include <cstddef>
@@ -97,6 +105,12 @@ namespace bmmo::game {
     // BMMO_REUSE_KEPT, read once per process (on when unset).
     inline bool reuse_kept_from_env() {
         static const bool on = parse_script_reuse_mode(std::getenv("BMMO_REUSE_KEPT"), script_reuse_mode::on)
+                               != script_reuse_mode::off;
+        return on;
+    }
+    // BMMO_COPY_PLAN, read once per process (on when unset).
+    inline bool copy_plan_from_env() {
+        static const bool on = parse_script_reuse_mode(std::getenv("BMMO_COPY_PLAN"), script_reuse_mode::on)
                                != script_reuse_mode::off;
         return on;
     }
@@ -166,7 +180,7 @@ namespace bmmo::game {
         };
 
         void clear() {
-            blocks_.clear(); bound_ = ~uint64_t{0}; learned_ = 0; roots_.clear(); tracked_.clear();
+            blocks_.clear(); bound_ = ~uint64_t{0}; learned_ = 0; roots_.clear(); tracked_.clear(); plans_.clear();
             disarm_restore();
             forget();
         }
@@ -180,6 +194,7 @@ namespace bmmo::game {
             c.base_hash = h;
             c.root = root;
             blocks_.insert_or_assign(id, std::move(c));
+            plans_.clear();   // a copy block more: what a root's copy emits changed
             if (root && std::find(roots_.begin(), roots_.end(), root) == roots_.end()) roots_.push_back(root);
         }
         copy* find(uint32_t id) {
@@ -236,7 +251,7 @@ namespace bmmo::game {
             restore_writes_ = writes;
             restore_armed_ = true;
         }
-        void disarm_restore() { restore_armed_ = false; restore_quiet_.clear(); kept_.clear(); }
+        void disarm_restore() { restore_armed_ = false; restore_quiet_.clear(); kept_.clear(); kept_plans_.clear(); }
         bool restore_armed() const { return restore_armed_; }
 
         // The kept source.  A root the ledger observes besides the copies'.
@@ -265,6 +280,51 @@ namespace bmmo::game {
         // Nothing is known of any root (a restore failed part-way, or one
         // whose record's tick the caller does not say).
         void forget() { runs_.clear(); have_source_ = false; }
+
+        // The copy plan.  A root's block as a copy emits it (script_replay
+        // copy_with_fresh_tails), cut at the bytes read fresh: `statics` are
+        // the copied bytes end to end, and each part says after how many of
+        // them a block's force and joint tail, or its slot image section,
+        // is emitted.  Stored by a copy an observing capture made, it serves
+        // the next copies of that root while the memo's rule holds - the
+        // same host-write generation, the root quiet since - under the same
+        // slot mask: they need neither the source's bytes
+        // nor the graph.  A restore that leaves the root as it is keeps its
+        // plan (keep_plan, restored); a copy block added drops every plan.
+        // A plan checks no structure, as the copy did block by block: it
+        // rests on every change of a selected root's graph - a block or a
+        // link made or deleted, a copy rewired - bumping the host-write
+        // generation (note_script_write) or going through add().
+        struct plan_part { uint32_t statics = 0, block = 0; bool images = false; };
+        struct plan {
+            std::vector<uint8_t> statics;
+            std::vector<plan_part> parts;
+            uint64_t seq = 0, writes = 0, mask = 0;
+            uint32_t tails = 0;     // the force and joint blocks among the parts
+            bool valid = false;
+        };
+        plan& plan_of(uint32_t root) { return plans_[root]; }
+        // `root`'s plan when it can serve a copy now, else null and why not
+        // in `refused` ("none", "gen", "mask", "run": the memo's words).
+        const plan* plan_for(uint32_t root, uint64_t writes_now, const char*& refused) const {
+            const auto found = plans_.find(root);
+            refused = nullptr;
+            if (found == plans_.end() || !found->second.valid) refused = "none";
+            else if (found->second.writes != writes_now) refused = "gen";
+            else if (found->second.mask != bound_) refused = "mask";
+            else if (quiet_since(root) > found->second.seq) refused = "run";
+            return refused ? nullptr : &found->second;
+        }
+        // The restore skip left `root` as it was: its plan, good at the
+        // restore's start, is good after it.  Whether there was one.
+        bool keep_plan(uint32_t root) {
+            const auto found = plans_.find(root);
+            if (!restore_armed_ || found == plans_.end() || !found->second.valid || found->second.writes != restore_writes_
+                    || quiet_since(root) > found->second.seq)
+                return false;
+            kept_plans_.push_back(root);
+            return true;
+        }
         // A copy the restore skip left as it was (it holds its memo's image).
         void keep_memo(uint32_t id) { kept_.push_back(id); }
         // A restore that ended well, as one observation: `holding` are the
@@ -288,6 +348,12 @@ namespace bmmo::game {
                     c->m.writes = writes;
                 }
             kept_.clear();
+            for (uint32_t root: kept_plans_) {
+                plan& p = plans_[root];
+                p.seq = seq_;
+                p.writes = writes;
+            }
+            kept_plans_.clear();
             keep_source(record, size, writes, true);
         }
         uint64_t restore_writes() const { return restore_writes_; }
@@ -440,6 +506,8 @@ namespace bmmo::game {
         uint64_t restore_writes_ = 0;
         bool restore_armed_ = false;
         std::vector<uint32_t> kept_;
+        std::unordered_map<uint32_t, plan> plans_;
+        std::vector<uint32_t> kept_plans_;
         std::unordered_set<uint32_t> tracked_;
         std::vector<uint8_t> source_;
         uint64_t source_seq_ = 0, source_writes_ = 0;
