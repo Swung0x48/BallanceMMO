@@ -579,7 +579,9 @@ orchestrator pulled this part of Stage C's R6B forward (plan section BEAMF) so S
   an own substituted frame amended in its record - so it is dropped, counted as carried (`window_inrew_src_` still
   names its source). Not merged (each keeps its rewind, as before): a late Sector set (its re-derivation starts at
   its own anchor; after the lifecycle replay, as before), an own echo's moved birth (`move_own_birth`), an exact
-  resync's apply, and an input correction older than the lifecycle anchor. In the measured sets no frame held two.
+  resync's apply, and an input correction older than the lifecycle anchor (since step MRG taken along at the
+  frame's final flush: 'Built (a lifecycle rewind takes a deeper input correction along, step MRG, 2026-11-12)').
+  In the measured sets no frame held two.
 - **Adaptations.** (1) The life log's remote Unphysicalize entry gets its generation at the apply, not after its own
   replay (the field is read for own lives only). (2) **The pass rule's replays need `--replay-free-cost-clock`**
   (B5RC's flag): a capture records each rewind's three cost clock reads (`rewind_start`, `rewind_replay`,
@@ -2373,3 +2375,144 @@ the build id to HEAD's shipped run (`pf_dfl_1`) and to `pf_rtq_1`. Fast LBM with
 mismatches, FINAL rows bit-equal to the restore skip's sessions with L11's 32 trafo pieces; 520 and 200 reads
 targeted, no relatch (L12: `withdrawn=1` on Gameplay_SectorManager as before). So the step's effect on retail is
 untried: its sessions here never relatch.
+
+## Built (a lifecycle rewind takes a deeper input correction along, step MRG, 2026-11-12)
+
+**What it costs today.** On the public L6 record (8845HS, client 0 pinned) 11-15 frames a run are still over the
+15.15 ms budget, and 5 of them hold two rollbacks, always of one shape: the frame's late lifecycle batch (SRT3's
+`flush_life_rewinds`) rewinds 4-7 ticks, then `replay_corrected_inputs` rewinds again from a remote input
+correction's anchor 10-14 ticks back. The second replay steps again every tick the first did, from a deeper record,
+so one restore and one replay from the deeper anchor cost what the second rollback costs alone: 5.8-7.7 ms less in
+each such frame, which brings every one of them under the budget. SRT3 kept the case in its "not merged" list.
+
+**The rule.** At the frame's final flush - `process_own_echoes`' (`flush_life_rewinds(true)`), after the own echoes
+(step ODM) - a pending input correction that the batch's replay would not carry gives the batch's rewind its anchor
+(the corrected tick T - 1, as `replay_corrected_inputs` takes it) and its reach (`life_rewind_reach(T)`, the value
+`replay_corrected_inputs` passes); `drop_carried_input_replay` then drops it as carried, as it drops a subsumed one.
+"Would not carry" is `drop_carried_input_replay`'s own test (`replay_subsumes`) against the record the batch
+restores (`restore_base` of its anchor: a light anchor restores the whole record before it and carries what lies
+after that). The early flushes keep their anchor: `settle_life_batch_before`'s, the GHF and A3 flushes before
+`rewind_for_spawn_forgets` / `drain_pending_deaths`, and an own echo's flush before `move_own_birth` and the other
+echo paths. Each runs because what follows it reads what the batch's replay leaves, and the input replay still
+follows it in the frame. The code is `client_core_lifecycle.cpp` `merges_input_replay`, its conditions numbered in
+its comment:
+1. *Recorded and inside the reach*: `knows_tick(T - 1)` and `now - (T - 1) <= window_rewind_reach(T)`, the test
+   `joins_life_batch` puts on an event's anchor. It is also `rewind_to`'s limit for the reach passed:
+   `life_rewind_reach(T)` is 0 or the window's reach, and `min(max(reach, max_resim_ticks), resync_reach())` is then
+   `window_rewind_reach(T)` either way. The running reach cap cannot move in between: `max_resim_ticks` changes only
+   in `apply_reach`, from `sample_reach` at a datagram's arrival, never inside `pre_step`.
+2. *Not before a pending exact resync's base*: an event does not join the batch there either (the server's state of
+   base - 1 covers it).
+3. *A whole record at or before T - 1* (`rewindable`): `rewind_to`'s third refusal, sparse capture's. The step
+   excludes instead of falling back: a refused `rewind_to` writes no world, but `rewind_world` runs
+   `settle_unreplayed_lives` and `settle_own_due` after it, which make the batch's queued births and deaths live,
+   so a fallback rewind after a refusal would not be the batch's own. With 1-3 the merged `rewind_to` passes all
+   three of its refusals (`find`, the limit, `restore_base`), and `restore_and_replay` returns true once its base is
+   found. The miss path stays under it: the correction is then left pending and `replay_corrected_inputs` runs it.
+4. *No step after the flush with work to do* that reads the world the replay leaves, or rewinds itself. Today they
+   run between the two replays, merged after the one, which is the carried case's order:
+   - `expire_own_echoes`: `re_report_current` takes the own ball's current pose into an event that is sent and
+     journalled, `resync_own_life` may take a body out, `expire_rereports` likewise. Excluded when it would act
+     (`own_echoes_expiring`: its gates, each overdue test on a copy of the deadline, since
+     `own_echo_deadline::missing` notes the uplink when it looks).
+   - `apply_forced_own_moves` (a test override; `move_own_birth` reads the body and rewinds): excluded when a forced
+     move is due.
+   - `try_apply_resync`: an exact resync's apply restores its base and re-steps over records a merged replay would
+     have rewritten, and drops the input replay under `resync_rewinds_subsumed_`. Excluded when its gate passes
+     (`have_resync_state_`, `resync_pending_`, `resync_exact_`).
+   - `rewind_for_sectors`: a late Sector set rewinds from its own anchor and re-derives the union. Excluded while
+     `sector_late_` holds one (nothing after the flush adds to it: `move_own_sector` runs in the echoes before it).
+   - Not excluded: `settle_replaced_rereports` reads no world (the re-reports' ticks against the tick base, a resync
+     request); `platform_.script_guards` re-pins the sector reset links and cells a restore or the scripts handed
+     back - idempotent, no body read - so the merged replay runs under the guards the batch's replay runs under
+     today. Their log lines: 26 in each run below.
+
+**What the dropped rewind did outside the history.**
+- *The batch's checks* (`make_remote_birth` / `remove_remote`'s "the replay did not reach it") run after the one
+  rewind as before; the deeper replay reaches every stamp the batch's did.
+- *Counters*: `life=` counts the merged rewind (one, as before), `life_rewind_depth_` its own depth (deeper);
+  `inrew=` loses the input replay and ` coalesced: input=` gains it (carried; an own-only correction goes to subst's
+  subsumed through `drop_carried_own_replay`, which the flush calls first); `resync_window_rewinds_` does not count
+  it (as for a carried one); `window_inrew_src_` names its source as `drop_carried_input_replay` does.
+- *The pacers* (condition 5, the review's point): a correction the input replay would not run in this frame is
+  not merged - an own-only one (it waits on the own pacer), one under the remote cadence (step A2), one while the
+  client is behind its schedule (`kRemoteCoalesceBehind`). Merged, a held correction would make this frame the
+  deeper one, against the budget, and run a frame earlier than merge off would. Such a frame counts as excluded
+  (the fifth reason's counter, with 4's). What remains is a remote correction the input replay runs whatever the
+  pacers say; the merged frame marks the remote pacer `ran()` as that replay would (the carried path marks it only
+  on the cadence) and the own pacer through `drop_carried_input_replay` when an own correction rode along.
+- *The cost meter* takes one sample (the merged rewind's) where it took two, so a live meter's cap moves with
+  it (a cheaper frame, a shallower average). The re-drive cannot show it: the canned test fixes the cost model
+  (`rewind_cost_meter::fix`, `cap=92/3.00/0.460/1`, one sample) and the reach stays 48 in every run below (no
+  `reach:` line). `calibrate_rewind_cost` runs only while no rewind has been sampled, which any rewind of the frame
+  ends.
+- *The frame's tail*: `make_unmade_remakes`, the `after_rewinds` hook, the "a rewind ran" test of the drive
+  (`rewinds_before`), and core_host's end-of-frame hooks on a changed restore count (XFG's `extra_glow_frame`, RSC's
+  sound frame) see a restore in the frame as before, after its last replay. `script_guards` runs after the frame's
+  last rewind in a merged frame and before the input replay in a two-rollback one, the carried case's order: the
+  two agree while no replay hands a guarded link back (its 26 log lines are the same in both runs).
+
+**Not merged**, counted on the status line: a correction the batch's replay carries already (as before), its anchor
+not recorded or outside the reach, before a pending exact resync's base, with no whole record to restore from, and a
+frame with work for one of 4's steps or a correction the pacers hold (5). Not at all: a correction that arrives after the final flush (none can inside
+`pre_step`), and every early flush.
+
+**The switch and the counters.** `BMMO_MERGE_INPUT` = `off` | `on`, read once per process (`client_core.cpp`
+`merge_input_from_env`, beside `replay_last_from_env`), on when unset, latched into `s.merge_input_` at the session
+start; off is the behaviour before the step and its status line the text it was. The status line's coalesced section
+(also opened by them, so retail reads them too) adds ` merged=M unmerged=a/b/c/d/e`: the frames merged, then the
+candidates not merged - carried as before / not recorded or outside the reach / resync base / no whole record /
+excluded by 4. The first 8 merges are logged: `lifecycle: the rewind to tick A takes the input correction at tick T
+along (from tick T - 1, local tick N)`, the rollback's reason gains `; input corrected at tick T`, and the
+batch's "late events taken by one rewind" and refusal lines name the anchor that ran.
+
+**The runs** (the L6 re-drive, dev machine, 13 clients, one binary; `pf_mgoff_1` with `BMMO_MERGE_INPUT=off`,
+`pf_mgon_1` with it unset):
+
+| | client 0 | the 13 clients |
+|---|---|---|
+| merge off | `life=66/0 inrew=5643/0 rb=5709 resim=51699`, `coalesced: life=6 input=30` | 72 875 restores, 661 620 replayed ticks |
+| merge on | `life=66/0 inrew=5633/0 rb=5699 resim=51649`, `coalesced: life=6 input=40 merged=10 unmerged=30/0/0/0/0` | 72 761 restores, 661 065 replayed ticks |
+
+Every client merged (7-11 frames each, 114 in all), and on every client the restores it lost, the input replays
+it lost and the carried ones it gained are each its `merged=`. Every candidate not merged was one the batch's replay
+carried already (`unmerged=N/0/0/0/0`). The 8 merges client 0 logs start 1-7 ticks before the batch's anchor and
+5-10 ticks before the live tick (the dev machine's relay). One frame, merge off: `rollback to tick 832 (ball of
+65538 born at tick 837)` re-simulated 7 ticks (the anchor 836 rebased), then `rollback to tick 825 (... input
+corrected at tick 830)` 14 ticks; merge on: one `rollback to tick 825 (ball of 65538 born at tick 837; input
+corrected at tick 830)`, 14 ticks. 555 replayed ticks fewer in all.
+Every session's `mism` 0; the 13 clients' and the server's journals equal past the build id between the two runs.
+With the reuse verifies and sparse verify (`pf_mgv_1`: `BMMO_SCRIPT_REUSE`, `SLOT_MEMO`, `RESTORE_PLAN`,
+`TRAFO_HELD`, `SLOT_CELLS` = verify, `BMMO_REPLAY_LAST=verify`, merge on): every `mismatches=` 0 (117 counters),
+sparse verify 56 631 anchors compared, 0 differing, 54 stale (109 in HEAD's verify runs of this re-drive, which make
+the 114 rewinds more), `mism` 0, its journals equal to the merge-off run's.
+`pf_mgon_1` and `pf_mgv_1` ran the binary before two edits that change no decision (the log lines above name the
+anchor that ran; a function moved in its file); the final binary's `pf_mgon2_1` repeats `pf_mgon_1`'s counters on
+every client and its 14 journals equal the merge-off run's. Merge off equals the commit before's shipped run
+(`pf_rts_1`: client 0's counters the same, the journals differing only inside the build id). Frame times on the
+8845HS were not measured.
+
+**The stored captures.** A capture records each rewind's three cost clock reads, so a strict replay of a capture
+taken by a binary before this step diverges at its first merged frame, as at SRT3: such a replay runs with
+`--replay-free-cost-clock` (SRT3's adaptation (2): `EXTRA=` when OLD and NEW both have the step, `NEW_EXTRA=` when
+OLD predates it), or strictly with `BMMO_MERGE_INPUT=off` on the new side. A capture that holds no merged frame
+replays strictly as before. Not run here.
+
+**Not exercised**: every exclusion (4's counter is 0 everywhere), the refusal and resync-base cases, a correction
+outside the reach, the pacer exclusion (5: no cadence, nobody behind, no own-only correction on L6), a merge inside
+an exact resync's re-step window, a live cost meter, the wire check; the fast LBM and the retail sessions hold no
+merged frame (every candidate there is carried as before).
+
+**Gate.** 849/849 (one new test: `SessionClientCoreOwnDeaths.FinalFlushTakesAnOlderInputCorrectionAlong`, both
+switch states); x64 BUILD-OK, x86 CLIENT-BUILD-OK; the L6 re-drive merge off, merge on, and merge on with the reuse
+and sparse verifies as above, and merge on again with the final binary.
+
+**The full gate** (the final tree, condition 5 in): x64 and the tests, 849/849; the x86 client; the Arch server.
+The L6 re-drive with the six verifies (`pf_mgq_1`): every verify's mismatches 0, sparse verify 56 631 anchors, 0
+differing, 0 float, 54 stale, every session's `mism` 0, 114 frames merged, 426 carried as before, no other reason;
+as shipped (`pf_mgs_1`): `mism` 0, 114 merged, the 13 clients' journals equal to the merge-off run's (`pf_mgoff_1`)
+and to `pf_mgq_1` past the build id, and to the slot relatch's shipped run (`pf_rts_1`) but for the 12 bytes of
+the build id's commit. Fast LBM with the verifies and as shipped: 38/38 twins FINAL exact each, every criteria row
+equal to the resync cut's run, 0 mismatches, 419 sparse anchors 0 differing; 0 merged, 41 carried. Retail at K =
+20, L12 and L11 at human key rates, as shipped: 0 mismatches, FINAL rows bit-equal to the restore skip's sessions
+with L11's 32 trafo pieces; 0 merged (1-3 carried per client). So on retail the step is untried.

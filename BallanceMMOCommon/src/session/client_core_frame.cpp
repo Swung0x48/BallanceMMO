@@ -670,7 +670,9 @@ namespace bmmo::session {
         // Gameplay_SectorManager, which the restore (the manager travels
         // with the records now) would write back to the anchor's and lose,
         // and the replay ends one tick short of re-issuing it.  The retail
-        // client has this order already.
+        // client has this order already.  Step MRG: a correction older than
+        // the lifecycle batch's anchor rode along in the batch's rewind at
+        // the final flush (merges_input_replay) and is not pending here.
         replay_corrected_inputs();
         calibrate_rewind_cost();
         retry_owed_resync();

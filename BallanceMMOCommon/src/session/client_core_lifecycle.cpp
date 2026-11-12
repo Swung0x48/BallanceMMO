@@ -649,6 +649,77 @@ namespace bmmo::session {
         return reach > s.rollback_.thresholds().max_resim_ticks ? reach : 0;
     }
 
+    // Step MRG: at the frame's final flush, a pending input correction the
+    // batch's replay would not carry - its anchor (the corrected tick - 1,
+    // as replay_corrected_inputs takes it) is older than the record the
+    // batch restores (restore_base: drop_carried_input_replay's test) - is
+    // taken along: one restore and one replay from its anchor, where the
+    // frame ran the batch's rewind and then a deeper one.  Only where that
+    // rewind is the one replay_corrected_inputs would run, and nothing
+    // between the flush and it reads what the new order changes:
+    //  1. the anchor recorded and inside the reach replay_corrected_inputs
+    //     passes (window_rewind_reach of the tick; rewind_to's limit for
+    //     life_rewind_reach of it is the same) - joins_life_batch's test;
+    //  2. the tick not before a pending exact resync's base, which an event
+    //     does not join past either (the server's state covers it);
+    //  3. a whole record at or before the anchor (rewindable: rewind_to's
+    //     sparse refusal).  With 1 the merged rewind is never refused, and a
+    //     refusal would not be harmless: rewind_world settles the batch's
+    //     queued lives live after it;
+    //  4. no step after the flush with work to do that reads the world the
+    //     replay leaves or rewinds itself: expire_own_echoes (a re-report
+    //     takes the own ball's pose, resync_own_life a body out),
+    //     apply_forced_own_moves (move_own_birth), try_apply_resync's apply
+    //     (it re-steps from its base and drops the input replay under its
+    //     own counter) and rewind_for_sectors (its re-derivation from its
+    //     own anchor ran after the batch's replay and before the input's).
+    //  5. a correction replay_corrected_inputs runs this frame whatever its
+    //     pacers say: a remote's (an own-only one waits on the own pacer),
+    //     with no remote cadence and the client not behind its schedule.
+    //     A held correction merged would make this frame the deeper one
+    //     (the review's point); the merged frame marks the remote pacer as
+    //     the input replay would (flush_life_rewinds).
+    bool session_client_core::merges_input_replay(uint32_t anchor) {
+        if (!s.merge_input_ || !s.input_rewind_pending_) return false;
+        const uint32_t tick = s.input_rewind_tick_;
+        uint32_t base = anchor;
+        if (!s.rollback_.restore_base(anchor, base)) base = anchor;
+        if (bmmo::session::replay_subsumes(base, tick)) {
+            ++s.merge_not_older_;   // carried by the batch's replay, as before
+            return false;
+        }
+        const uint32_t now = current_tick();
+        const uint32_t deep = tick - 1;
+        if (!s.rollback_.knows_tick(deep) || now - deep > window_rewind_reach(tick)) {   // 1
+            ++s.merge_unrecorded_;
+            return false;
+        }
+        if (s.resync_pending_ && s.resync_exact_ && static_cast<int32_t>(tick - s.resync_base_) < 0) {   // 2
+            ++s.merge_resync_base_;
+            return false;
+        }
+        if (!s.rollback_.rewindable(deep)) {   // 3
+            ++s.merge_refused_;
+            return false;
+        }
+        const bool forced_due = std::any_of(s.own_life_.begin(), s.own_life_.end(), [now](const own_life& life) {
+            return life.force_pending && static_cast<int32_t>(now - life.force_due) >= 0;
+        });
+        const bool remote = !s.input_rewind_entities_.empty() || !s.input_rewind_own_;
+        const bool paced = !remote || config.remote_cadence_frames != 0
+                           || s.pacer_behind_ >= bmmo::session::kRemoteCoalesceBehind;   // 5
+        if (own_echoes_expiring() || forced_due || (s.have_resync_state_ && s.resync_pending_ && s.resync_exact_)
+                || !s.sector_late_.empty() || paced) {   // 4, 5
+            ++s.merge_excluded_;
+            return false;
+        }
+        ++s.input_merged_;
+        if (s.input_merged_ <= 8)
+            logf("lifecycle: the rewind to tick %u takes the input correction at tick %u along (from tick %u, local tick %u)",
+                 anchor, tick, deep, now);
+        return true;
+    }
+
     // Step SRT3: before the drain applies an event of `player` stamped
     // `stamp`, the batch rewinds when the sequential path would have had
     // its replay run first and the event reads what it left: an
@@ -670,7 +741,7 @@ namespace bmmo::session {
     // remove_remote ran after each event's own rewind: a birth or death the
     // replay did not apply (a frozen world sets the bodies and replays
     // nothing) is applied live now, in the drain's order.
-    void session_client_core::flush_life_rewinds() {
+    void session_client_core::flush_life_rewinds(bool final) {
         if (!s.life_batch_.pending) return;
         client_core_state::life_rewind_batch batch;
         std::swap(batch, s.life_batch_);
@@ -679,6 +750,16 @@ namespace bmmo::session {
         auto input_at = [this](const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) {
             return recorded_input_at(entity, tick, out);
         };
+        // Step MRG: at the frame's final flush, a pending input correction
+        // older than the batch's anchor gives the rewind its anchor and its
+        // reach, and the replay carries it (drop_carried_input_replay below).
+        uint32_t anchor = batch.anchor;
+        std::string reason = batch.reason;
+        const bool merged = final && merges_input_replay(batch.anchor);
+        if (merged) {
+            anchor = s.input_rewind_tick_ - 1;
+            reason += "; input corrected at tick " + std::to_string(s.input_rewind_tick_);
+        }
         bool rolled = false;
         {
             const scope_guard keep_cells = keep_live_cells();
@@ -686,22 +767,25 @@ namespace bmmo::session {
             // the anchor, or the whole record before a light one - and read
             // every correction after it, so a pending replay from there on
             // is carried too.
-            uint32_t restored = batch.anchor;
-            rolled = rewind_world(batch.anchor, now, input_at, batch.reason, life_rewind_reach(batch.anchor + 1),
-                                  &restored);
+            uint32_t restored = anchor;
+            rolled = rewind_world(anchor, now, input_at, reason, life_rewind_reach(anchor + 1), &restored);
             if (rolled) {
                 ++s.life_rewinds_;
-                s.life_rewind_depth_ += now - batch.anchor;
+                s.life_rewind_depth_ += now - anchor;
                 drop_carried_own_replay(restored, false);
                 // A remote's input correction from at or after the anchor
                 // + 1 was in the rings this replay read (the relay's frames
                 // land there on arrival): replayed already, not again.
                 drop_carried_input_replay(restored);
+                // Step MRG: the input replay this rewind stands for marks
+                // the remote pacer (drop_carried_input_replay does only on
+                // the cadence, which a merge never has).
+                if (merged) s.remote_replay_pacer_.ran();
             }
         }
         if (batch.events > 1) {
             s.life_events_coalesced_ += batch.events - 1;
-            logf("lifecycle: %u late events taken by one rewind to tick %u%s", batch.events, batch.anchor,
+            logf("lifecycle: %u late events taken by one rewind to tick %u%s", batch.events, anchor,
                  rolled ? "" : " (refused)");
         }
         for (const auto& c: batch.checks) {
@@ -730,7 +814,7 @@ namespace bmmo::session {
         // two cases it tests), kept as rewind_for_lifecycle's miss path.
         s.life_rewinds_missed_ += batch.events;
         logf("lifecycle: the rewind to tick %u for %u late event(s) was refused at local tick %u: applied live, %s",
-             batch.anchor, batch.events, now, s.resync_pending_ ? "the pending resync covers them" : "resync");
+             anchor, batch.events, now, s.resync_pending_ ? "the pending resync covers them" : "resync");
         if (!s.resync_pending_) request_resync("a late lifecycle event beyond the reach", true);
     }
 
@@ -3283,7 +3367,7 @@ namespace bmmo::session {
             for (const auto& msg: echoes) process_own_echo(msg, false);
         }
         s.life_batch_.collecting = false;
-        flush_life_rewinds();
+        flush_life_rewinds(true);   // step MRG: the frame's final flush
         settle_replaced_rereports();   // FULL step R6P (review finding 1)
         expire_own_echoes();
         apply_forced_own_moves();
@@ -3534,6 +3618,25 @@ namespace bmmo::session {
         logf("own physicalize stamped %u echoed %s by the server (applied %u) at local tick %u: %s, nothing to do",
              life.origin, verdict, applied, current_tick(),
              missing ? "taken out already as missing" : "sent before the last resync");
+    }
+
+    // Step MRG: expire_own_echoes' gates without its effects - each overdue
+    // test on a copy of the deadline, which notes the uplink when it looks.
+    bool session_client_core::own_echoes_expiring() const {
+        if (!acting_on_echoes() || s.resync_pending_) return false;
+        uint32_t server_tick = 0;
+        if (!bmmo::session::newest_server_tick(s.acked_header_known_, s.acked_header_tick_, s.have_snapshot_,
+                                               s.last_snapshot_tick_, server_tick))
+            return false;
+        const auto overdue = [this, server_tick](const own_life& life) {
+            if (life.state != own_life::verdict::sent) return false;
+            auto deadline = life.echo_deadline;
+            return deadline.missing(server_tick, s.acked_header_known_, s.header_acked_, life.origin,
+                                    client_core_state::kOwnEchoDeadlineTicks, client_core_state::kOwnEchoUplinkSettleTicks);
+        };
+        return std::any_of(s.own_life_.begin(), s.own_life_.end(),
+                           [&overdue](const own_life& life) { return !life.retired && overdue(life); })
+            || std::any_of(s.own_rereports_.begin(), s.own_rereports_.end(), overdue);
     }
 
     // An own birth with no echo while the server's tick is

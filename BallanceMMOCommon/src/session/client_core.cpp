@@ -46,6 +46,17 @@ namespace bmmo::session {
             }();
             return mode;
         }
+        // Step MRG: BMMO_MERGE_INPUT = off | on, read once per process (on
+        // when unset or unknown): the frame's final lifecycle rewind takes a
+        // pending input correction older than its anchor along
+        // (merges_input_replay); off runs the two rewinds as before.
+        bool merge_input_from_env() {
+            static const bool on = [] {
+                const char* text = std::getenv("BMMO_MERGE_INPUT");
+                return !(text && !std::strcmp(text, "off"));
+            }();
+            return on;
+        }
     }
 
     session_client_core::session_client_core(session_platform platform, session_capabilities caps)
@@ -439,6 +450,7 @@ namespace bmmo::session {
         s.rollback_.set_sparse_capture(snapshots_run() || config.body_set_corrections ? 1u : config.sparse_capture,
                                        config.sparse_capture_verify || last == replay_last_mode::verify);
         s.rollback_.set_replay_last_light(last != replay_last_mode::whole);
+        s.merge_input_ = merge_input_from_env();   // step MRG
         s.input_delay_ = msg.input_delay;
         s.sector_lead_ = msg.sector_lead;
         s.seed_ = msg.seed;
@@ -567,6 +579,7 @@ namespace bmmo::session {
         s.pending_deaths_.clear();
         s.life_batch_ = client_core_state::life_rewind_batch{};   // step SRT3
         s.life_events_coalesced_ = s.input_rewinds_carried_ = s.input_rewinds_deferred_ = s.input_rewinds_deadline_ = s.input_rewinds_near_ = 0;
+        s.input_merged_ = s.merge_not_older_ = s.merge_unrecorded_ = s.merge_resync_base_ = s.merge_refused_ = s.merge_excluded_ = 0;   // step MRG
         s.pacer_behind_ = 0.0;
         s.telemetry_ = client_core_state::telemetry_window{};   // step A6
         // (R1's own_body_backstop state, reset here until FULL step R6V,

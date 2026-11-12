@@ -628,7 +628,9 @@ namespace bmmo::session {
     // replay whose earliest tick it subsumes would replay the same frames
     // from a later anchor: dropped, counted as carried (inrew counts the
     // replays that ran).  Corrections noted after the flush set the pending
-    // replay again and run in replay_corrected_inputs as before.
+    // replay again and run in replay_corrected_inputs as before.  Step MRG:
+    // a correction older than the batch's anchor that the final flush took
+    // along (merges_input_replay) is subsumed by its rewind and dropped here.
     void session_client_core::drop_carried_input_replay(uint32_t anchor) {
         if (!s.input_rewind_pending_ || !bmmo::session::replay_subsumes(anchor, s.input_rewind_tick_)) return;
         const bool own = s.input_rewind_own_;

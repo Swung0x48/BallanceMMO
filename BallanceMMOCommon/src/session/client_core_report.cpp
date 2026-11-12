@@ -322,7 +322,10 @@ namespace bmmo::session {
         // was behind (kRemoteCoalesceBehind) or on the cadence (step A2;
         // deadline= / near=: the waits the reach cut short, the corrections
         // not held for a ball near the own one; only when there were any).
+        const bool merge_counted = s.input_merged_ || s.merge_not_older_ || s.merge_unrecorded_ || s.merge_resync_base_
+                                || s.merge_refused_ || s.merge_excluded_;   // step MRG
         const std::string coalesced = !s.life_events_coalesced_ && !s.input_rewinds_carried_ && !s.input_rewinds_deferred_
+                                   && !merge_counted
             ? std::string()
             : textf(" coalesced: life=%llu input=%llu deferred=%llu", static_cast<unsigned long long>(s.life_events_coalesced_),
                     static_cast<unsigned long long>(s.input_rewinds_carried_),
@@ -330,6 +333,20 @@ namespace bmmo::session {
               + (s.input_rewinds_deadline_ || s.input_rewinds_near_
                      ? textf(" deadline=%llu near=%llu", static_cast<unsigned long long>(s.input_rewinds_deadline_),
                              static_cast<unsigned long long>(s.input_rewinds_near_))
+                     : std::string())
+              // Step MRG: the frames whose final lifecycle rewind took a
+              // deeper input correction along (each also counted carried: in
+              // input=, or for an own-only one in subst's subsumed), and the
+              // candidates it did not take: carried as before / not recorded
+              // or outside the reach / before an exact resync's base / no
+              // whole record / a step after the flush with work to do.
+              + (merge_counted
+                     ? textf(" merged=%llu unmerged=%llu/%llu/%llu/%llu/%llu", static_cast<unsigned long long>(s.input_merged_),
+                             static_cast<unsigned long long>(s.merge_not_older_),
+                             static_cast<unsigned long long>(s.merge_unrecorded_),
+                             static_cast<unsigned long long>(s.merge_resync_base_),
+                             static_cast<unsigned long long>(s.merge_refused_),
+                             static_cast<unsigned long long>(s.merge_excluded_))
                      : std::string());
         // RC2 (b) (step RCB): ccache=hits/mismatches - the bodies whose
         // extras and contacts a capture took from the record before, and the

@@ -430,6 +430,16 @@ namespace bmmo::session {
         // (SRT3), and remote input corrections a lifecycle rewind already
         // replayed (dropped instead of replayed again).
         uint64_t life_events_coalesced_ = 0, input_rewinds_carried_ = 0;
+        // Step MRG: the frame's final lifecycle rewind takes a pending input
+        // correction older than its anchor along (BMMO_MERGE_INPUT, on unless
+        // off, latched at the session start): the frames it did, and the
+        // candidates it did not, by reason (the correction carried as before,
+        // its anchor not recorded or outside the reach, before a pending
+        // exact resync's base, without a whole record to restore from, a
+        // step after the flush with work to do).
+        bool merge_input_ = true;
+        uint64_t input_merged_ = 0, merge_not_older_ = 0, merge_unrecorded_ = 0, merge_resync_base_ = 0;
+        uint64_t merge_refused_ = 0, merge_excluded_ = 0;
         // Sector rewinds made and missed (a resync each), and the live passes
         // a re-derivation did not reproduce at their tick (moved or forgotten).
         uint64_t sector_rewinds_ = 0, sector_rewinds_missed_ = 0, sector_rewind_depth_ = 0;
@@ -2399,7 +2409,15 @@ namespace bmmo::session {
         // would not join it: the batch rewinds first.
         void settle_life_batch_before(uint32_t player, uint32_t stamp, bool death);
         // Step SRT3: the batch's one rewind, then each event's fallback.
-        void flush_life_rewinds();
+        // `final` (step MRG): the frame's last flush, after the own echoes,
+        // which may rewind from a pending input correction's deeper anchor.
+        void flush_life_rewinds(bool final = false);
+        // Step MRG: whether the final flush's rewind to `anchor` replays from
+        // the pending input correction's anchor instead (counted either way).
+        bool merges_input_replay(uint32_t anchor);
+        // Step MRG: whether expire_own_echoes, run now, would act on a birth
+        // or a re-report whose echo is overdue.
+        bool own_echoes_expiring() const;
         bool unphysicalize_remote(uint32_t player, uint32_t tick);
         // Step DX11 (J4): a remote's death applied with its rewind - a late
         // one inside the history removed in the replay at its stamp (the

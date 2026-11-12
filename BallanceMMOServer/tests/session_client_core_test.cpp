@@ -5804,6 +5804,39 @@ namespace {
         EXPECT_FALSE(s.life_batch_.pending);
     }
 
+    // Step MRG: at the frame's final flush (after the own echoes), a remote's
+    // input correction at 113 - older than the batch's anchor 116 - gives the
+    // batch's one rewind its anchor 112 and is carried; off, the batch
+    // rewinds to 116 and leaves the correction to replay_corrected_inputs.
+    TEST(SessionClientCoreOwnDeaths, FinalFlushTakesAnOlderInputCorrectionAlong) {
+        for (const bool merge: {true, false}) {
+            SCOPED_TRACE(merge);
+            flow_fake fake;
+            session_client_core* bound = nullptr;
+            session_client_core core(odm_platform(fake, bound), odm_caps());
+            bound = &core;
+            odm_setup(core, fake);
+            auto& s = state_of(core);
+            s.merge_input_ = merge;
+            s.life_batch_.pending = true;
+            s.life_batch_.anchor = 116;
+            s.life_batch_.events = 1;
+            s.life_batch_.reason = "a late remote event";
+            s.input_rewind_pending_ = true;
+            s.input_rewind_tick_ = 113;
+            s.input_rewind_entity_ = "Ball_Remote";
+            const size_t from = fake.calls.size();
+            steps{core}.process_own_echoes();
+            const auto calls = since(fake.calls, from);
+            EXPECT_EQ(s.life_rewinds_, 1u);
+            EXPECT_EQ(count_prefix(calls, "pre_step:113"), merge ? 1u : 0u) << "replayed from the correction's anchor";
+            EXPECT_EQ(count_prefix(calls, "pre_step:117"), 1u);
+            EXPECT_EQ(s.input_merged_, merge ? 1u : 0u);
+            EXPECT_EQ(s.input_rewinds_carried_, merge ? 1u : 0u);
+            EXPECT_EQ(s.input_rewind_pending_, !merge);
+        }
+    }
+
     // Design 5.1 "Own echoes": a moved birth the history cannot carry, with
     // own body control - no record of the tick before it (past the reach),
     // a life that ended since (plan step 22), and an echo with no record at
