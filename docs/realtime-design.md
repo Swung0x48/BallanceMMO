@@ -2184,3 +2184,23 @@ the gate's runs: x64 built and the tests run again); one review, no defects - it
 from the DLL again by the orchestrator: both overloads of RemoveSubBehaviorLink erase from the two arrays with a
 memmove and nothing else, AddSubBehaviorLink clears bit 0 and appends; the manager's link; the retail counters;
 the one-sided cell section; the census's limits) are in.
+
+## Built (the replay's last tick is light by default, 2026-11-12)
+
+`BMMO_REPLAY_LAST` unset now means light (`client_core.cpp` `replay_last_from_env`; `whole` keeps SRT4's rule,
+`verify` is light with sparse capture's verify). What held the default at whole - sparse verify's differing
+anchors, the two faults of the replay behind them - is closed by the section above: 0 differing anchors on the L6
+re-drive (56 631 compared) and on every fast LBM arm (419 compared), the withdrawal run on the retail CK2.dll.
+
+**The reach cap on retail** (the review's point of the light rule: the cost meter now times a cheaper replay). At
+K = 20, L12 and L11 at human key rates, whole against light: the replay's metered cost 0.39-0.41 -> 0.34-0.36 ms a
+tick, the running cap 104-112 -> 118-120 ticks; the calibration at tick 44 reads the same (cap 74-91 whole, 76-98
+light: its replay is the calibration rewind's, a whole record at its end either way). A deeper reach is what a
+cheaper replay buys; the FINAL rows are bit-equal in both.
+
+**Gate.** 847/847; as shipped (the variable unset, every session reporting `replay_last=light`): the L6 re-drive,
+every session's `mism` 0, the 13 clients' journals equal past the build id to the light run of the commit before;
+fast LBM 38/38 twins FINAL exact, every criteria row equal to the resync cut's run; retail at K = 20, L12 and L11
+at human key rates, 0 mismatches, FINAL rows bit-equal to the restore skip's sessions with L11's 32 trafo pieces
+(L12: `withdrawn=1` on Gameplay_SectorManager again); x64 and x86 builds, the Arch server. The light rule, its
+verify and the explicit whole were gated on the commit before with the same code but for the default.

@@ -25,8 +25,13 @@
 namespace bmmo::session {
     namespace {
         // Step RLL: BMMO_REPLAY_LAST = whole | light | verify, read once per
-        // process (whole when unset or unknown; rollback_engine::
-        // set_replay_last_light).  verify records the last tick light and
+        // process (light when unset or unknown: a replay's last tick takes
+        // the rule of its other ticks; whole keeps SRT4's rule, the last tick
+        // recorded whole; rollback_engine::set_replay_last_light).  The
+        // default went to light once the restore took a live-only delayed
+        // link out of flight and the live tick's pending adds back
+        // (BMMO_LIVE_LINKS, BMMO_LIVE_ADDS): sparse verify then reads 0
+        // differing anchors.  verify records the last tick light and
         // turns sparse capture's verify on with it: every light record is
         // captured whole all the same, so the replay's own check of the
         // last tick against the live record still runs, and every rebased
@@ -35,9 +40,9 @@ namespace bmmo::session {
         replay_last_mode replay_last_from_env() {
             static const replay_last_mode mode = [] {
                 const char* text = std::getenv("BMMO_REPLAY_LAST");
-                if (text && !std::strcmp(text, "light")) return replay_last_mode::light;
+                if (text && !std::strcmp(text, "whole")) return replay_last_mode::whole;
                 if (text && !std::strcmp(text, "verify")) return replay_last_mode::verify;
-                return replay_last_mode::whole;
+                return replay_last_mode::light;
             }();
             return mode;
         }
