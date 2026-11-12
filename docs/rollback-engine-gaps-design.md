@@ -4130,12 +4130,58 @@ Wave Player, so an 'on' of one group with an 'off' of another in one frame is no
 sounds right is a play test (a wood ball across planks onto the road, then a paper ball): nothing here can hear it.
 
 **Found by the same survey, not fixed here.** A replayed sector pass acts again on the sector's collectibles (Show
-(Hierarchy) + Activate Script on P_Extra_* rows, whose own scripts are outside the replay): the suspected cause of
-the red glow left by a collected extra point (the floor glow of a "flying" extra, which TT Extra hides at
-Initialize only). The fan's particles and rotor advance on every replayed tick (P_Modul_18_Particle Script is
+(Hierarchy) + Activate Script on P_Extra_* rows, whose own scripts are outside the replay): the cause of the red
+glow left by a collected extra point, which step XFG below puts right; the pass still restarts the row's script
+(the extra life's animation, the start flames). The fan's particles and rotor advance on every replayed tick (P_Modul_18_Particle Script is
 selected). A rollback across a trafo explosion leaves the pieces' collision-sound listeners dead in the set's
 Ball_CollSound_Pieces copy. Other players' piece, floor-stopper and soft-bridge sounds are not positional.
 
 Gate: 845/845; fast LBM 38/38 twins FINAL exact with every criteria row equal to the resync cut's run (one arm,
 a10x_on, left no summary in the first run and was exact with an equal row when run again); retail as above; x64 and
 x86 builds, the Arch server; one review, no defects (its restore-trigger point is in).
+
+## As built (step XFG, 2026-11-12): a flying extra point's floor glow after a replayed sector pass
+
+**The report.** In a session a collected extra point left a soft red glow hanging in the air (level 5 sector 1, the
+public test too); not at every extra.
+
+**The cause**, read from the building block and then seen in retail with a diagnostic. TT Extra (TT_Gravity_RT)
+hides the floor glow of an extra with no floor under it ('Flying Extra?', set by the script's ray test: an extra
+over a rail is flying) once, in its Initialize; its On, the pickup and its Off all skip the glow of a flying extra.
+The sector manager's activation shows a row's whole hierarchy (Show, Hierarchy) and then starts the row's script. A
+rewind that replays the pass shows the hierarchy again - after an Initialize that does not run twice, the extra's
+own scripts being outside the replay (collectibles are per world) - and the proximity's Off takes back the centre
+and the small balls but not a flying extra's glow. Every session's start does it to sector 1: the game's own first
+pass runs at tick 30 and the calibration rewind replays it. Later sectors get it when a rewind covers their pass.
+So the glow hangs under the extra from then on, unnoticed behind the orbiting balls, and alone once the extra is
+collected. The diagnostic (L12, retail, two clients): at tick 48 the four flying extras of sector 1 show glow,
+centre and six balls; at tick 80 the glow alone, for the rest of the session.
+
+**Built** (`core_host.cpp` `extra_glow_frame`, retail only). At the end of a frame that restored the world, after
+its last replay: for every TT Extra block of a P_Extra_Point root (found once a session), when the extra is
+initialized (a status other than none, its small balls listed) and flying, a visible floor glow is hidden - TT
+Extra's own state put back. An entity's visibility is in no record. The pass a replay runs for the first time is
+left alone (the extra is not initialized yet; its Initialize hides the glow). Not changed: the replayed pass still
+restarts the row's script, which re-arms the extra's proximity.
+
+Counters: `extra points: n floor glow(s) of flying extras hidden again at tick T` and a summary at the session's
+end.
+
+**Seen.** Retail at K = 20, L12 and L11 at human key rates: four glows hidden at tick 44 on both clients of L12 (the
+calibration rewind), more on the client that trails into later sectors (8 and 12 in two runs), one on L11; with
+the diagnostic on top, no initialized flying extra reads its glow visible in any sample (L12: 15 and 19 such
+samples on the two clients, the four sector-1 extras at ticks 48 and 80 among them; L11: none either), and the
+grounded extras of L11 keep theirs (visible with the centre, the balls and the trails when the ball is in range).
+FINAL rows bit-equal to the restore skip's sessions with L11's 32 trafo pieces. That the glow is gone on screen is a
+play test (level 5 sector 1); no run here collected an extra.
+
+**Left** (the review's). The replayed Show re-shows every part, not only a flying glow. A grounded extra in wait
+shows glow, centre and balls for the 16-32 ticks until its restarted script's proximity takes them back (seen on
+the trailing client at ticks 432 and 720). An extra collected within a rewind's depth of its sector's pass, whose
+'still there' cell the pickup did not clear (the trailing player's case: the cell is written only when the row's
+sector is the union's last), would get its centre and glow back for good; hiding them for a collected extra needs
+TT Extra's status values after a pickup as the retail DLL has them, and no run has recorded a pickup yet. The
+extra life (P_Extra_Life_MF) and the start flames are restarted the same way; what that leaves visible, if
+anything, was not looked at.
+
+Gate: retail as above; the x86 build (the change is in the retail host only); one review, no defects (its points are the comment on visibility and the section Left).

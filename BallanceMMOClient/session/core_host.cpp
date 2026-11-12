@@ -603,6 +603,13 @@ namespace {
         uint64_t sound_restores_seen = 0;
         uint64_t sound_contact_calls = 0, sound_contact_fixed = 0, sound_contact_none = 0, sound_stranded = 0;
         uint32_t sound_contact_lines = 0;
+        // Step XFG: the TT Extra blocks of the level's extra points (found
+        // once a session, at the first frame that restored the world), the
+        // core's restore counters at the last look, and the floor glows
+        // hidden again.
+        std::vector<uint32_t> extra_blocks;
+        bool extra_blocks_found = false;
+        uint64_t extra_restores_seen = 0, extra_glow_frames = 0, extra_glow_hidden = 0;
         bool own_group_set = false;
         bool body_guard = false;
         std::string body_guard_entity;
@@ -1315,6 +1322,9 @@ namespace {
         host.sound_restores_seen = 0;
         host.sound_contact_calls = host.sound_contact_fixed = host.sound_contact_none = host.sound_stranded = 0;
         host.sound_contact_lines = 0;
+        host.extra_blocks.clear();
+        host.extra_blocks_found = false;
+        host.extra_restores_seen = host.extra_glow_frames = host.extra_glow_hidden = 0;
         host.own_replica = {};
         host.revive_navigations.clear();
         host.own_group_set = false;
@@ -1553,6 +1563,70 @@ namespace {
                          stranded, static_cast<unsigned long long>(host.sound_contact_calls),
                          static_cast<unsigned long long>(host.sound_contact_fixed),
                          static_cast<unsigned long long>(host.sound_stranded));
+    }
+
+    // Step XFG: a flying extra point's floor glow after a replayed sector
+    // pass.  TT Extra (TT_Gravity_RT) hides the glow of an extra with no floor
+    // under it ('Flying Extra?') once, at Initialize; its On, the pickup and
+    // its Off all leave such a glow alone.  The sector manager's activation
+    // shows a row's whole hierarchy before it starts the row's script, and a
+    // rewind that replays the pass shows it again - after an Initialize that
+    // does not run twice, the extra's own scripts being outside the replay.
+    // Every session's start does that to sector 1 (the calibration rewind),
+    // and the glow hangs in the air from then on, alone once the extra is
+    // collected.  On a frame that restored the world, after its last replay,
+    // TT Extra's own state is put back: the glow of every initialized flying
+    // extra is hidden.  Visibility is in no rollback record (the anchor
+    // hold's digest reads it, before any restore).
+    const CKGUID kExtraGuid(0x36106bd9, 0x51813906);   // TT_Gravity_RT: TT Extra
+    constexpr int kExtraSmallBalls = 1, kExtraFloorGlow = 2, kExtraStatus = 4;   // its locals
+    constexpr int kExtraFlying = 12;                                             // its input 'Flying Extra?'
+
+    CKBehavior* extra_block(CKBehavior* behavior) {
+        if (!behavior) return nullptr;
+        if (behavior->IsUsingFunction()) return behavior->GetPrototypeGuid() == kExtraGuid ? behavior : nullptr;
+        for (int i = 0; i < behavior->GetSubBehaviorCount(); ++i)
+            if (CKBehavior* found = extra_block(behavior->GetSubBehavior(i))) return found;
+        return nullptr;
+    }
+
+    void extra_glow_frame(CKContext* context, logger_wrapper* logger, uint32_t tick) {
+        if (!host.extra_blocks_found) {   // the placement's copies exist from the anchor on
+            host.extra_blocks_found = true;
+            const int count = context->GetObjectsCountByClassID(CKCID_3DENTITY);
+            CK_ID* list = context->GetObjectsListByClassID(CKCID_3DENTITY);
+            for (int i = 0; i < count; ++i) {
+                auto* root = CK3dEntity::Cast(context->GetObject(list[i]));
+                const char* name = root ? root->GetName() : nullptr;
+                if (!name || std::strncmp(name, "P_Extra_Point_MF", 16) != 0) continue;
+                for (int script = 0; script < root->GetScriptCount(); ++script)
+                    if (CKBehavior* block = extra_block(root->GetScript(script))) host.extra_blocks.push_back(block->GetID());
+            }
+        }
+        uint32_t hidden = 0;
+        for (const uint32_t id: host.extra_blocks) {
+            auto* block = CKBehavior::Cast(context->GetObject(id));
+            if (!block || block->GetPrototypeGuid() != kExtraGuid) continue;
+            // Initialized: a status other than none (-1) and its small balls
+            // listed.
+            int status = -1;
+            void* small_balls = nullptr;
+            CKBOOL flying = FALSE;
+            block->GetLocalParameterValue(kExtraStatus, &status);
+            block->GetLocalParameterValue(kExtraSmallBalls, &small_balls);
+            block->GetInputParameterValue(kExtraFlying, &flying);
+            if (status < 0 || !small_balls || !flying) continue;
+            auto* glow = CK3dEntity::Cast(block->GetLocalParameterObject(kExtraFloorGlow));
+            if (!glow || !glow->IsVisible()) continue;
+            glow->Show(CKHIDE);
+            ++hidden;
+        }
+        ++host.extra_glow_frames;
+        host.extra_glow_hidden += hidden;
+        if (hidden && host.extra_glow_hidden <= 32)
+            logger->Info("Physics session core: extra points: %u floor glow(s) of flying extras hidden again at tick %u "
+                         "(%zu extras, %llu hidden so far)", hidden, tick, host.extra_blocks.size(),
+                         static_cast<unsigned long long>(host.extra_glow_hidden));
     }
 
     // Step BMX: the shared mirror rule checked on the spirit ball about to
@@ -4374,6 +4448,15 @@ void BallanceMMOClient::core_host_frame() {
         sound_contact_frame(m_bml->GetCKContext(), physics_view_, logger_, host.core->own_body_entity(),
                             host.core->current_tick(), restored || bind_checked);
     }
+    // Step XFG: the flying extras' floor glows a replayed sector pass showed.
+    if (core_session_running()) {
+        const auto& rs = host.core->rollback_stats();
+        const uint64_t restores = rs.rollbacks + rs.frozen + rs.resyncs + rs.savestates_restored;
+        if (restores != host.extra_restores_seen) {
+            host.extra_restores_seen = restores;
+            extra_glow_frame(m_bml->GetCKContext(), logger_, host.core->current_tick());
+        }
+    }
 }
 
 // The host's session ends (the legacy physics_session_end_local): the script
@@ -4419,6 +4502,10 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
                       static_cast<unsigned long long>(host.sound_contact_none),
                       static_cast<unsigned long long>(host.sound_stranded));
     }
+    if (host.core && host.extra_blocks_found)
+        logger_->Info("Physics session core: extra points: floor glows hidden again=%llu over %llu frames (%zu extras)",
+                      static_cast<unsigned long long>(host.extra_glow_hidden),
+                      static_cast<unsigned long long>(host.extra_glow_frames), host.extra_blocks.size());
     core_pause_chain.clock_restore(m_bml->GetCKContext());   // FULL step LGM: the core host's own edits
     core_pause_chain.scripts_restore(m_bml->GetCKContext());
     logger_->Info("Physics session: ESC menu overlay at the end: %s",
