@@ -3988,7 +3988,7 @@ std::string BallanceMMOClient::core_host_anchor_finish(const std::string& step_r
         if (!proximity_rewire(m_bml->GetCKContext(), physics_view_, sel, core.mechanism_slots(), logger_, error)) return error;
         probe_signature = proximity_host.signature;
     }
-    host.script_hooks.slots = proximity_host.union_.slots() ? &proximity_host.union_.recorded_slots() : nullptr;
+    host.script_hooks.slots = proximity_host.union_.hooked_slots();
     proximity_host.union_.recorded_slots().select(bmmo::session::bound_member_slots(core.member_lives(), core.next_tick()));
     // FULL step WFA: the force blocks outside the units and the trafo sets
     // by their world-independent names (game/force_block_alias.hpp, the

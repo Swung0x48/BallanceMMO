@@ -2204,3 +2204,172 @@ fast LBM 38/38 twins FINAL exact, every criteria row equal to the resync cut's r
 at human key rates, 0 mismatches, FINAL rows bit-equal to the restore skip's sessions with L11's 32 trafo pieces
 (L12: `withdrawn=1` on Gameplay_SectorManager again); x64 and x86 builds, the Arch server. The light rule, its
 verify and the explicit whole were gated on the commit before with the same code but for the default.
+
+## Built (a slot relatch marks the roots it wrote, 2026-11-12)
+
+**What it costs today.** Every host write into the selected scripts outside the engine's restore bumps one
+process-wide generation (`script_record_reuse.hpp` `note_script_write`), and a record of t - 1, a kept source, a
+copy plan or a slot memo made under another generation is never used. On the public L6 record (8845HS, client 0
+pinned) 81 of the session's 82 captures without a source come from one site, the slot relatch in
+`proximity_union::place_slot_identity`: it runs when a ball is born, dies or changes type, writes one probe
+block's output, and makes all 31 roots lose their source. In the frames over the 15.15 ms budget, 40-47 % of the
+grid whole records walk all 31 roots, about 2.8 ms each against 1.0-1.3 ms with a source.
+
+**The rule.** A relatch that can name what it wrote no longer bumps the generation. It marks the root scripts that
+own the written block's output and that output's destinations, transitively (`script_slots::mark`). A marked root
+has no quiet run: `quiet_since` reads "never" and `quiet_now` false. So no kept source, copy plan or slot memo
+serves it or the copies under it, and a restore writes it. A reusing capture walks it whatever its source, record
+t - 1 included. Every other root keeps its source, plans and memos. An observing capture's walk of the root
+(`walked`, after the walk, so the memos under it are refused during it) starts the root's run at that observation,
+so a plan or kept source from before the write cannot serve it. The mark stays for the rest of that tick: a second
+capture of the same tick is offered record t - 1 again (nothing bumped the generation), and without the mark it
+would copy the root's block from before the relatch. That second capture is the amend after a record's own capture
+(`client_core_frame.cpp` `amend_record` after `record()` with `after_record` set: the headless client's
+`--dump-savestate` / `--compare-scripts`; the live path defers the record and captures once). The mark comes off in
+four places:
+- the first observation of another tick (`begin_observation(tick)` drops the marks walked at the tick before; a
+  relatch after the walk marks the root again as not walked, so that observation keeps it);
+- a restore that wrote the root exactly (`restored`, the `holding` roots);
+- `forget` (a restore that failed after its first write, which bumped the generation before writing);
+- `clear` (after the rewire's or the release's bump).
+
+A capture that does not observe (one with no reuse request: the hold digest's, a tool's) walks a marked root as it
+walks every root, and leaves the mark on. A restore in the frame after the walk, before the next tick's
+observation, still finds the root marked and writes it.
+
+**The readers, and their answers.**
+1. *Record t - 1* (`rollback.hpp` capture: `scripts_previous` kept while the generation is unchanged; the copy rule in
+   `script_replay::capture` is only `reusable_root` for a t - 1 source). A relatch leaves the words as they were,
+   so without the mark record t - 1's stale block would be copied. Answer: one branch at the top of the root loop
+   in `capture` walks a marked root before any source is looked at (the dynamic form of `sel.is_fed`).
+2. *The kept source and the copy plans* (`quiet_since_kept`, `plan_for`, `plan_at_restore`, `keep_plan`). All of
+   them read `quiet_since`, which reads "never" for a marked root. After the walk, the run starts at the walk's
+   observation, so once the mark is off a plan or kept source from before is refused by its own rule.
+3. *The slot memos* (`memo_refused`, a copy's root by `quiet_since`): refused "run" while the root is marked. The
+   walk walks the copies again and leaves fresh memos.
+4. *The restore skip*. Every root and omitted copy a restore leaves goes through the armed quiet set
+   (`arm_restore` from `quiet_now`; `root_unchanged` and `copy_unchanged` read `restore_quiet`, and `root_unchanged`
+   also reads `quiet_since_kept`). A marked root is never in that set, so it and its copies are written. Which roots
+   a restore writes at all (`write`: active at the record or replay_activation) is unchanged.
+5. *The kept source after a restore* (`script_replay.hpp` restore, the generation compared with the restore's own)
+   needs nothing: no place runs inside a restore. *The slot cells' guard* (`proximity_union::place`) needs nothing
+   either: a relatch happens only in a full slot pass, the pass re-stamps the generation it ends with, and the latch
+   it moved holds the cell's value as the pass leaves it. Only the comment there changed.
+
+So every copy decision for a root goes through `capture`'s root loop and `script_slots::quiet_since`, and every
+skip decision through `quiet_now`. One per-root mark tested at those two points answers all five readers.
+
+**The reach and the fallback.** `classify(sel)` (called by the rewire, and by the server once its selection exists)
+resolves the reach of each body-kind slot read. `SetOutputParameterObject` stores the value in the read's output and
+copies it into the output's destinations, and into theirs when they are outputs too. Each written parameter's owner
+(a behaviour, or the behaviour a parameter operation belongs to) is under a root. If every such root is in
+`sel.scripts`, the read is targeted and remembers its root list. Otherwise it keeps the global bump: a destination
+owned by no behaviour, or one under a root outside the selection (a trafo script, a satellite: the trafo ledgers
+never see a mark). The marks go into the union's own `recorded_slots_`, and a relatch marks only when a host took
+that map for the captures of its record reuse through `proximity_union::hooked_slots()`: the retail host
+(`core_host.cpp`) and the headless client (`session_client.cpp`), each right after its rewire (the rewire's `clear`
+resets the flag). Every other binder gets the bump. The server's world (`physics_world.cpp`) takes
+`recorded_slots()` plainly: its captures are the resync state's portable records, with no reuse. So do SimTool's
+worlds, which are server worlds whose own bindings (`--savestate-check`, the late sector run and the others) capture
+with reuse and hooks of their own, with no slot map: a mark there would be read by no capture, and record t - 1
+would be copied stale. The non-slot identity path in `place` keeps the global bump. On L6, all 260 slot reads of each
+client are targeted (3 380 over the 13), and none falls back.
+
+**The switch and the counters.** `BMMO_RELATCH_MARK` = off | on (on when unset; off is the global bump everywhere),
+read once (`script_slots.hpp` `relatch_mark_from_env`).
+- The union's lookups line (every host prints it at a session's end) gains `; relatch: reads targeted= global=
+  relatches targeted= global= (the first fallback's reason)`.
+- The reuse line gains `marked: walked= unsourced= previous=d/c kept=d/c raw=p/k restored=`, and `scripts=` now
+  counts the marked walks:
+  - the marked roots a reusing capture walked;
+  - of those, the ones with no block in the source;
+  - the ones the rule would have copied from record t - 1 or from the kept source (c), and of those the walks whose
+    bytes differ from that copy (d, the copy made with `copy_with_fresh_tails` into scratch, so physics tails do
+    not count);
+  - the walks whose bytes differ from the source's block as it stands, physics tails included (`raw`, from record
+    t - 1 / the kept source);
+  - the marked roots a restore wrote.
+- One engine-free test (`ScriptSlots.MarkedRootHasNoSourceUntilWalkedOrRestored`) covers the rule. A marked root has
+  no kept source, plan, memo or skip, while another root keeps all four. After a light observation it still has
+  none. After the walk it still has none, and none after a second observation of the walk's tick. The first
+  observation of the next tick takes the mark off; then nothing from before the walk serves it, and what the walk
+  leaves does. A relatch after the walk keeps the mark across that observation. A restore that wrote the root
+  exactly takes its mark off, one that did not leaves it, and `forget` drops every mark.
+
+**What the L6 re-drive showed** (every reuse verify on: `BMMO_SCRIPT_REUSE`, `BMMO_SLOT_MEMO`, `BMMO_RESTORE_PLAN`,
+`BMMO_TRAFO_HELD`, `BMMO_SLOT_CELLS` and `BMMO_REPLAY_LAST` = verify).
+- With the mark on, the 1 120 relatches of the 13 clients all marked (86 on client 0), and none bumped the
+  generation.
+- Captures with no source fell from 1 133 to 13 over the 13 clients, and roots walked without a block from 35 123 to
+  403. Plans refused for the generation went from 1 892 to 0 on client 0.
+- Client 0's reuse line, mark off against on: `with_previous` 13 288 -> 13 342, `reused` 1 470 564 -> 1 472 456,
+  `unrecorded` 2 697 -> 31, `kept: restored` 5 679 -> 5 709, `plans: emitted` 1 468 648 -> 1 472 432, `gen` 1 892 ->
+  0.
+- The differences between mark off and mark on, summed over the 13 clients, are whole multiples of the 1 120
+  relatches. Roots walked without a block fall by 34 720 (31 x 1 120). Reused roots rise by 24 640 (22 x 1 120), and
+  verify walked every one of them again with 0 mismatches. Walked roots rise by 8 960 (8 x 1 120), and each of those
+  captures also walks its 1 marked root. So at each relatch capture, 22 roots keep a source and match a fresh walk.
+  The 8 + 1 match the diagnosis's 9 roots that walk anyway.
+- The capture walked every one of the 1 120 marked roots. Each had a block in its source, and every walk's bytes
+  differed from that block (`raw=683/437`: 683 from record t - 1, 437 from the kept source). Not one of them passed
+  the reuse rule (`previous=0/0 kept=0/0`): the root was not reusable at that capture, or it was fed. That is
+  consistent with a relatch landing while the probe's script runs, and with the 8 + 1 above, but the counter does
+  not say which. So on L6 the source a mark denies is one the rule would have refused anyway. The decisive branch
+  of reader 1 never stood between a stale block and a copy, and the scratch-copy compare never ran.
+- With the mark taken off at the walk (the first build, `rtv1`), no restore met a marked root (`restored=0`). With
+  the mark kept for the walk's tick (`rtv2`), 12 restores over the 13 clients wrote a marked root: a rewind in the
+  frame after the walk, before the next tick's observation, finds it marked and writes it. Every other counter of
+  `rtv2` is equal to `rtv1c`'s (marked walks 1 120, as many as the relatches: no capture of a walk's tick again
+  met a mark, and no mark lingered), and every journal is byte-equal.
+
+**What the counters can and cannot say** (the review's points).
+- `raw=` proves nothing about the relatch: a walk's bytes differ from the source's block whenever the marked root
+  ran since, and all 1 120 fit "the root was active".
+- What L6 does show: the reach was complete there (about 22 other roots per relatch capture were copied and verify
+  walked equal), and every relatch marked a root that a capture then walked.
+- What L6 does not show: with `previous=` and `kept=` at 0/0, neither the denial of a quiet root's copy nor the
+  scratch compare ran. The gate needs an arm where those counts are not 0 (for example fast LBM in verify, a
+  leaver's clone relatching an inactive unit).
+- A lingering mark would show as marked walks well above the relatches targeted, beyond what the same-tick rule
+  adds (a capture of the walk's tick again, from a rewind of depth 1 or an amend). A mark that no reusing capture
+  meets is invisible (`marked: walked=` counts reusing captures only); it costs one walk a capture at most.
+- Line endings: the index stores LF (`core.autocrlf=true`); in the working tree `script_slots.hpp`,
+  `script_replay.hpp` and this file are LF and the other changed files CRLF. The commit normalises them; the diff
+  holds content only.
+
+**Not exercised.** A marked root that was quiet (the t - 1 and kept copies the mark denies, the scratch-copy
+compare, and its `previous=` / `kept=` counters: 0/0 on L6 as shipped and in verify; the fast LBM and the retail
+sessions have no relatch at all); a fallback (no read on L6, the LBM arms or retail reaches outside the
+selection); `forget` with a mark on. A restore that writes a marked root ran on L6 (`restored=12` in verify, 122
+as shipped). The server's reach no longer matters: the server's world never takes the map through
+`hooked_slots()`, so every relatch there bumps. The amend's second capture of a tick (the headless client's
+`--dump-savestate` / `--compare-scripts`) and a SimTool world with slots (`--savestate-check` with `--drop` and
+`--mechanism-slots`), the two cases the review found, were not run; their rules are read from the code above.
+
+**Gate.** Only what this step ran:
+- builds: x64 and the tests, 848/848 (one new test); the x86 client build (no C1128);
+- the L6 re-drive with the six verifies above, mark on (`pf_rtv1_1`; again as `pf_rtv1b_1` with `unsourced=`
+  added, and as `pf_rtv1c_1` on the final tree with `raw=`, the `scripts=` sum and the named empty reach) and off
+  (`pf_rtv0_1`). In all four, every verify's mismatches were 0 on all 13
+  clients, sparse verify had 0 differing and 0 float anchors (3 719-4 722 verified per client, 6-10 stale), and
+  every session's `mism` was 0;
+- journals: the 13 clients' journals were equal past the build id between `rtv1` and each of `rtv0`, `rtv1b` and
+  `rtv1c`, and the server's journal was byte-equal between `rtv1` and `rtv0`;
+- the x86 client build again on the final tree (no C1128);
+- after the review (the mark kept for the walk's tick, `hooked_slots()`): x64 and the tests, 848/848; the x86
+  client build with `core_host.cpp` compiled again (no C1128); the L6 re-drive with the same six verifies, mark on
+  (`pf_rtv2_1`): every verify's mismatches 0 on all 13 clients, sparse verify 0 differing and 0 float, every
+  session's `mism` 0, relatches targeted 1 120 and global 0 (so both hosts' rewires took the map through
+  `hooked_slots()`), `marked: restored=12`, every other counter equal to `rtv1c`'s, and the 13 client journals and
+  the server's journal byte-equal to `rtv1c`'s.
+
+**The full gate** (the final tree): x64 and the tests, 848/848; the x86 client; the Arch server. The L6 re-drive
+with the six verifies (`pf_rtq_1`): every verify's mismatches 0, sparse verify 56 631 anchors, 0 differing, 0
+float, 109 stale, every session's `mism` 0, 3 380 reads and 1 120 relatches targeted, none global; as shipped
+(`pf_rts_1`): `mism` 0, the same 1 120 relatches targeted, the 13 clients' and the server's journals equal past
+the build id to HEAD's shipped run (`pf_dfl_1`) and to `pf_rtq_1`. Fast LBM with the verifies and as shipped:
+38/38 twins FINAL exact each, every criteria row equal to the resync cut's run, 0 mismatches, 419 sparse anchors
+0 differing; 1 120 reads targeted, no relatch. Retail at K = 20, L12 and L11 at human key rates, as shipped: 0
+mismatches, FINAL rows bit-equal to the restore skip's sessions with L11's 32 trafo pieces; 520 and 200 reads
+targeted, no relatch (L12: `withdrawn=1` on Gameplay_SectorManager as before). So the step's effect on retail is
+untried: its sessions here never relatch.

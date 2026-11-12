@@ -234,6 +234,47 @@ namespace bmmo::game {
                 if (p.mechanism) roots.insert(p.root);
             }
             for (identity& r: identities_) r.mechanism = roots.count(r.root) != 0;
+            // Step RELATCH: what a slot relatch writes (place_slot_identity).
+            // SetOutputParameterObject stores the value in the read's output
+            // and copies it into the output's destinations, and into theirs
+            // when they are outputs too; each written parameter's owner
+            // (a behaviour, or the behaviour an operation belongs to) is
+            // under a root script.  When every such root is selected the
+            // relatch can name them; anything else - a destination under a
+            // root outside the selection (a trafo script, a satellite), one
+            // owned by no behaviour - keeps the generation's bump.
+            relatch_ids_targeted_ = relatch_ids_global_ = 0;
+            for (identity& r: identities_) {
+                r.written_roots.clear();
+                r.global = nullptr;
+                if (r.slot < 0 || r.by_name) continue;   // place_slot_identity relatches body-kind slot reads only
+                auto* block = context_ ? CKBehavior::Cast(context_->GetObject(r.block)) : nullptr;
+                CKParameterOut* out = block && block->GetOutputParameterCount() > 0 ? block->GetOutputParameter(0) : nullptr;
+                if (!out) r.global = "no output";
+                std::vector<CK_ID> todo;
+                std::set<CK_ID> seen;
+                if (out) todo.push_back(out->GetID());
+                while (!r.global && !todo.empty()) {
+                    CKParameter* written = CKParameter::Cast(context_->GetObject(todo.back()));
+                    todo.pop_back();
+                    if (!written || !seen.insert(written->GetID()).second) continue;
+                    CKObject* owner = written->GetOwner();
+                    CKBehavior* by = owner ? CKBehavior::Cast(owner) : nullptr;
+                    if (!by)
+                        if (auto* op = owner ? CKParameterOperation::Cast(owner) : nullptr) by = op->GetOwner();
+                    if (!by) { r.global = "a destination owned by no behaviour"; break; }
+                    const CK_ID root = root_of(by)->GetID();
+                    if (!selected.count(root)) { r.global = "a destination under a root outside the selection"; break; }
+                    if (std::find(r.written_roots.begin(), r.written_roots.end(), root) == r.written_roots.end())
+                        r.written_roots.push_back(root);
+                    if (auto* next = CKParameterOut::Cast(written))
+                        for (int i = 0; i < next->GetDestinationCount(); ++i)
+                            if (CKParameter* d = next->GetDestination(i)) todo.push_back(d->GetID());
+                }
+                if (!r.global && r.written_roots.empty()) r.global = "no root reached";
+                if (r.global) r.written_roots.clear();
+                ++(r.global ? relatch_ids_global_ : relatch_ids_targeted_);
+            }
             // Step Q7: a unit is in the class with its root script.
             for (unit_rec& u: units_)
                 u.mechanism = selected.count(u.root) != 0 && !session::keep_local_script(u.owner, u.script);
@@ -423,7 +464,9 @@ namespace bmmo::game {
                     cells_names_.push_back(name);
                 }
             }
-            // After the pass: its own latch moves bumped the generation.
+            // After the pass: the generation its own latch moves bumped (a
+            // relatch that marks its roots, step RELATCH, bumps nothing: the
+            // latch it moved holds the cell's value, as this pass leaves it).
             cells_generation_ = script_write_generation();
             cells_placed_ = true;
         }
@@ -479,7 +522,10 @@ namespace bmmo::game {
             return "proximity union lookups: hits=" + std::to_string(lookup_hits_) + " scans=" + std::to_string(lookup_scans_)
                  + " verified=" + std::to_string(lookup_verified_) + " mismatches=" + std::to_string(lookup_mismatches_)
                  + "; slot cells: skipped=" + std::to_string(cells_skipped_) + " full=" + std::to_string(cells_full_)
-                 + " verified=" + std::to_string(cells_verified_) + " mismatches=" + std::to_string(cells_mismatches_);
+                 + " verified=" + std::to_string(cells_verified_) + " mismatches=" + std::to_string(cells_mismatches_)
+                 + "; relatch: reads targeted=" + std::to_string(relatch_ids_targeted_) + " global="
+                 + std::to_string(relatch_ids_global_) + " relatches targeted=" + std::to_string(relatches_targeted_) + " global="
+                 + std::to_string(relatches_global_) + (relatch_reason_ ? std::string(" (") + relatch_reason_ + ")" : std::string());
         }
 
         // The hold section of the script record (§4.2): u16 frames, each
@@ -851,6 +897,17 @@ namespace bmmo::game {
         }
         uint64_t unslotted() const { return unslotted_; }
         script_slots& recorded_slots() { return recorded_slots_; }
+        // The slot map a host hooks into the captures and restores of its
+        // record reuse (script_replay_hooks::slots), nullptr without slots.
+        // Step RELATCH: a relatch marks roots only in a union whose map was
+        // taken here - the retail and headless clients'; the server's world
+        // (portable captures only) takes recorded_slots() plainly, so in it
+        // and in every SimTool world, whose own bindings reuse records with
+        // no slot map, a relatch bumps the generation.
+        script_slots* hooked_slots() {
+            slots_hooked_ = slots_ != 0;
+            return slots_hooked_ ? &recorded_slots_ : nullptr;
+        }
         // The record bytes the copies add (each copy's blocks as the v2
         // record writes them, measured at the copy step; C1).
         size_t copy_record_bytes() const { return copy_record_bytes_; }
@@ -908,6 +965,12 @@ namespace bmmo::game {
             std::vector<size_t> gating_all;  // the rewired probes with an output linked to its input
             int gating = -1;                 // the one gating probe
             int slot = -1;                   // step Q7: a unit's read: its slot (no hold, §2.10)
+            // Step RELATCH (classify): the selected roots a relatch of this
+            // read's output writes - its block's and every destination's,
+            // transitively; empty: the relatch bumps the generation, for
+            // `global` (why not).
+            std::vector<CK_ID> written_roots;
+            const char* global = "not classified";
         };
 
         struct fnv {
@@ -960,6 +1023,7 @@ namespace bmmo::game {
             force_alias_.clear();
             unit_lines_.clear();
             slots_ = 0;
+            slots_hooked_ = false;
             copy_record_bytes_ = 0;
         }
 
@@ -1343,6 +1407,11 @@ namespace bmmo::game {
         std::vector<CK_ID> cells_ids_;
         std::vector<std::string> cells_names_;
         uint64_t cells_skipped_ = 0, cells_full_ = 0, cells_verified_ = 0, cells_mismatches_ = 0;
+        // Step RELATCH: the slot reads whose relatch names its roots and the
+        // others (classify); the relatches that marked roots, the ones that
+        // bumped the generation, and why the first of those did.
+        uint64_t relatch_ids_targeted_ = 0, relatch_ids_global_ = 0, relatches_targeted_ = 0, relatches_global_ = 0;
+        const char* relatch_reason_ = nullptr;
         // ---- step Q7: the per-player units (§2.10, part I) ----
         struct unit_copy {
             std::vector<CK_ID> roots;        // the copied graph, or the unit's blocks (walk order)
@@ -1377,6 +1446,7 @@ namespace bmmo::game {
         std::map<CK_ID, std::string> force_alias_;
         std::vector<std::string> unit_lines_;
         uint8_t slots_ = 0;
+        bool slots_hooked_ = false;   // step RELATCH: hooked_slots
         uint64_t unslotted_ = 0;
         size_t copy_record_bytes_ = 0;
 
@@ -1427,7 +1497,21 @@ namespace bmmo::game {
             if (changed) *changed = true;
             block->SetOutputParameterObject(0, value);
             ++relatched_;
-            note_script_write();   // a selected script's output written: no record reuse across it (T3C e3 review)
+            // Step RELATCH: the roots this write reaches (classify) are
+            // marked in the slot map the captures and restores read, when a
+            // host hooked it in (hooked_slots); a write it cannot name, or
+            // one no capture would see marked, bumps the generation: no
+            // record reuse across it (T3C e3 review).
+            if (relatch_mark_from_env() && slots_hooked_ && !r.written_roots.empty()) {
+                for (CK_ID root: r.written_roots) recorded_slots_.mark(static_cast<uint32_t>(root));
+                ++relatches_targeted_;
+                return;
+            }
+            note_script_write();
+            if (!relatches_global_++)
+                relatch_reason_ = !relatch_mark_from_env() ? "BMMO_RELATCH_MARK=off"
+                                : !slots_hooked_           ? "no host hooked the slot map"
+                                                           : r.global;
         }
 
         template <typename T> static T* object_as(CKObject* o, CK_CLASSID cid) {

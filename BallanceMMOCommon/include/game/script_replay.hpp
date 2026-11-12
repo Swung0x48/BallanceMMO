@@ -1494,6 +1494,43 @@ namespace bmmo::game {
                     put_u32(out, static_cast<uint32_t>(id));
                     put_u8(out, beh ? 1 : 0);
                     if (!beh) continue;
+                    // Step RELATCH: a root the host wrote without moving its
+                    // words (script_slots::mark) is walked whatever the
+                    // source - record t - 1 has the bytes from before the
+                    // write.  Counted against the copy the rule would have
+                    // made; an observing capture's walk starts the root's run
+                    // there and the mark stays for the rest of the tick (the
+                    // slot memos under it refused during the walk).
+                    if (roots && with_slots && hooks.slots->marked(static_cast<uint32_t>(id))) {
+                        const size_t at = out.size();
+                        capture_behavior(beh, hooks, out, with_slots);
+                        size_t size = 0;
+                        const uint8_t* block =
+                            reusing && have_previous ? recorded_block(*source, previous_index, k, id, size) : nullptr;
+                        script_root_words recorded;
+                        if (reusing) ++reuse_stats.marked_walked;
+                        if (reusing && !block) ++reuse_stats.marked_unsourced;
+                        if (block && (size != out.size() - at || std::memcmp(block, out.data() + at, size) != 0))
+                            ++(from_kept ? reuse_stats.marked_raw_kept : reuse_stats.marked_raw_previous);
+                        if (block && !sel.is_fed(id) && read_script_root_words(block, size, recorded)
+                            && reusable_root(recorded, root_words_of(beh), static_cast<uint32_t>(kFrameFlags))) {
+                            const uint64_t imaged = joint_stats().imaged;
+                            const slot_memo_stats memo_before = slot_memo_totals();
+                            std::vector<uint8_t> copy;
+                            uint64_t tails = 0;
+                            size_t pos = static_cast<size_t>(block - source->data());
+                            const bool copied = copy_with_fresh_tails(beh, hooks, *source, pos, copy, tails, with_slots)
+                                                && pos == static_cast<size_t>(block - source->data()) + size;
+                            joint_stats().imaged = imaged;
+                            restore_memo_counts(memo_before);
+                            const bool differs = !copied || copy.size() != out.size() - at
+                                                 || !std::equal(copy.begin(), copy.end(), out.begin() + static_cast<std::ptrdiff_t>(at));
+                            ++(from_kept ? reuse_stats.marked_kept : reuse_stats.marked_previous);
+                            if (differs) ++(from_kept ? reuse_stats.marked_kept_differed : reuse_stats.marked_previous_differed);
+                        }
+                        if (observing.slots) hooks.slots->walked(static_cast<uint32_t>(id));
+                        continue;
+                    }
                     if (!reusing || !roots) {
                         capture_behavior(beh, hooks, out, with_slots);
                         continue;
@@ -1765,7 +1802,7 @@ namespace bmmo::game {
         static void observe_roots(CKContext* context, const selection& sel, script_slots& slots, uint32_t tick) {
             if (reuse_kept_from_env())
                 for (CK_ID id: sel.scripts) slots.track(static_cast<uint32_t>(id));
-            slots.begin_observation();
+            slots.begin_observation(tick);
             for (uint32_t root: slots.roots()) {
                 auto* beh = context ? CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(root))) : nullptr;
                 slots.observe(root, tick, beh != nullptr && !sel.is_fed(static_cast<CK_ID>(root)),
@@ -2114,6 +2151,10 @@ namespace bmmo::game {
                     }
                     if (write && scripts && replayed) replayed->push_back(id);
                     if (write && scripts) written.push_back(beh);
+                    // Step RELATCH: a marked root is never quiet (the skip
+                    // above wrote it); restored() takes the mark off.
+                    if (write && scripts && hooks.slots && hooks.slots->marked(static_cast<uint32_t>(id)))
+                        ++script_reuse_totals().marked_restored;
                 }
                 if (scripts) scripts_end = pos;
             }

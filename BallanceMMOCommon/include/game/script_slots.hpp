@@ -162,6 +162,14 @@ namespace bmmo::game {
                                != script_reuse_mode::off;
         return on;
     }
+    // BMMO_RELATCH_MARK, read once per process (on when unset): a slot
+    // relatch marks the roots it wrote (script_slots::mark); off bumps the
+    // host-write generation as every other host write does.
+    inline bool relatch_mark_from_env() {
+        static const bool on = parse_script_reuse_mode(std::getenv("BMMO_RELATCH_MARK"), script_reuse_mode::on)
+                               != script_reuse_mode::off;
+        return on;
+    }
 
     // What the memo did in this process (diagnostic: nothing decides on it).
     struct slot_memo_stats {
@@ -279,9 +287,17 @@ namespace bmmo::game {
         // inactive at both ends, nothing pending, no IO switched); anything
         // else - a word change, a frame flag, a gap, a backward jump (a
         // rewind), the same tick again (an amend), a root not found - starts
-        // it again at this observation.
+        // it again at this observation.  An observation of another tick than
+        // the last one takes off the marks walked at that tick (step RELATCH).
         const std::vector<uint32_t>& roots() const { return roots_; }
-        uint64_t begin_observation() { return ++seq_; }
+        uint64_t begin_observation(uint32_t tick) {
+            if (tick != observed_tick_) {
+                for (uint32_t root: walked_) marked_.erase(root);
+                walked_.clear();
+            }
+            observed_tick_ = tick;
+            return ++seq_;
+        }
         uint64_t seq() const { return seq_; }
         void observe(uint32_t root, uint32_t tick, bool present, const script_root_words& now, uint32_t frame_flags) {
             run& r = runs_[root];
@@ -293,7 +309,30 @@ namespace bmmo::game {
         }
         uint64_t quiet_since(uint32_t root) const {
             const auto found = runs_.find(root);
-            return found == runs_.end() ? std::numeric_limits<uint64_t>::max() : found->second.from;
+            return found == runs_.end() || marked(root) ? std::numeric_limits<uint64_t>::max() : found->second.from;
+        }
+        // Step RELATCH: a host write into `root`'s bytes that leaves its
+        // activation words as they were (the slot relatch: one probe block's
+        // output and its destinations).  A marked root has no quiet run - no
+        // kept source, copy plan or slot memo serves it, a restore writes it -
+        // and a reusing capture walks it whatever its source (record t - 1
+        // too: script_replay capture).  An observing capture's walk of the
+        // root (walked) starts its run at that observation, so nothing kept
+        // from before serves it, and the mark stays for the rest of that
+        // tick: a second capture of the same tick (an amend after the
+        // record's own) is offered record t - 1 again and walks the root too.
+        // The mark is taken off by the first observation of another tick
+        // (begin_observation), by a restore that wrote the root exactly
+        // (restored), and by forget.
+        void mark(uint32_t root) {
+            marked_.insert(root);
+            if (const auto at = std::find(walked_.begin(), walked_.end(), root); at != walked_.end()) walked_.erase(at);
+        }
+        bool marked(uint32_t root) const { return !marked_.empty() && marked_.count(root) != 0; }
+        void walked(uint32_t root) {
+            if (!marked(root)) return;
+            if (std::find(walked_.begin(), walked_.end(), root) == walked_.end()) walked_.push_back(root);
+            if (const auto found = runs_.find(root); found != runs_.end()) found->second.from = seq_;
         }
         // Whether this capture observed (only such a capture may use a memo:
         // another, the hold digest's or a tool's, may come after a frame the
@@ -312,7 +351,8 @@ namespace bmmo::game {
         // (its run seen, the reuse rule against its last words).
         bool quiet_now(uint32_t root, const script_root_words& now, uint32_t frame_flags) const {
             const auto found = runs_.find(root);
-            return found != runs_.end() && found->second.seen && reusable_root(found->second.words, now, frame_flags);
+            return found != runs_.end() && found->second.seen && !marked(root)
+                && reusable_root(found->second.words, now, frame_flags);
         }
         // A restore's roots still quiet at its start and the host-write
         // generation then, until disarm_restore.
@@ -350,7 +390,7 @@ namespace bmmo::game {
         bool quiet_since_kept(uint32_t root) const { return have_source_ && quiet_since(root) <= source_seq_; }
         // Nothing is known of any root (a restore failed part-way, or one
         // whose record's tick the caller does not say).
-        void forget() { runs_.clear(); have_source_ = false; }
+        void forget() { runs_.clear(); have_source_ = false; marked_.clear(); walked_.clear(); }
 
         // The copy plan.  A root's block as a copy emits it (script_replay
         // copy_with_fresh_tails), cut at the bytes read fresh: `statics` are
@@ -414,6 +454,7 @@ namespace bmmo::game {
             ++seq_;
             runs_.clear();
             for (const script_root_words& words: holding) {
+                marked_.erase(words.id);   // step RELATCH: it holds the record's block now
                 run& r = runs_[words.id];
                 r.from = seq_;
                 r.seen = true;
@@ -586,7 +627,9 @@ namespace bmmo::game {
         std::vector<uint32_t> kept_;
         std::unordered_map<uint32_t, plan> plans_;
         std::vector<uint32_t> kept_plans_;
-        std::unordered_set<uint32_t> tracked_;
+        std::unordered_set<uint32_t> tracked_, marked_;
+        std::vector<uint32_t> walked_;   // step RELATCH: the marks walked at observed_tick_
+        uint32_t observed_tick_ = 0;
         std::vector<uint8_t> source_;
         uint64_t source_seq_ = 0, source_writes_ = 0;
         bool have_source_ = false, source_restored_ = false;

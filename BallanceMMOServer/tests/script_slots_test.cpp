@@ -161,7 +161,7 @@ TEST(ScriptSlots, MemoServesOnlyWhileItsRootStaysQuiet) {
     script_root_words quiet;
     quiet.id = 7;
     const auto observe = [&](uint32_t tick, script_root_words words, bool present = true) {
-        slots.begin_observation();
+        slots.begin_observation(tick);
         slots.observe(7, tick, present, words, kActive);
     };
     const auto walk = [&](uint64_t writes) {
@@ -230,7 +230,7 @@ TEST(ScriptSlots, RestoreSkipArmsOnlyRootsStillQuiet) {
     script_root_words quiet;
     quiet.id = 7;
     EXPECT_FALSE(slots.quiet_now(7, quiet, kActive)) << "never observed";
-    slots.begin_observation();
+    slots.begin_observation(100);
     slots.observe(7, 100, true, quiet, kActive);
     EXPECT_TRUE(slots.quiet_now(7, quiet, kActive));
     script_root_words active = quiet;
@@ -270,7 +270,7 @@ TEST(ScriptSlots, KeptSourceServesARootQuietAtEveryObservationSince) {
     script_root_words ran8 = quiet8;
     ran8.flags = kActive;
     const auto observe = [&](uint32_t tick, const script_root_words& w8) {
-        slots.begin_observation();
+        slots.begin_observation(tick);
         slots.observe(7, tick, true, quiet7, kActive);
         slots.observe(8, tick, true, w8, kActive);
     };
@@ -307,4 +307,107 @@ TEST(ScriptSlots, KeptSourceServesARootQuietAtEveryObservationSince) {
     EXPECT_FALSE(slots.quiet_since_kept(7)) << "a gap";
     slots.forget();
     EXPECT_EQ(slots.kept_source(6), nullptr) << "a failed restore";
+}
+
+// Step RELATCH: a marked root (a host write that left its words as they were)
+// has no source - no kept source, copy plan, slot memo or restore skip, and
+// the capture walks it from record t - 1 too (marked) - for the rest of the
+// tick of an observing capture's walk (walked: its run starts again there, so
+// nothing kept from before serves it; a second capture of that tick walks it
+// too), or until a restore that wrote it exactly; another root keeps
+// everything.
+TEST(ScriptSlots, MarkedRootHasNoSourceUntilWalkedOrRestored) {
+    using bmmo::game::script_root_words;
+    using bmmo::game::script_slots;
+    constexpr uint32_t kActive = 1;
+    script_slots slots;
+    slots.track(7);
+    slots.track(8);
+    slots.add(10, 2, {1}, 7);
+    slots.add(11, 2, {1}, 8);
+    script_root_words quiet7, quiet8;
+    quiet7.id = 7;
+    quiet8.id = 8;
+    uint32_t tick = 99;
+    const auto observe = [&](bool next = true) {
+        if (next) ++tick;
+        slots.begin_observation(tick);
+        slots.observe(7, tick, true, quiet7, kActive);
+        slots.observe(8, tick, true, quiet8, kActive);
+    };
+    const auto memo_and_plan = [&](uint32_t copy, uint32_t root) {
+        script_slots::copy* c = slots.find(copy);
+        c->m.valid = true;
+        c->m.seq = slots.seq();
+        c->m.writes = 5;
+        script_slots::plan& p = slots.plan_of(root);
+        p = script_slots::plan{};
+        p.valid = true;
+        p.seq = slots.seq();
+        p.writes = 5;
+        p.mask = slots.mask();
+    };
+    const std::vector<uint8_t> record{1, 2, 3};
+    observe();
+    memo_and_plan(10, 7);
+    memo_and_plan(11, 8);
+    slots.keep_source(record.data(), record.size(), 5);
+    observe();
+    const char* refused = nullptr;
+    ASSERT_NE(slots.plan_for(7, 5, refused), nullptr);
+    ASSERT_TRUE(slots.quiet_since_kept(7));
+
+    slots.mark(7);   // the relatch, between two observations
+    const auto no_source = [&](const char* when) {
+        EXPECT_TRUE(slots.marked(7)) << when;
+        EXPECT_FALSE(slots.quiet_since_kept(7)) << when << ": the kept source";
+        EXPECT_EQ(slots.plan_for(7, 5, refused), nullptr) << when << ": the copy plan";
+        EXPECT_STREQ(refused, "run") << when;
+        EXPECT_STREQ(slots.memo_refused(*slots.find(10), 5), "run") << when << ": the slot memo";
+        EXPECT_FALSE(slots.quiet_now(7, quiet7, kActive)) << when << ": the restore skip";
+        // The other root keeps its source, plan, memo and skip.
+        EXPECT_FALSE(slots.marked(8)) << when;
+        EXPECT_TRUE(slots.quiet_since_kept(8)) << when;
+        EXPECT_NE(slots.plan_for(8, 5, refused), nullptr) << when;
+        EXPECT_EQ(slots.memo_refused(*slots.find(11), 5), nullptr) << when;
+        EXPECT_TRUE(slots.quiet_now(8, quiet8, kActive)) << when;
+    };
+    no_source("marked");
+    observe();   // a light record observes and does not walk
+    no_source("after a light observation");
+    slots.walked(7);   // an observing capture's walk
+    no_source("walked");
+    memo_and_plan(10, 7);   // what that capture's walk and copy leave
+    slots.keep_source(record.data(), record.size(), 5);
+    observe(false);   // a second capture of the same tick (an amend: every run starts again)
+    EXPECT_TRUE(slots.marked(7)) << "a second capture of the walk's tick walks it too";
+    EXPECT_FALSE(slots.quiet_since_kept(7));
+    EXPECT_FALSE(slots.quiet_now(7, quiet7, kActive));
+    slots.walked(7);
+    memo_and_plan(10, 7);
+    slots.keep_source(record.data(), record.size(), 5);
+    observe();   // the next tick
+    EXPECT_FALSE(slots.marked(7));
+    EXPECT_TRUE(slots.quiet_now(7, quiet7, kActive)) << "its words are quiet";
+    EXPECT_TRUE(slots.quiet_since_kept(7));
+    EXPECT_NE(slots.plan_for(7, 5, refused), nullptr);
+    EXPECT_EQ(slots.memo_refused(*slots.find(10), 5), nullptr);
+
+    slots.mark(7);
+    slots.walked(7);
+    slots.mark(7);   // relatched again after the walk, before the next tick
+    observe();
+    EXPECT_TRUE(slots.marked(7)) << "the second relatch is not walked yet";
+
+    // A restore that wrote 7 exactly takes its mark off; one that did not
+    // leaves it.
+    slots.mark(7);
+    slots.mark(8);
+    slots.restored(90, {quiet7}, record.data(), record.size(), 6);
+    EXPECT_FALSE(slots.marked(7));
+    EXPECT_TRUE(slots.quiet_since_kept(7));
+    EXPECT_TRUE(slots.marked(8)) << "not written by the restore";
+    EXPECT_FALSE(slots.quiet_since_kept(8));
+    slots.forget();
+    EXPECT_FALSE(slots.marked(8)) << "a failed restore forgets every mark";
 }

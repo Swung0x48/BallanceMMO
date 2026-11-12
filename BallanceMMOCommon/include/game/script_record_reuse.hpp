@@ -86,6 +86,8 @@ namespace bmmo::game {
     // one process-wide generation, bumped by every such writer.  A record
     // captured under another generation is never a reuse source.  A bump only
     // costs walks, so a writer that may not touch a selected script bumps too.
+    // Step RELATCH: a writer that can name the selected roots it wrote marks
+    // those instead (script_slots.hpp mark; the slot relatch).
     inline std::atomic<uint64_t>& script_write_counter() {
         static std::atomic<uint64_t> counter{0};
         return counter;
@@ -146,6 +148,16 @@ namespace bmmo::game {
         // why (none, generation, mask, run; one that then failed and was
         // walked is counted too).
         uint64_t planned = 0, plans_kept = 0, plan_none = 0, plan_gen = 0, plan_mask = 0, plan_run = 0;
+        // Step RELATCH (script_slots.hpp mark): marked roots a reusing capture
+        // walked; of those, the ones with no block in the source, the ones
+        // the rule would have copied from record t - 1 or from the kept
+        // source (the rest were not reusable or fed), and how many of those
+        // copies differ from the walk; the walks whose bytes differ from the
+        // source's block as it is (`raw`, by source kind, physics tails
+        // included); the marked roots a restore wrote.
+        uint64_t marked_walked = 0, marked_unsourced = 0, marked_previous = 0, marked_previous_differed = 0;
+        uint64_t marked_kept = 0, marked_kept_differed = 0, marked_restored = 0;
+        uint64_t marked_raw_previous = 0, marked_raw_kept = 0;
         std::vector<std::string> notes;
         static constexpr size_t kNotes = 16;
         void note(const std::string& what) {
@@ -153,13 +165,14 @@ namespace bmmo::game {
             if (notes.size() < kNotes) notes.push_back(what);
         }
         std::string line(script_reuse_mode mode) const {
-            const uint64_t scripts = reused + walked + walked_unrecorded + walked_structure + walked_fed;
-            char buf[960];
+            const uint64_t scripts = reused + walked + walked_unrecorded + walked_structure + walked_fed + marked_walked;
+            char buf[1280];
             std::snprintf(buf, sizeof buf,
                           "script_reuse: mode=%s captures=%llu with_previous=%llu index_failed=%llu scripts=%llu reused=%llu "
                           "(%.1f%%) tails=%llu walked=%llu unrecorded=%llu structure=%llu verified=%llu mismatches=%llu "
                           "kept: captured=%llu restored=%llu reused=%llu roots=%llu refused=%llu fed=%llu "
-                          "plans: emitted=%llu kept=%llu none=%llu gen=%llu mask=%llu run=%llu",
+                          "plans: emitted=%llu kept=%llu none=%llu gen=%llu mask=%llu run=%llu "
+                          "marked: walked=%llu unsourced=%llu previous=%llu/%llu kept=%llu/%llu raw=%llu/%llu restored=%llu",
                           script_reuse_mode_name(mode), static_cast<unsigned long long>(captures),
                           static_cast<unsigned long long>(with_previous), static_cast<unsigned long long>(index_failed),
                           static_cast<unsigned long long>(scripts), static_cast<unsigned long long>(reused),
@@ -173,7 +186,12 @@ namespace bmmo::game {
                           static_cast<unsigned long long>(kept_refused), static_cast<unsigned long long>(walked_fed),
                           static_cast<unsigned long long>(planned), static_cast<unsigned long long>(plans_kept),
                           static_cast<unsigned long long>(plan_none), static_cast<unsigned long long>(plan_gen),
-                          static_cast<unsigned long long>(plan_mask), static_cast<unsigned long long>(plan_run));
+                          static_cast<unsigned long long>(plan_mask), static_cast<unsigned long long>(plan_run),
+                          static_cast<unsigned long long>(marked_walked), static_cast<unsigned long long>(marked_unsourced),
+                          static_cast<unsigned long long>(marked_previous_differed),
+                          static_cast<unsigned long long>(marked_previous), static_cast<unsigned long long>(marked_kept_differed),
+                          static_cast<unsigned long long>(marked_kept), static_cast<unsigned long long>(marked_raw_previous),
+                          static_cast<unsigned long long>(marked_raw_kept), static_cast<unsigned long long>(marked_restored));
             return buf;
         }
     };

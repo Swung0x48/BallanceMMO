@@ -3178,7 +3178,7 @@ namespace {
             options.slots = core_.mechanism_slots();
             matrix_ids_.clear();   // matrix_entity's premise is asked of one level only
             const std::string error = proximity_.rewire(context, bmmo::game::probe_class::mechanism, sel, options, script_hooks_);
-            script_hooks_.slots = proximity_.slots() ? &proximity_.recorded_slots() : nullptr;
+            script_hooks_.slots = proximity_.hooked_slots();
             proximity_.recorded_slots().select(bmmo::session::bound_member_slots(core_.member_lives(), core_.next_tick()));
             for (const std::string& line: proximity_.lines()) logf("%s", line.c_str());
             if (!error.empty()) {
