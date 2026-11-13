@@ -46,6 +46,24 @@ namespace bmmo::session {
             }();
             return mode;
         }
+        // Step LFL: BMMO_LIFETIME_LIGHT = off | on | verify, read once per
+        // process (on when unset or unknown): a replayed tick only its
+        // lifetime change would record whole is recorded light with the
+        // extras of the names born at it (rollback_engine::
+        // set_lifetime_light); off keeps SRT4's rule, such a tick whole.
+        // verify records it light and turns sparse capture's verify on
+        // with it: the tick is captured whole all the same, every decision
+        // is the light one, and every rebased rewind's anchor is compared.
+        enum class lifetime_light_mode : uint8_t { off, on, verify };
+        lifetime_light_mode lifetime_light_from_env() {
+            static const lifetime_light_mode mode = [] {
+                const char* text = std::getenv("BMMO_LIFETIME_LIGHT");
+                if (text && !std::strcmp(text, "off")) return lifetime_light_mode::off;
+                if (text && !std::strcmp(text, "verify")) return lifetime_light_mode::verify;
+                return lifetime_light_mode::on;
+            }();
+            return mode;
+        }
         // Step MRG: BMMO_MERGE_INPUT = off | on, read once per process (on
         // when unset or unknown): the frame's final lifecycle rewind takes a
         // pending input correction older than its anchor along
@@ -447,9 +465,12 @@ namespace bmmo::session {
         // body-set-corrections control arm, whose full snapshots still land
         // on the records of their ticks (review finding 3).
         const replay_last_mode last = replay_last_from_env();
+        const lifetime_light_mode life = lifetime_light_from_env();
         s.rollback_.set_sparse_capture(snapshots_run() || config.body_set_corrections ? 1u : config.sparse_capture,
-                                       config.sparse_capture_verify || last == replay_last_mode::verify);
+                                       config.sparse_capture_verify || last == replay_last_mode::verify
+                                           || life == lifetime_light_mode::verify);
         s.rollback_.set_replay_last_light(last != replay_last_mode::whole);
+        s.rollback_.set_lifetime_light(life != lifetime_light_mode::off);   // step LFL
         s.merge_input_ = merge_input_from_env();   // step MRG
         s.input_delay_ = msg.input_delay;
         s.sector_lead_ = msg.sector_lead;

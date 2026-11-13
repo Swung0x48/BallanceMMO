@@ -6490,3 +6490,151 @@ TEST(RollbackEngine, SparseVerifyAsksForTheWrittenCellsAndTheReplaysCheckDoesNot
     EXPECT_EQ(std::count(asked.begin(), asked.end(), true), 1) << "the anchor's compare only";
     EXPECT_GE(std::count(asked.begin(), asked.end(), false), 1) << "the last ticks' checks";
 }
+
+// Step LFL: a replayed tick that only its lifetime change would record whole
+// (here a mechanism born at 6) is recorded light under set_lifetime_light,
+// keeping the extras of the name born there.  A later rewind anchored after
+// it rebases across it, and the birth item read from that light record
+// re-poses the body with its extras: the world is the one SRT4's whole
+// record leaves.  Verify captures the tick whole all the same and compares
+// the rebased anchor, counted under the class the replay crossed.
+TEST(RollbackEngine, ALifetimeTickOfAReplayIsRecordedLightAndKeepsTheExtrasOfItsBirths) {
+    const auto run = [](bool lifetime, bool verify, fake_world& world, rollback_engine& engine) {
+        world.bodies["Own"].linear[0] = 1.0f;
+        engine.set_sparse_capture(4, verify);
+        engine.set_lifetime_light(lifetime);
+        auto w = world.adapter();
+        for (uint32_t tick = 1; tick <= 12; ++tick) {
+            rollback_tracked tracked;
+            tracked.own_entity = "Own";
+            if (tick == 6) {
+                fake_body plate;
+                plate.position[0] = 40.0;
+                plate.linear[1] = -0.5f;
+                plate.speed_change[0] = 0.25f;   // what only its extras carry
+                world.bodies["Plate"] = plate;
+            }
+            if (tick >= 6) {
+                tracked.mechanisms = {"Plate"};
+                tracked.generations = {{"Plate", 1u}};
+            }
+            w.step();
+            engine.record(w, tick, tracked, {});
+        }
+        EXPECT_TRUE(engine.rewind_to(w, 2, 12, no_input, "first"));    // re-records 3..12: 6 is the birth
+        EXPECT_TRUE(engine.rewind_to(w, 7, 12, no_input, "second"));   // light anchor: rebased
+    };
+    using rollback_stats = bmmo::session::rollback_stats;
+    constexpr size_t kMech = 4;   // kLifetimeMech's bit
+    fake_world control_world;
+    rollback_engine control;
+    run(false, false, control_world, control);
+    EXPECT_TRUE(control.restorable(6)) << "off: SRT4's rule, the birth tick whole";
+    EXPECT_EQ(control.stats().lifetime_light, 0u);
+
+    fake_world world;
+    rollback_engine engine;
+    run(true, false, world, engine);
+    const rollback_stats& stats = engine.stats();
+    EXPECT_FALSE(engine.restorable(6));
+    bmmo_physics_core_extra extra{};
+    EXPECT_TRUE(engine.recorded_extra("Plate", 6, extra)) << "the birth's extras are kept";
+    EXPECT_FLOAT_EQ(extra.speed_change[0], 0.25f);
+    EXPECT_FALSE(engine.recorded_extra("Own", 6, extra)) << "...and no other";
+    EXPECT_EQ(stats.lifetime_light, 2u) << "each replay re-records 6";
+    EXPECT_EQ(stats.lifetime_births_kept, 2u);
+    EXPECT_EQ(stats.lifetime_records[kMech], 2u);
+    EXPECT_EQ(stats.lifetime_rebased[kMech], 1u) << "the second replay crosses 6 from 4";
+    EXPECT_EQ(stats.lifetime_birth_reads, 1u) << "its birth item reads the light record";
+    EXPECT_EQ(stats.lifetime_birth_unkept, 0u);
+    EXPECT_EQ(stats.sparse_extra_ticks, control.stats().sparse_extra_ticks + 2) << "based at 4, not 6";
+    EXPECT_EQ(world.serialize(), control_world.serialize()) << "the rebased replay arrives at the whole-birth world";
+
+    fake_world verified_world;
+    rollback_engine verified;
+    run(true, true, verified_world, verified);
+    EXPECT_FALSE(verified.restorable(6)) << "verify decides as light does";
+    EXPECT_EQ(verified.stats().lifetime_compared[kMech], 1u);
+    EXPECT_EQ(verified.stats().lifetime_stale[kMech], 0u);
+    EXPECT_EQ(verified.stats().sparse_verify_mismatches, 0u);
+    EXPECT_EQ(verified.stats().lifetime_birth_unkept, 0u);
+    EXPECT_EQ(verified_world.serialize(), control_world.serialize());
+}
+
+// Step LFL: a body that went at 5 and comes back at 7 under the same
+// generation is not born at 7 - its lifetime's oldest record is before 4, so a
+// rewind rebased from 4 would find no birth record and leave it alone.  Tick 7
+// stays whole under set_lifetime_light whether the name stays tracked (a
+// body-set change alone, SRT4's rule) or leaves the mechanism list while gone
+// (a lifetime tick that reappears); the end at 5 of the latter is light.
+TEST(RollbackEngine, ABodyThatComesBackInItsLifetimeKeepsItsTickWhole) {
+    const auto run = [](bool lifetime, bool listed, fake_world& world, rollback_engine& engine) {
+        world.bodies["Own"].linear[0] = 1.0f;
+        world.bodies["Plate"].position[0] = 40.0;
+        engine.set_sparse_capture(4, false);
+        engine.set_lifetime_light(lifetime);
+        auto w = world.adapter();
+        w.pre_step = [&world](uint32_t tick) {   // the replay goes and comes back too
+            if (tick == 5) world.bodies.erase("Plate");
+            if (tick == 7) world.bodies["Plate"].position[0] = 50.0;
+        };
+        for (uint32_t tick = 1; tick <= 12; ++tick) {
+            w.pre_step(tick);
+            rollback_tracked tracked;
+            tracked.own_entity = "Own";
+            if (listed || tick < 5 || tick >= 7) tracked.mechanisms = {"Plate"};
+            tracked.generations = {{"Plate", 1u}};
+            w.step();
+            engine.record(w, tick, tracked, {});
+        }
+        EXPECT_TRUE(engine.rewind_to(w, 2, 12, no_input, "first"));   // re-records 3..12
+        EXPECT_TRUE(engine.rewind_to(w, 7, 12, no_input, "second"));
+    };
+    for (const bool listed: {true, false}) {
+        fake_world control_world, world;
+        rollback_engine control, engine;
+        run(false, listed, control_world, control);
+        run(true, listed, world, engine);
+        EXPECT_TRUE(engine.restorable(7)) << listed;
+        EXPECT_EQ(engine.restorable(5), listed) << "only the end of a lifetime tick is light";
+        EXPECT_EQ(engine.stats().lifetime_reappeared, listed ? 0u : 1u) << "the first replay's 7";
+        EXPECT_EQ(engine.stats().sparse_extra_ticks, control.stats().sparse_extra_ticks) << listed;
+        EXPECT_EQ(world.serialize(), control_world.serialize()) << listed;
+    }
+}
+
+// Step LFL: a birth read from a record that is not whole and did not keep the
+// name is the invariant's fault, counted and logged - here a half's answer
+// that remakes a later life at a light tick it was not born at.
+TEST(RollbackEngine, ABirthReadFromALightRecordThatDidNotKeepItIsCounted) {
+    fake_world world;
+    world.bodies["Own"].linear[0] = 1.0f;
+    world.bodies["Plate"].position[0] = 40.0;
+    rollback_engine engine;
+    engine.set_sparse_capture(4, false);
+    engine.set_lifetime_light(true);
+    auto w = world.adapter();
+    bool inject = false;
+    w.restore_lives = [&](uint32_t, uint32_t, const std::vector<bmmo::session::ended_life>&, bool,
+                          std::map<std::string, bmmo::session::life_outcome>& out) {
+        if (inject) out["Plate"].remade_at = 7;
+    };
+    for (uint32_t tick = 1; tick <= 12; ++tick) {
+        if (tick == 4) world.bodies.erase("Plate");
+        if (tick == 6) world.bodies["Plate"].position[0] = 50.0;
+        rollback_tracked tracked;
+        tracked.own_entity = "Own";
+        if (tick < 4 || tick >= 6) tracked.mechanisms = {"Plate"};
+        tracked.generations = {{"Plate", tick < 4 ? 1u : 2u}};
+        w.step();
+        engine.record(w, tick, tracked, {});
+    }
+    ASSERT_TRUE(engine.rewind_to(w, 4, 12, no_input, "first"));   // 6 light with its birth, 7 light
+    EXPECT_FALSE(engine.restorable(7));
+    inject = true;
+    world.calls.clear();
+    engine.rewind_to(w, 2, 12, no_input, "second");
+    EXPECT_EQ(engine.stats().lifetime_birth_reads, 2u) << "the birth at 6, the remade life at 7";
+    EXPECT_EQ(engine.stats().lifetime_birth_unkept, 1u);
+    EXPECT_EQ(world.count("log lifetime light: the birth of Plate is read from the record of tick 7"), 1);
+}

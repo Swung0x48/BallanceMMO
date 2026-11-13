@@ -4374,7 +4374,9 @@ namespace {
                 const uint32_t lag = static_cast<uint32_t>(std::atoi(lag_text));
                 const uint32_t old = tick > lag ? tick - lag : 0;
                 if (old && !args_.dump_savestate_dir.empty() && old >= args_.dump_savestate_from && old <= args_.dump_savestate_until)
-                    if (const std::vector<uint8_t>* final_blob = core_.recorded_savestate(old)) {
+                    if (const std::vector<uint8_t>* final_blob = core_.recorded_savestate(old); !final_blob) {
+                        ++dump_skipped_final_;   // step LFL: a record with no blob (light, or none taken)
+                    } else {
                         std::error_code ec;
                         const std::filesystem::path dir = std::filesystem::path(args_.dump_savestate_dir) / "final";
                         std::filesystem::create_directories(dir, ec);
@@ -4393,7 +4395,10 @@ namespace {
                 logf("--dump-savestate: first tick %u in range, record %s, into %s (cwd %s)", tick, blob ? "has a blob" : "HAS NO BLOB",
                      args_.dump_savestate_dir.c_str(), std::filesystem::current_path().string().c_str());
             }
-            if (!blob) return;
+            if (!blob) {
+                ++dump_skipped_blobs_;
+                return;
+            }
             std::error_code ec;
             std::filesystem::create_directories(args_.dump_savestate_dir, ec);
             const std::filesystem::path path = std::filesystem::path(args_.dump_savestate_dir) / (std::to_string(tick) + ".sav");
@@ -4409,7 +4414,10 @@ namespace {
         // of this tick carries (after a rewind, the replayed state's).
         void dump_scripts(uint32_t tick) {
             const std::vector<uint8_t>* recorded = core_.recorded_scripts(tick);
-            if (!recorded) return;
+            if (!recorded) {
+                ++dump_skipped_scripts_;
+                return;
+            }
             const std::vector<uint8_t>& bytes = *recorded;
             std::error_code ec;
             std::filesystem::create_directories(args_.dump_savestate_dir, ec);
@@ -4427,7 +4435,10 @@ namespace {
         void compare_scripts(uint32_t tick, const char* source) {
             if (args_.compare_scripts_dir.empty() || !args_.script_replay || scripts_.empty()) return;
             const std::vector<uint8_t>* recorded = core_.recorded_scripts(tick);
-            if (!recorded) return;
+            if (!recorded) {
+                ++compare_scripts_skipped_;
+                return;
+            }
             const std::vector<uint8_t>& mine = *recorded;
             const std::filesystem::path path = std::filesystem::path(args_.compare_scripts_dir) / (std::to_string(tick) + ".scr");
             FILE* f = std::fopen(path.string().c_str(), "rb");
@@ -5154,6 +5165,13 @@ namespace {
                 logf("%s", links.line().c_str());
                 for (const std::string& note: links.notes) logf("delayed links: %s", note.c_str());
             }
+            // Step LFL: what the dump and compare tools could not write or
+            // compare: records with no blob or scripts - a light record (an
+            // explicit --sparse-capture), or a live tick that took none.
+            if (!args_.dump_savestate_dir.empty() || !args_.compare_scripts_dir.empty())
+                logf("--dump-savestate / --compare-scripts: ticks skipped (record with none: light, or none taken): final=%u blobs=%u"
+                     " scripts=%u compared=%u", dump_skipped_final_, dump_skipped_blobs_, dump_skipped_scripts_,
+                     compare_scripts_skipped_);
             // Step RLC: the joint ledger - constraints named by their image in
             // the records, made again or replaced at a restore, in this process.
             {
@@ -5288,6 +5306,11 @@ namespace {
         std::string savestate_clock_before_;                 // describe_clock() just before the last savestate restore (--trace)
         uint32_t savestate_dump_logs_ = 0;                   // --dump-savestate write failures logged (the first 3)                // report warnings logged so far (the first 8)
         uint32_t compare_scripts_ticks_ = 0, compare_scripts_logs_ = 0;
+        // Step LFL: the ticks --dump-savestate (its final/ set, the blobs,
+        // the scripts) and --compare-scripts skipped, their record having
+        // none (recorded light under an explicit --sparse-capture, or a live
+        // tick that took none).
+        uint32_t dump_skipped_final_ = 0, dump_skipped_blobs_ = 0, dump_skipped_scripts_ = 0, compare_scripts_skipped_ = 0;
         uint32_t recipe_parse_logs_ = 0, recreate_logs_ = 0, replay_birth_logs_ = 0;
         // Every activation of Gameplay_SectorManager the live frames made, by
         // the tick whose frame consumed it, for the replay to re-issue (host

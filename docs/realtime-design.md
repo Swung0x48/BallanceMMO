@@ -2516,3 +2516,168 @@ the build id's commit. Fast LBM with the verifies and as shipped: 38/38 twins FI
 equal to the resync cut's run, 0 mismatches, 419 sparse anchors 0 differing; 0 merged, 41 carried. Retail at K =
 20, L12 and L11 at human key rates, as shipped: 0 mismatches, FINAL rows bit-equal to the restore skip's sessions
 with L11's 32 trafo pieces; 0 merged (1-3 carried per client). So on retail the step is untried.
+
+## Built (a lifetime tick of a replay is recorded light, step LFL, 2026-11-12)
+
+**What it costs today.** On the public L6 record on the 8845HS the frames over the 15.15 ms budget pay for the
+replay's whole records, and every whole replayed record in them is a grid tick (every 8th, SRT4's `sparse=8`) or a
+lifetime tick: a tick whose tracked set, generations or body set differ from the record of t - 1 (a remote born,
+ended or reordered, the own ball's type change or death, a mechanism added), which `capture_replayed` recorded whole
+whatever its place in the grid - 1.2-2.0 such records in an over-budget frame at 1.5-1.9 ms each (the census in
+`.local-tools/work/WHOLE/wr3_agent2.txt`, projected 6-9 of 14-15 over-budget frames under). A restore reads such a
+record, when it is not its base, only for the bodies born there: their pose and their extras (the parked body is
+re-posed with them).
+
+**The rule.** A replayed tick that only the lifetime rule would record whole - not a structural whole tick (k <= 1,
+a grid tick, the last tick when it is not light, no record before, rows, no record of t - 1) - is recorded light
+(`full = false`) and also keeps the extras of every name born at it: a body at t that the record of t - 1 has not,
+or has under another generation (`birth_record`'s own test), listed in `tick_state::births`, its extras read with
+one `get_body_extra` each (no contacts: the contact pass reads only the base and skips birth items; no capture
+cache). The record carries the change's classes in `tick_state::lifetime`, a bit mask: born and ended (a remote new
+at t, or gone, or of another lifetime), order (the same remotes in another order), own (the own ball renamed, made
+or ended), mech (a mechanism added, removed or of another lifetime) and set (the body set differs from t - 1's;
+only together with a lifetime change: a body set that changes alone keeps SRT4's whole re-capture); a generation change of a name in none of the lists counts as an end.
+Two such ticks stay whole (review of step LFL): a body-set change with no lifetime change (SRT4's rule), and a
+lifetime tick at which a name born by `keep_births`' test (`born_at`) reappears in a lifetime an earlier record
+already carries - its body went and came back under the same generation, as a beam does (`reappears`, counted as
+`lifetime_reappeared` and in `whole=`). Its oldest record is not t, so a rewind rebased across t would find no birth
+record of that lifetime after its base (`birth_record`), nor a moved one, and would leave the body at its live pose
+through a replay that starts where the body was absent; the unkept counter cannot see that case (no birth is read).
+`capture()` clears both, so a whole capture of the tick (an `amend_record`, a later replay's whole record) carries
+none. Code: `rollback.hpp` `capture_replayed`, `lifetime_classes`, `keep_births`, `born_at`, `reappears`,
+`note_birth_read`. `keep_births` reads its births' extras inside the capture's lookup scope (`lookup_scope`, the
+retail binding's one pass over the world for by-name reads), opened only when there is a birth to read.
+
+**Each reader, and its answer.**
+- *A birth read* (the birth item from `birth_record` or `moved_birth_record`, the remade life's lookup
+  `find_const(remade_at)` in `revive_ended_lives`): reads the record's `bodies[name]` and `extras[name]`. The
+  invariant: a read from a record that is not whole finds its name in `births`, so its extras are there. Every such
+  read is counted (`lifetime_birth_reads`); one that finds the name not kept counts `lifetime_birth_unkept` (a fault:
+  the body would be re-posed without its extras) and logs, capped at 8. A whole record holds every extra. The
+  revived half of `revive_ended_lives` reads the base, which is always whole.
+- *The restore base* (`restore_base`, `rewindable`, `restorable`): skips a record that is not whole, as for every
+  light record; a rewind anchored at or after a lifetime tick rebases to the whole record before it and replays
+  across the tick (the births and lives machinery then runs inside the replay: more remakes and revived lives, every
+  one exact below). The grid ticks stay whole, so a rebase is still at most `sparse=8` - 1 ticks deeper and
+  `kSparseCaptureMax` is unchanged; an anchor deeper than the standard reach can lose its only whole base and is
+  refused as `sparse_unanchored` (0 in every run below).
+- *The capture cache and the script reuse source* (`capture`'s record of t - 1): need a whole t - 1, as before.
+  `keep_source` is called only from a whole script capture. A light lifetime tick calls `observe_scripts`, as any
+  light record does, so a relatch's mark (step RELATCH) waits through it until the next whole capture walks the root.
+- *Snapshots and resync*: `on_snapshot` refuses a light record (no session with snapshots runs sparse capture);
+  `resync` anchors at S, the first record of a new history, which no replay re-records; the resync's localize reads
+  `recorded_scripts(S)` of that same record.
+- *`restore_candidates`, `generation_now`, the core's lifecycle reconcile, `recorded_body`, `recorded_input`, the
+  retire observer*: read bodies, tracked sets and inputs, which a light record keeps.
+- *`move_birth`*: erases the body, its extras and now its `births` entry in place; the replay's re-capture at the
+  applied tick sees the name absent at applied - 1, so the record keeps it as a birth.
+- *The core's uses of the base* (`merges_input_replay`, the sector re-derive in `rewind_for_sectors`,
+  `drop_carried_input_replay` after a lifecycle rewind with `restored`): read the deeper base as for any light anchor.
+  On the re-drive this drops one input replay on 12 of the 13 clients, the same one on each (the rollback lines
+  aligned client by client: `Ball_Paper_BMMO_65546 input corrected at tick 1052`, client 0's own ball; nothing else
+  differs). On client 1: the remote born at 1052 (its birth tick now light) is crossed by the two rebased rewinds of
+  1059 and 1060 from 1050, which re-record 1052; the correction of 1052 at 1061, which the off run replayed 11 ticks
+  for, is then not news. That the re-record took the relayed frame of 1052 (`client_core_messages.cpp` "the
+  prediction was right") is inferred, by elimination: the relay, bodiless, hint and coalesced counters are unchanged.
+  The journals are equal (below): the dropped replay changed no simulated byte.
+- *The replay's own check against the live record of a tick, and the dump and compare tools*: need the record's
+  scripts and blob. The check is a diagnostic no gate reads (as at RLL; sparse verify keeps it). The tools force
+  `sparse_capture = 1` when they run (`session_client.cpp`), so they are unaffected; with an explicit
+  `--sparse-capture` they skip a light record as before, and now say so at the session's end: `--dump-savestate /
+  --compare-scripts: ticks skipped (record with none: light, or none taken): final= blobs= scripts= compared=`
+  (`blobs=` also counts a live tick whose record took no blob, which is not a light record).
+
+**The switch and the counters.** `BMMO_LIFETIME_LIGHT` = `off` | `on` | `verify`, read once per process
+(`client_core.cpp` `lifetime_light_from_env`, beside `replay_last_from_env`), on when unset; off is SRT4's rule
+exactly (the body-set re-capture included, now counted in `whole=` with its time, which SRT4 left uncounted). `verify` records the tick
+light and turns sparse capture's verify on: the tick is captured whole all the same and still marked light with its
+`births` filled, so every decision is the light one, and `verify_sparse_anchor` compares every rebased anchor. The
+engine's `set_lifetime_light` is off by default (the tools and the unit tests' engines). The status line's sparse
+section (retail reads the same line) adds, after `replay_last=`, ` lifetime=on|off/records/ms/births kept/birth
+reads/unkept/reappeared cross=born:r/n/c/s,ended:...,order:...,own:...,mech:...,set:...`: the light records of that class, the
+rebased rewinds whose replay crossed one (the classes of the records in (base, anchor], read in `rewind_to` before
+the replay re-records them), and of their anchors those sparse verify compared and those it left stale. The
+lifetime records count in `light=` too.
+
+**The runs** (the L6 re-drive, dev machine, 13 clients, one binary; `pf_lfx1_1` off, `pf_lfs1_1` unset):
+
+| | whole replayed | light (of them lifetime) | rewinds | rebased + extra ticks | replayed ticks |
+|---|---|---|---|---|---|
+| off (`pf_lfx1_1`) | 58 134 | 602 931 (0) | 72 761 | 56 685 + 210 007 | 661 065 |
+| on (`pf_lfs1_1`) | 56 023 | 607 854 (3 228, 324 ms) | 72 749 | 56 858 + 212 939 | 663 877 |
+
+Of the 3 228 lifetime records, 2 111 are ticks the off run recorded whole (whole 58 134 -> 56 023); the other 1 117
+are among the extra ticks the deeper rebases replay (whole + light = replayed ticks in both runs: 661 065, 663 877),
+ticks that were a rewind's whole base before. By class born 985, ended 772, order 1 289, own 262, mech 48, set 1 939 (a record can carry several). They kept 2 457
+births' extras; 1 749 birth reads came from a light record, 0 unkept. Crossing a lifetime tick costs 173 more rebased
+rewinds and 2 932 more rebased ticks (2 812 more replayed ticks net of the dropped input replay, one a client). `births=` 1 197 -> 2 007
+recreated, every one exact; `lives=` ended 750 -> 1 094, revived own 52 -> 83, mirror 122 -> 435, mech 576 -> 576,
+unrevivable 0. The off run's counters and the 13 clients' and the server's journals equal HEAD's shipped run
+(`pf_mgs_1`) past the build id; the on run's journals equal the off run's and `pf_mgs_1`'s. `unanch=` 0 in both.
+In verify with the reuse verifies (`pf_lfv1_1`: `BMMO_LIFETIME_LIGHT=verify`, `BMMO_SCRIPT_REUSE`, `SLOT_MEMO`,
+`RESTORE_PLAN`, `TRAFO_HELD`, `SLOT_CELLS`, `REPLAY_LAST` = verify): every `mismatches=` 0, sparse verify 56 804
+anchors compared, 0 differing, 0 float, 54 stale (HEAD's verify run: 56 631 / 54), unkept 0; by class compared /
+stale: born 366 / 12, ended 313 / 0, order 418 / 0, own 82 / 0, mech 0 / 0 (no rebase crossed one), set 722 / 12;
+its decisions are the on run's (every counter above equal) and its journals the off run's. On with the five reuse
+verifies (`pf_lfo1_1`, `REPLAY_LAST` unset, `sparse=8` without `v`): every `mismatches=` 0, unkept 0, counters and
+journals the on run's. The relatch marks (`marked:` over the 13 clients): walked 1 171 (1 051 off), unsourced 0,
+previous 0/0, kept 0/0, raw 25/1 146 (105/946 off), restored 97 (75 off). In the marked branch (`script_replay.hpp`)
+`raw=` counts marked walks whose source block (record t - 1 / the kept source) differs from the walked bytes, and
+`previous=` / `kept=` the walks the reuse rule would have copied (a quiet, reusable root). The marks did wait
+through light lifetime ticks: 120 more marked walks, and the kept source served 200 more of them where t - 1 (now
+light) served 80 fewer. But the marked root was never quiet and reusable when walked, so the denial branch
+(`previous=` / `kept=`) did not run. Every session's `mism` 0 in all four. Frame times on the 8845HS
+were not measured.
+
+**After the review** (the body-set-only tick and the reappearing name kept whole, above), the four runs again on
+the fixed tree: off `pf_lfx2_1`, verify with the six verifies `pf_lfv2_1`, on with the five reuse verifies
+`pf_lfo2_1`, as shipped `pf_lfs2_1`. `lifetime_reappeared` is 0 in every session, and every counter above equals
+its first run's (lfx2 = lfx1 = `pf_mgs_1`'s counters, lfv2 = lfv1, lfo2 = lfo1, lfs2 = lfs1; the times aside):
+sparse verify 56 804 / 0 / 0 / 54, the per-class compared / stale as above, unkept 0, the `marked:` totals, births
+and lives. Every `mismatches=` 0 (468 lines), every session's `mism` 0; the 13 clients' and the server's journals
+of lfx2, lfv2, lfo2 and lfs2 equal past the build id to each other's, to `pf_mgs_1`'s and to lfs1's.
+
+**The review's other points.**
+- *A body that goes on a lifetime tick* under its generation stays light: a later rewind anchored in [t, next grid)
+  rebases to the grid tick before t, where the body is recorded, and restores it from there - what a rewind
+  anchored in [grid, t) already did under SRT4's rule; SRT4's whole record of t would have had no opinion about it
+  (absent at the base, its lifetime's oldest record before it). That case is kept as built.
+- *The dropped input replays* (12, one a client, above): a rebased rewind re-recorded the light birth tick 1052
+  with the relayed frame before the correction of 1052 arrived; the final state is the same (journals equal) and
+  the frames between are corrected sooner.
+- *The frame cost* is unmeasured: 2 111 fewer whole records against 2 812 more replayed ticks, 810 more births and
+  344 more lives recreated. The 8845HS timing decides.
+- `note_birth_read` logs a read that is not kept whatever the switch; with it off no birth was read from a light
+  record (0 reads in every off run).
+- `lifetime_compared` counts an anchor sparse verify compared, also one that differed (0 differed here; the
+  differing ones are in `verify=`'s second field).
+- The fast LBM with the switch as shipped (`lfr`) and in `verify` (`lfw`), run by the review on the tree before the
+  fix: 38 of 38 twins FINAL exact each, the FINAL criteria rows equal to the resync cut's run; the mech class was
+  crossed three times there (a8_r1, a8_r2, a8_r3, client 3), all compared exact. Not re-run after the fix, which can
+  only keep more ticks whole (a sector body that keeps its generation).
+
+**Not exercised**: a body-set-only tick (the off runs' whole + light equal their replayed ticks, so it never ran;
+`set` rides along with another class; the unkept counter cannot see it) and a reappearing name
+(`lifetime_reappeared` 0 on L6; the unit test checks the whole / light decision only, its fake world remakes the
+body either way), the mech class across a rebase on L6 (48 records, none crossed; three in the fast LBM before the
+fix and in its gate run `lgv`; three on retail L11, not compared there), the relatch's denial branch, an unkept read outside the unit test, an anchor refused at the reach edge,
+`move_birth` on a light record, the dump and compare tools with an explicit `--sparse-capture`, the 8845HS
+timing, the wire check.
+
+**Gate.** 852/852 (three new tests: `RollbackEngine.ALifetimeTickOfAReplayIsRecordedLightAndKeepsTheExtrasOfItsBirths`,
+a birth read from a lifetime-light tick and a rebase across it equal to SRT4's world, off / on / verify;
+`RollbackEngine.ABirthReadFromALightRecordThatDidNotKeepItIsCounted`, the unkept counter;
+`RollbackEngine.ABodyThatComesBackInItsLifetimeKeepsItsTickWhole`, the body-set-only tick and the reappearing name
+kept whole); x64 BUILD-OK, x86 CLIENT-BUILD-OK; the L6 re-drive off (`pf_lfx2_1`), as shipped (`pf_lfs2_1`), on
+with the five reuse verifies (`pf_lfo2_1`) and in verify with the six verifies (`pf_lfv2_1`), as above (and the
+same four on the tree before the review's fix, `pf_lf?1_1`).
+
+**The full gate** (the final tree, the review's fix in): x64 and the tests, 852/852; the x86 client; the Arch server.
+The four L6 runs above, the journals checked again by the gate: the 13 clients' and the server's equal past the
+build id, `pf_lfx2_1` to `pf_mgs_1`, and `pf_lfs2_1`, `pf_lfv2_1`, `pf_lfo2_1` to `pf_lfx2_1`. Fast LBM with the six
+verifies and `BMMO_LIFETIME_LIGHT=verify` (`lgv`) and as shipped (`lgn`): 38/38 twins FINAL exact each, every
+criteria row equal to the resync cut's run, 0 mismatches; 621 lifetime records, 837 births kept, 285 birth reads, 0
+unkept; 440 rebased anchors compared in `lgv`, 0 differing, 0 stale (born 96, ended 18, own 27 among them). Retail at
+K = 20, L12 and L11 at human key rates, as shipped (`lrs`): 0 mismatches, FINAL rows bit-equal to the restore skip's
+sessions with L11's 32 trafo pieces; 7-37 lifetime records a client, 0 unkept, 0 reappeared, the mech class crossed
+by 3 rebased rewinds on L11 (the retail sessions take no verify).

@@ -961,6 +961,22 @@ namespace bmmo::session {
         // (Step RLL: replays whose last tick was recorded light - with
         // set_replay_last_light, a last tick no other rule keeps whole.)
         uint64_t replay_last_light = 0;
+        // Step LFL: replayed ticks only a lifetime change would have recorded
+        // whole, recorded light with the extras of the names born there
+        // (lifetime_light, a subset of sparse_light, with the time those
+        // captures took and the births whose extras they kept); birth reads
+        // (the birth item, a moved birth, a remade life) from a record that
+        // is not whole, and those of them that found their name not kept (a
+        // fault: the body is re-posed without its extras).  Per lifetime
+        // class (kLifetimeClasses: born, ended, order, own, mech, bodyset):
+        // the light records of that class, the rebased rewinds whose replay
+        // crossed one, and of their anchors those sparse verify compared and
+        // those it left stale.  lifetime_reappeared: lifetime ticks kept whole
+        // because a name reappears there in a lifetime an earlier record
+        // carries (counted in replay_whole too).
+        uint64_t lifetime_light = 0, lifetime_light_us = 0, lifetime_births_kept = 0, lifetime_reappeared = 0;
+        uint64_t lifetime_birth_reads = 0, lifetime_birth_unkept = 0;
+        uint64_t lifetime_records[6] = {}, lifetime_rebased[6] = {}, lifetime_compared[6] = {}, lifetime_stale[6] = {};
         uint64_t unmatched = 0;        // snapshot tick not in the history
         uint64_t captures_never_made = 0;   // a deferred record (capture_now false) no amend_record captured
         uint64_t too_far = 0;          // a snapshot or a rewind deeper than max_resim_ticks: refused, nothing written
@@ -1556,6 +1572,7 @@ namespace bmmo::session {
                         ? (item.state.simulated ? wake_mode::wake : wake_mode::freeze) : wake_mode::wake;
                     item.repose_tick = birth->tick;
                     item.force_recheck = true;
+                    note_birth_read(world, *birth, entity);
                     if (const auto ex = birth->extras.find(entity); ex != birth->extras.end()) {
                         item.extra = ex->second;
                         item.have_extra = true;
@@ -2670,6 +2687,9 @@ namespace bmmo::session {
                     verify_pending_ = false;
                     if (recorded && verify_stale_) ++stats_.sparse_verify_stale;
                     else if (recorded) verify_sparse_anchor(world, *recorded, state);
+                    // Step LFL: by the lifetime classes the replay crossed.
+                    for (size_t c = 0; recorded && c < kLifetimeClasses; ++c)
+                        if (verify_lifetime_ & (1u << c)) ++(verify_stale_ ? stats_.lifetime_stale : stats_.lifetime_compared)[c];
                 }
                 // Step DX1: the deferred bodies not yet born at this tick are
                 // marked in its record (tick_state::unborn).
@@ -2904,7 +2924,8 @@ namespace bmmo::session {
         // ticks that are a multiple of `every`, its last tick, a tick whose
         // tracked set, body set or lifetimes differ from the record of the
         // tick before (a birth record: its extras are what a later restore
-        // re-poses the body with) and one that carries snapshot rows; the
+        // re-poses the body with; light with those extras under step LFL's
+        // set_lifetime_light) and one that carries snapshot rows; the
         // others light (tick_state::full).  A
         // live record is always whole.  `verify`: the light ticks are
         // captured whole all the same (still marked light, so every
@@ -2934,6 +2955,24 @@ namespace bmmo::session {
         // default (the tools and the unit tests' engines).
         void set_replay_last_light(bool light) { replay_last_light_ = light; }
         bool replay_last_light() const { return replay_last_light_; }
+        // Step LFL: a replayed tick that only its lifetime change would
+        // record whole (its tracked set, generations or body set differ from
+        // the record of t - 1: a remote born, ended or reordered, the own
+        // ball's type change or death, a mechanism added) recorded light,
+        // keeping the extras of every name born at it (tick_state::births) -
+        // what a later restore reads from such a record when it is not the
+        // base: the born body's pose and extras.  Never a base, a cache or
+        // reuse source, a snapshot or resync anchor (tick_state::full).  A
+        // birth read from a record that did not keep its name is counted
+        // (lifetime_birth_unkept) and logged.  With sparse capture's verify
+        // on, the tick is captured whole and still marked light.  Off by
+        // default (the tools and the unit tests' engines): off is SRT4's rule.
+        void set_lifetime_light(bool light) { lifetime_light_ = light; }
+        bool lifetime_light() const { return lifetime_light_; }
+        // The lifetime classes of tick_state::lifetime, in its bit order.
+        static constexpr uint8_t kLifetimeBorn = 1, kLifetimeEnded = 2, kLifetimeOrder = 4, kLifetimeOwn = 8,
+                                 kLifetimeMech = 16, kLifetimeBodySet = 32;
+        static constexpr size_t kLifetimeClasses = 6;
         uint32_t sparse_capture() const { return sparse_every_ > 1 ? sparse_every_ : 1u; }
         bool sparse_capture_verify() const { return sparse_verify_; }
         // The tick a rewind to `anchor` restores: `anchor` when its record
@@ -3045,6 +3084,8 @@ namespace bmmo::session {
                 touched = state.extras.erase(entity) > 0 || touched;
                 touched = state.contacts.erase(entity) > 0 || touched;
                 touched = state.navs.erase(entity) > 0 || touched;
+                // Step LFL: the extras a light record kept go with them.
+                state.births.erase(std::remove(state.births.begin(), state.births.end(), entity), state.births.end());
                 if (gap) {
                     // Step RR: no row for motion the server never stepped.  A
                     // row of a tick from `applied` on is the server's state of
@@ -3227,6 +3268,16 @@ namespace bmmo::session {
                 verify_pending_ = sparse_verify_;
                 verify_stale_ = false;
                 verify_anchor_ = anchor;
+                // Step LFL: the lifetime classes of the light records in
+                // (base, anchor] - the ticks this replay crosses that a
+                // lifetime change used to keep whole - read before the
+                // replay re-records them.
+                verify_lifetime_ = 0;
+                for (const tick_state& state: history_)
+                    if (static_cast<int32_t>(state.tick - base) > 0 && static_cast<int32_t>(state.tick - anchor) <= 0)
+                        verify_lifetime_ |= state.lifetime;
+                for (size_t c = 0; c < kLifetimeClasses; ++c)
+                    if (verify_lifetime_ & (1u << c)) ++stats_.lifetime_rebased[c];
             }
             if (restored) *restored = base;
             // NOT stats_.mismatched: that counts authoritative snapshots this
@@ -3376,6 +3427,17 @@ namespace bmmo::session {
             // anchor a rebased rewind re-simulates is compared with it.  In
             // memory only.
             bool full = true;
+            // Step LFL: a replayed tick that only its lifetime change would
+            // have recorded whole, recorded light (set_lifetime_light): the
+            // classes of that change (rollback_engine::kLifetimeBorn ..
+            // kLifetimeBodySet; 0 for every other record), and the names
+            // born at it - absent from the record of t - 1 or of another
+            // lifetime there - whose extras it keeps (the born body's pose
+            // and extras are what a later restore reads from it).  capture()
+            // clears both, so an amendment's whole capture has none.  In
+            // memory only.
+            uint8_t lifetime = 0;
+            std::vector<std::string> births;
         };
 
 
@@ -3596,6 +3658,7 @@ namespace bmmo::session {
                             made.mode = sleep_of(made.state, wake_mode::wake);
                             made.repose_tick = got.remade_at;
                             made.force_recheck = true;
+                            note_birth_read(world, *born, life.name);
                             if (const auto ex = born->extras.find(life.name); ex != born->extras.end()) {
                                 made.extra = ex->second;
                                 made.have_extra = true;
@@ -3741,12 +3804,15 @@ namespace bmmo::session {
             const tick_state* before = whole ? nullptr : find_const(t - 1);
             if (!whole && !before) whole = true;
             // A birth, an end, a mechanism the replay adds, a remote of the
-            // window: the record a later restore takes a birth from.
-            if (!whole)
-                whole = state.tracked.own_entity != before->tracked.own_entity
-                     || state.tracked.remote_entities != before->tracked.remote_entities
-                     || state.tracked.mechanisms != before->tracked.mechanisms
-                     || state.tracked.generations != before->tracked.generations;
+            // window: the record a later restore takes a birth from.  Whole
+            // under SRT4's rule; light with its births' extras under step
+            // LFL's (set_lifetime_light).
+            const bool lifetime = !whole
+                && (state.tracked.own_entity != before->tracked.own_entity
+                    || state.tracked.remote_entities != before->tracked.remote_entities
+                    || state.tracked.mechanisms != before->tracked.mechanisms
+                    || state.tracked.generations != before->tracked.generations);
+            if (lifetime && !lifetime_light_) whole = true;
             const auto started = std::chrono::steady_clock::now();
             if (whole) {
                 capture(world, state, true);
@@ -3757,21 +3823,120 @@ namespace bmmo::session {
             }
             capture(world, state, sparse_verify_);
             // The body set must be the one of t - 1 too (a tracked name whose
-            // body appeared or went without a lifetime change).
+            // body appeared or went without a lifetime change), and under
+            // step LFL no name may reappear at t in a lifetime an earlier
+            // record carries (reappears): whole, as under SRT4's rule.
             bool same_set = state.bodies.size() == before->bodies.size();
             auto b = before->bodies.cbegin();
             for (auto a = state.bodies.cbegin(); same_set && a != state.bodies.cend(); ++a, ++b)
                 same_set = a->first == b->first;
-            if (!same_set) {
+            const bool reappeared = lifetime && reappears(state, *before);
+            if ((!same_set && !lifetime) || reappeared) {
                 if (!sparse_verify_) capture(world, state, true);
                 state.full = true;
+                ++stats_.replay_whole;
+                if (reappeared) ++stats_.lifetime_reappeared;
+                stats_.replay_whole_us += static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count());
                 return;
             }
+            const uint8_t classes = (lifetime ? lifetime_classes(*before, state) : 0) | (same_set ? 0 : kLifetimeBodySet);
             state.full = false;
             if (last) ++stats_.replay_last_light;
             ++stats_.sparse_light;
-            stats_.sparse_light_us += static_cast<uint64_t>(
+            if (classes) {
+                state.lifetime = classes;
+                keep_births(world, state, *before, sparse_verify_);
+                ++stats_.lifetime_light;
+                for (size_t c = 0; c < kLifetimeClasses; ++c)
+                    if (classes & (1u << c)) ++stats_.lifetime_records[c];
+            }
+            const uint64_t took = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count());
+            stats_.sparse_light_us += took;
+            if (classes) stats_.lifetime_light_us += took;
+        }
+
+        // Step LFL: the classes of the lifetime change between the records
+        // of t - 1 (`a`) and t (`b`): the own ball renamed, made or ended
+        // (its type change, its death); a mechanism added, removed or of
+        // another lifetime; a remote that is new or of another lifetime at
+        // t (born), one that left or is of another lifetime (ended), the
+        // same remotes in another order (order).  A generation change of a
+        // name in none of the lists counts as an end.
+        static uint8_t lifetime_classes(const tick_state& a, const tick_state& b) {
+            uint8_t classes = 0;
+            const rollback_tracked& x = a.tracked;
+            const rollback_tracked& y = b.tracked;
+            if (x.own_entity != y.own_entity || generation_in(a, y.own_entity) != generation_in(b, y.own_entity))
+                classes |= kLifetimeOwn;
+            if (x.mechanisms != y.mechanisms) classes |= kLifetimeMech;
+            for (const std::string& name: y.mechanisms)
+                if (generation_in(a, name) != generation_in(b, name)) classes |= kLifetimeMech;
+            for (const std::string& name: y.remote_entities)
+                if (!listed(x.remote_entities, name) || generation_in(a, name) != generation_in(b, name)) classes |= kLifetimeBorn;
+            for (const std::string& name: x.remote_entities)
+                if (!listed(y.remote_entities, name) || generation_in(a, name) != generation_in(b, name)) classes |= kLifetimeEnded;
+            if (!(classes & (kLifetimeBorn | kLifetimeEnded)) && x.remote_entities != y.remote_entities) classes |= kLifetimeOrder;
+            if (!classes && x.generations != y.generations) classes |= kLifetimeEnded;
+            return classes;
+        }
+        static bool listed(const std::vector<std::string>& names, const std::string& name) {
+            for (const std::string& n: names)
+                if (n == name) return true;
+            return false;
+        }
+
+        // Step LFL: the names born at `state` (a body there, none in
+        // `before` or one of another lifetime: birth_record's test), with
+        // their extras unless the record was captured whole.
+        void keep_births(const rollback_world& world, tick_state& state, const tick_state& before, bool whole) {
+            for (const auto& [name, body]: state.bodies)
+                if (born_at(state, before, name)) state.births.push_back(name);
+            stats_.lifetime_births_kept += state.births.size();
+            if (whole || state.births.empty() || !world.get_body_extra) return;
+            lookup_scope lookups(world);   // the by-name reads of a capture
+            for (const std::string& name: state.births) {
+                bmmo_physics_core_extra extra{};
+                if (world.get_body_extra(name, extra)) state.extras[name] = extra;
+            }
+        }
+        static bool born_at(const tick_state& state, const tick_state& before, const std::string& name) {
+            return !before.bodies.count(name) || generation_in(before, name) != generation_in(state, name);
+        }
+
+        // Step LFL: a name born at `state` by keep_births' test whose
+        // lifetime an earlier record already carries - its body went and came
+        // back under the same generation (a beam keeps its generation).  Its
+        // oldest record is not this one, so a rewind rebased across the tick
+        // finds no birth record of the lifetime after its base (birth_record)
+        // and leaves the body alone: such a tick stays whole.
+        bool reappears(const tick_state& state, const tick_state& before) const {
+            for (const auto& [name, body]: state.bodies) {
+                if (!born_at(state, before, name)) continue;
+                const uint32_t generation = generation_in(state, name);
+                for (const tick_state& earlier: history_) {
+                    if (static_cast<int32_t>(earlier.tick - state.tick) >= 0) break;
+                    if (earlier.bodies.count(name) && generation_in(earlier, name) == generation) return true;
+                }
+            }
+            return false;
+        }
+
+        // Step LFL: a birth read from `record`, which a lifetime tick may
+        // have recorded light: its extras are there only when the record
+        // kept the name (tick_state::births).  A read that finds it not kept
+        // is a fault - the body is re-posed without its extras - counted and
+        // logged (capped).  A whole record holds every extra.
+        void note_birth_read(const rollback_world& world, const tick_state& record, const std::string& entity) {
+            if (record.full) return;
+            ++stats_.lifetime_birth_reads;
+            if (listed(record.births, entity)) return;
+            ++stats_.lifetime_birth_unkept;
+            if (world.log && lifetime_logs_++ < 8)
+                world.log("lifetime light: the birth of " + entity + " is read from the record of tick "
+                          + std::to_string(record.tick) + ", which is not whole and did not keep its extras ("
+                          + std::to_string(stats_.lifetime_birth_unkept) + " so far)");
         }
 
         // Step SRT4: two ticks' inputs bit-equal, entity by entity.
@@ -3862,13 +4027,16 @@ namespace bmmo::session {
         // tick_state::full): the bodies, navigation, clock and globals only -
         // one body read per tracked name, no extras, contacts, scripts or
         // blob - and no cache or script-reuse source looked up.
+        struct lookup_scope {
+            const rollback_world& w;
+            explicit lookup_scope(const rollback_world& world) : w(world) { if (w.capture_scope) w.capture_scope(true); }
+            ~lookup_scope() { if (w.capture_scope) w.capture_scope(false); }
+        };
         void capture(const rollback_world& world, tick_state& state, bool whole = true) {
-            struct scope {
-                const rollback_world& w;
-                explicit scope(const rollback_world& world) : w(world) { if (w.capture_scope) w.capture_scope(true); }
-                ~scope() { if (w.capture_scope) w.capture_scope(false); }
-            } lookups(world);
+            lookup_scope lookups(world);
             state.full = whole;
+            state.lifetime = 0;   // step LFL: capture_replayed sets them for a lifetime tick
+            state.births.clear();
             // RC2 (b) (step RCB; rewind-cost design, "As built (step B5RX)",
             // item RC2S option (b)): the record of the tick before is the
             // cache's source - the previous tick's capture, live or replayed
@@ -4162,11 +4330,15 @@ namespace bmmo::session {
         uint32_t sparse_every_ = 0;
         bool sparse_verify_ = false;
         bool replay_last_light_ = false;   // step RLL
+        bool lifetime_light_ = false;      // step LFL
+        uint32_t lifetime_logs_ = 0;       // step LFL: unkept birth reads logged (capped)
         uint32_t sparse_logs_ = 0;
         // Verify mode: the light anchor of the rebased rewind under way,
-        // compared when its replay re-records it (cleared when it ends).
+        // compared when its replay re-records it (cleared when it ends),
+        // and the lifetime classes its replay crosses (step LFL).
         bool verify_pending_ = false, verify_stale_ = false;
         uint32_t verify_anchor_ = 0;
+        uint8_t verify_lifetime_ = 0;
         uint32_t sparse_verify_logs_ = 0;
         uint32_t sparse_verify_float_logs_ = 0;
         // RC2 (b): bumped by every write the engine makes into the world
