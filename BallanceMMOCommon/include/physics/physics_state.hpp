@@ -98,6 +98,13 @@ namespace bmmo::physics {
     // drain_muted_recipes: a client's record of the births a replayed frame
     // made.  Off by default; everything else stays muted.
     void set_event_log_keep_muted_recipes(bool keep);
+    // The log's diagnostic entries - a body's state at its birth ("birth",
+    // design 9.26), "revived", "frozen", "force" and "constraint" - are
+    // recorded only while this is on (the default: SimTool and the client's
+    // automation print the whole log).  The client hosts read none of them
+    // unless tracing and turn them off then (step DCL); the entries they read
+    // (created, deleted, script_wakeup, recipe) are recorded either way.
+    void set_event_log_diagnostics(bool on);
     std::string drain_muted_recipes();
     // The kept buffer's length, not drained (bridge v33's measure, FULL step AUD3).
     size_t muted_recipes_size();

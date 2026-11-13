@@ -705,6 +705,33 @@ TEST(RollbackEngine, AnAmendedOwnRecordDrivesTheReplay) {
     EXPECT_NEAR(world.bodies["Own"].position[0], 3.0 * TICK_SECONDS, 1e-9);
 }
 
+// Step DCL: past the host's log cap (rollback_world::log_open false) a rewind
+// builds and writes no per-rewind line; the replay is the same.
+TEST(RollbackEngine, AClosedLogTakesNoRewindLine) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Remote"].position[0] = 5.0;
+    world.navs["Own"] = {};
+    world.navs["Remote"] = {};
+    rollback_engine engine;
+    std::map<uint32_t, input_frame> own_inputs;
+    run_ticks(world, engine, 6, 3, own_inputs);
+    bool open = true;
+    auto w = world.adapter();
+    w.log_open = [&open] { return open; };
+    ASSERT_TRUE(engine.rewind_to(w, 3, 6, no_input, "Remote input corrected at tick 4"));
+    EXPECT_EQ(world.count("log rollback to tick 3 (Remote input corrected at tick 4), re-simulated 3 ticks"), 1);
+    const double position = world.bodies["Own"].position[0];
+    world.calls.clear();
+    world.steps = 0;
+    open = false;
+    ASSERT_TRUE(engine.rewind_to(w, 3, 6, no_input, "Remote input corrected at tick 4"));
+    EXPECT_EQ(world.count("log rollback to tick"), 0);
+    EXPECT_EQ(world.steps, 3);
+    EXPECT_EQ(world.bodies["Own"].position[0], position);
+    EXPECT_EQ(engine.stats().rollbacks, 2u);
+}
+
 // The own entity a record tracked is the name to amend: a trafo renames the
 // own ball, and a notice of a tick before it must amend the old name, which
 // is the one the replay of that tick feeds.

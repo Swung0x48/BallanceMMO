@@ -329,35 +329,35 @@ namespace bmmo::physics::savestate {
 
             for (size_t i = 0; i < n_obj; ++i) {
                 const object_record& o = world_.objects[i];
-                const std::string who = "object '" + o.name + "'";
-                if (i > 0 && !(world_.objects[i - 1].name < o.name)) return bad("objects not sorted by name at " + who);
-                if (o.core.unit != -1 && !in(o.core.unit, n_units)) return bad(who + " names unit " + std::to_string(o.core.unit));
-                if (!controllers_ok(o.core.controllers)) return bad(who + " has a bad controller descriptor");
+                const auto who = [&o] { return "object '" + o.name + "'"; };   // built for a failure only (step DCL)
+                if (i > 0 && !(world_.objects[i - 1].name < o.name)) return bad("objects not sorted by name at " + who());
+                if (o.core.unit != -1 && !in(o.core.unit, n_units)) return bad(who() + " names unit " + std::to_string(o.core.unit));
+                if (!controllers_ok(o.core.controllers)) return bad(who() + " has a bad controller descriptor");
                 for (const hull_entry& h : o.hull) {
                     if (h.kind > 1 || (h.kind == 1 && (!in(h.collision, n_coll) || h.side > 1)))
-                        return bad(who + " has a bad hull entry");
+                        return bad(who() + " has a bad hull entry");
                     if (h.kind == 1) {
                         const collision_record& c = world_.collisions[static_cast<size_t>(h.collision)];
                         if (c.objects[h.side] != static_cast<int32_t>(i))
-                            return bad(who + " lists a hull entry of " + coll_name(h.collision) + " side " + std::to_string(h.side));
+                            return bad(who() + " lists a hull entry of " + coll_name(h.collision) + " side " + std::to_string(h.side));
                     }
                 }
-                if (o.ov_node != -1 && !in(o.ov_node, n_nodes)) return bad(who + " names overlap node " + std::to_string(o.ov_node));
+                if (o.ov_node != -1 && !in(o.ov_node, n_nodes)) return bad(who() + " names overlap node " + std::to_string(o.ov_node));
                 for (int32_t c : o.ov_collisions)
                     if (!in(c, n_coll) || world_.collisions[static_cast<size_t>(c)].parent != -1)
-                        return bad(who + " lists a non-root collision in its fvector");
+                        return bad(who() + " lists a non-root collision in its fvector");
                 for (const std::vector<int32_t>* list : {&o.exact_synapses, &o.invalid_synapses}) {
                     for (int32_t s : *list) {
                         if (s < 0 || !in(s >> 1, n_coll) || world_.collisions[static_cast<size_t>(s >> 1)].kind == 2)
-                            return bad(who + " lists a bad mindist synapse");
+                            return bad(who() + " lists a bad mindist synapse");
                         if (world_.collisions[static_cast<size_t>(s >> 1)].synapse[s & 1].object != static_cast<int32_t>(i))
-                            return bad(who + " lists a synapse of another object");
+                            return bad(who() + " lists a synapse of another object");
                     }
                 }
                 for (int32_t s : o.friction_synapses) {
-                    if (s < 0 || !in(s >> 1, n_contacts)) return bad(who + " lists a bad friction synapse");
+                    if (s < 0 || !in(s >> 1, n_contacts)) return bad(who() + " lists a bad friction synapse");
                     if (world_.contacts[static_cast<size_t>(s >> 1)].synapse[s & 1].object != static_cast<int32_t>(i))
-                        return bad(who + " lists a friction synapse of another object");
+                        return bad(who() + " lists a friction synapse of another object");
                 }
             }
 
@@ -431,30 +431,30 @@ namespace bmmo::physics::savestate {
                 std::vector<int> owner(n_contacts, -1);
                 for (size_t s = 0; s < n_sys; ++s) {
                     const friction_system_record& fs = world_.systems[s];
-                    const std::string who = "friction system " + std::to_string(s);
+                    const auto who = [s] { return "friction system " + std::to_string(s); };
                     for (const std::vector<int32_t>* list : {&fs.cores, &fs.movable_cores})
                         for (int32_t o : *list)
-                            if (!in(o, n_obj)) return bad(who + " names a bad core");
+                            if (!in(o, n_obj)) return bad(who() + " names a bad core");
                     for (int32_t d : fs.dists) {
                         if (!in(d, n_contacts) || world_.contacts[static_cast<size_t>(d)].system != static_cast<int32_t>(s)
                             || owner[static_cast<size_t>(d)] != -1)
-                            return bad(who + " lists a bad contact");
+                            return bad(who() + " lists a bad contact");
                         owner[static_cast<size_t>(d)] = static_cast<int>(s);
                     }
                     for (const pair_record& p : fs.pairs) {
-                        if (!in(p.objects[0], n_obj) || !in(p.objects[1], n_obj)) return bad(who + " has a bad pair");
+                        if (!in(p.objects[0], n_obj) || !in(p.objects[1], n_obj)) return bad(who() + " has a bad pair");
                         for (int32_t d : p.dists)
                             if (!in(d, n_contacts) || world_.contacts[static_cast<size_t>(d)].system != static_cast<int32_t>(s))
-                                return bad(who + " has a pair with a bad contact");
+                                return bad(who() + " has a pair with a bad contact");
                     }
                     for (const friction_info_record& info : fs.infos) {
-                        if (!in(info.object, n_obj)) return bad(who + " has a bad friction info");
+                        if (!in(info.object, n_obj)) return bad(who() + " has a bad friction info");
                         for (int32_t d : info.springs)
                             if (!in(d, n_contacts) || world_.contacts[static_cast<size_t>(d)].system != static_cast<int32_t>(s))
-                                return bad(who + " has a friction info with a bad contact");
+                                return bad(who() + " has a friction info with a bad contact");
                     }
                     if (static_cast<size_t>(fs.dist_number) != fs.dists.size())
-                        return bad(who + " counts " + std::to_string(fs.dist_number) + " contacts but lists " + std::to_string(fs.dists.size()));
+                        return bad(who() + " counts " + std::to_string(fs.dist_number) + " contacts but lists " + std::to_string(fs.dists.size()));
                 }
                 for (size_t i = 0; i < n_contacts; ++i)
                     if (owner[i] == -1) return bad("contact " + std::to_string(i) + " is in no system's list");
@@ -867,15 +867,15 @@ namespace bmmo::physics::savestate {
             for (size_t i = 0; i < world_.objects.size(); ++i) {
                 IVP_Real_Object* obj = object_of(static_cast<int32_t>(i));
                 if (!obj) continue;
-                const std::string who = "'" + world_.objects[i].name + "'";
+                const auto who = [this, i] { return "'" + world_.objects[i].name + "'"; };
                 if (IVP_BMMO_State::exact_synapses(*obj) || IVP_BMMO_State::invalid_synapses(*obj))
-                    return fail(who + " keeps mindist synapses after the teardown");
-                if (IVP_BMMO_State::friction_synapses(*obj)) return fail(who + " keeps a friction contact after the teardown");
+                    return fail(who() + " keeps mindist synapses after the teardown");
+                if (IVP_BMMO_State::friction_synapses(*obj)) return fail(who() + " keeps a friction contact after the teardown");
                 if (obj->get_ov_element() && obj->get_ov_element()->collision_fvector.len() != 0)
-                    return fail(who + " keeps collisions after the teardown");
+                    return fail(who() + " keeps collisions after the teardown");
                 IVP_Core* core = core_of(static_cast<int32_t>(i));
                 if (core && !core->physical_unmoveable && core->core_friction_info.for_moveables.moveable_core_friction_info)
-                    return fail(who + " keeps a friction info after the teardown");
+                    return fail(who() + " keeps a friction info after the teardown");
             }
             return true;
         }

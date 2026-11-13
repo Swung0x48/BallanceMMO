@@ -1515,7 +1515,7 @@ namespace bmmo::game {
                         if (block && !sel.is_fed(id) && read_script_root_words(block, size, recorded)
                             && reusable_root(recorded, root_words_of(beh), static_cast<uint32_t>(kFrameFlags))) {
                             const uint64_t imaged = joint_stats().imaged;
-                            const slot_memo_stats memo_before = slot_memo_totals();
+                            const memo_counts memo_before = memo_counts_now();
                             std::vector<uint8_t> copy;
                             uint64_t tails = 0;
                             size_t pos = static_cast<size_t>(block - source->data());
@@ -1565,7 +1565,7 @@ namespace bmmo::game {
                     // structure mismatch walks the root instead.
                     const size_t at = out.size();
                     const uint64_t imaged_before = joint_stats().imaged;
-                    const slot_memo_stats memo_before = slot_memo_totals();
+                    const memo_counts memo_before = memo_counts_now();
                     size_t pos = static_cast<size_t>(block - source->data());
                     const size_t end = pos + size;
                     uint64_t tails = 0;
@@ -1811,8 +1811,17 @@ namespace bmmo::game {
         }
 
         // T3C e3: the slot memo's counters back to `before`, its mismatches and
-        // notes kept (a pass taken back counts nothing).
-        static void restore_memo_counts(const slot_memo_stats& before) {
+        // notes kept (a pass taken back counts nothing).  Step DCL: only the
+        // counters a pass can take back are kept aside (the whole
+        // slot_memo_stats, its notes with it, was copied per attempted root).
+        struct memo_counts {
+            uint64_t walked, hits, miss_none, miss_gen, miss_run, miss_tail, joint, verified;
+        };
+        static memo_counts memo_counts_now() {
+            const slot_memo_stats& now = slot_memo_totals();
+            return {now.walked, now.hits, now.miss_none, now.miss_gen, now.miss_run, now.miss_tail, now.joint, now.verified};
+        }
+        static void restore_memo_counts(const memo_counts& before) {
             slot_memo_stats& now = slot_memo_totals();
             now.walked = before.walked;
             now.hits = before.hits;
@@ -2962,7 +2971,7 @@ namespace bmmo::game {
                     }
                     keys.emplace_back(owner, name);
                     ++r.scripts;
-                    capture_portable_behavior(context, beh, every, out, r, name, owner + "/" + name);
+                    capture_portable_behavior(context, beh, every, out, r, name, r.lists ? owner + "/" + name : std::string());
                 }
                 return true;
             };
@@ -4021,8 +4030,11 @@ namespace bmmo::game {
             return block + ": " + (output ? "output " : "local ") + std::to_string(index)
                  + (parameter && parameter->GetName() ? std::string(" (") + parameter->GetName() + ")" : std::string());
         }
-        static void note(portable_report& r, std::vector<std::string>& list, const std::string& what) {
-            if (r.lists) list.push_back(what);
+        // `what` makes the entry's text: called only when the lists are kept
+        // (step DCL: a capture without a report built every note to drop it).
+        template <class Text>
+        static void note(portable_report& r, std::vector<std::string>& list, Text&& what) {
+            if (r.lists) list.push_back(what());
         }
 
         static void capture_portable_parameter(CKContext* context, CKParameter* parameter, std::vector<uint8_t>& out,
@@ -4045,12 +4057,12 @@ namespace bmmo::game {
                     ++r.objects;
                     if (owner.find("BMMO") != std::string::npos || name.find("BMMO") != std::string::npos) {
                         ++r.server_private;
-                        note(r, r.server_private_list, parameter_place(block, output, index, parameter) + " -> " + owner + "/" + name);
+                        note(r, r.server_private_list, [&] { return parameter_place(block, output, index, parameter) + " -> " + owner + "/" + name; });
                     }
                     int matches = 0;
                     if (r.lookups && (find_script(context, owner, name, &matches) != script || matches != 1)) {
                         ++r.ambiguous;
-                        note(r, r.ambiguous_list, parameter_place(block, output, index, parameter) + " -> script " + owner + "/" + name);
+                        note(r, r.ambiguous_list, [&] { return parameter_place(block, output, index, parameter) + " -> script " + owner + "/" + name; });
                     }
                     return;
                 }
@@ -4060,15 +4072,15 @@ namespace bmmo::game {
                 ++r.objects;
                 if (object && name.empty()) {
                     ++r.unnamed;
-                    note(r, r.unnamed_list, parameter_place(block, output, index, parameter));
+                    note(r, r.unnamed_list, [&] { return parameter_place(block, output, index, parameter); });
                 } else if (object) {
                     if (name.find("BMMO") != std::string::npos) {
                         ++r.server_private;
-                        note(r, r.server_private_list, parameter_place(block, output, index, parameter) + " -> " + name);
+                        note(r, r.server_private_list, [&] { return parameter_place(block, output, index, parameter) + " -> " + name; });
                     }
                     if (r.lookups && find_by_name(context, name, parameter_class, object->GetClassID()) != object) {   // null unless unique
                         ++r.ambiguous;
-                        note(r, r.ambiguous_list, parameter_place(block, output, index, parameter) + " -> " + name);
+                        note(r, r.ambiguous_list, [&] { return parameter_place(block, output, index, parameter) + " -> " + name; });
                     }
                 }
                 return;
@@ -4082,14 +4094,14 @@ namespace bmmo::game {
                     put_str(out, name);
                     ++r.registry;
                     if (r.lists)
-                        note(r, r.registry_list, parameter_place(block, output, index, parameter) + (kind == 1 ? " message " : " attribute ")
-                                                 + std::to_string(value) + " (" + name + ")");
+                        note(r, r.registry_list, [&] { return parameter_place(block, output, index, parameter) + (kind == 1 ? " message " : " attribute ")
+                                                 + std::to_string(value) + " (" + name + ")"; });
                     return;
                 }
             }
             if (const char* what = index_like_type(context, parameter)) {
                 ++r.index_like;
-                note(r, r.index_like_list, parameter_place(block, output, index, parameter) + " " + what);
+                note(r, r.index_like_list, [&] { return parameter_place(block, output, index, parameter) + " " + what; });
             }
             put_u8(out, 1);
             put_u32(out, static_cast<uint32_t>(size));
@@ -4203,13 +4215,13 @@ namespace bmmo::game {
                 } else if (matches > 1) {
                     emit(local_value);
                     ++r.ambiguous;
-                    note(r, r.ambiguous_list, parameter_place(block, output, index, local) + " -> " + name + " ("
-                                              + std::to_string(matches) + " objects)");
+                    note(r, r.ambiguous_list, [&] { return parameter_place(block, output, index, local) + " -> " + name + " ("
+                                              + std::to_string(matches) + " objects)"; });
                 } else {
                     emit(local_value);
                     ++r.unportable;
-                    note(r, r.unportable_list, parameter_place(block, output, index, local) + " -> "
-                                               + (name.empty() ? std::string("an object without a name") : name));
+                    note(r, r.unportable_list, [&] { return parameter_place(block, output, index, local) + " -> "
+                                               + (name.empty() ? std::string("an object without a name") : name); });
                 }
                 return true;
             }
@@ -4229,12 +4241,12 @@ namespace bmmo::game {
                 } else if (matches > 1) {
                     emit(local_value);
                     ++r.ambiguous;
-                    note(r, r.ambiguous_list, parameter_place(block, output, index, local) + " -> script " + owner + "/" + name
-                                              + " (" + std::to_string(matches) + " scripts)");
+                    note(r, r.ambiguous_list, [&] { return parameter_place(block, output, index, local) + " -> script " + owner + "/" + name
+                                              + " (" + std::to_string(matches) + " scripts)"; });
                 } else {
                     emit(local_value);
                     ++r.unportable;
-                    note(r, r.unportable_list, parameter_place(block, output, index, local) + " -> script " + owner + "/" + name);
+                    note(r, r.unportable_list, [&] { return parameter_place(block, output, index, local) + " -> script " + owner + "/" + name; });
                 }
                 return true;
             }
@@ -4250,7 +4262,7 @@ namespace bmmo::game {
                 } else {
                     emit(local_value);
                     ++r.unportable;
-                    note(r, r.unportable_list, parameter_place(block, output, index, local) + (registry == 1 ? " -> message " : " -> attribute ") + name);
+                    note(r, r.unportable_list, [&] { return parameter_place(block, output, index, local) + (registry == 1 ? " -> message " : " -> attribute ") + name; });
                 }
                 return true;
             }

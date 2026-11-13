@@ -135,6 +135,10 @@ namespace bmmo::session {
         // rollbacks (headless: describe_movable_objects; design 2.4 keeps
         // such diagnostics in the host).  Empty: the line is not written.
         std::function<std::string()> describe_movables;
+        // Whether the engine's log (the binding's rollback_world::log) still
+        // writes a line: false past the retail host's line cap; unset:
+        // always.  A rewind's reason text is built only then (step DCL).
+        std::function<bool()> engine_log_open;
     };
 
     // The host's own counters the status and window: lines print at their

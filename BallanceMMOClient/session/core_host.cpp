@@ -1653,6 +1653,7 @@ namespace {
         for (const auto& [player, remote]: core.remotes()) {
             if (!remote.physicalized || !remote.birth_known || remote.born_tick == 0 || remote.entity.empty()) continue;
             auto& seen = host.mirror_births[{player, remote.born_tick}];
+            if (seen.lines > kLinesPerBirth) continue;   // its cap said once (step DCL: before the history lookups)
             bool changed = false;
             double now[2][3] = {};
             bool have[2] = {false, false};
@@ -1663,7 +1664,7 @@ namespace {
                 for (int c = 0; c < 3; ++c) now[k][c] = state.position[c];
                 if (!seen.have[k] || std::memcmp(seen.at[k], now[k], sizeof(now[k])) != 0) changed = true;
             }
-            if (!changed || seen.lines > kLinesPerBirth) continue;
+            if (!changed) continue;
             if (seen.lines++ == kLinesPerBirth) {
                 // The last line logged is no longer what the history keeps:
                 // said once, so a reader can set this birth aside.
@@ -2371,6 +2372,7 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     caps.placement = true;
     // A previous session's sets, should its end have been skipped.
     trafo_teardown(physics_view_, m_bml->GetCKContext(), logger_);
+    physics_view_.set_event_log_diagnostics(true);   // step DCL: as its end would have left it
     try {
         host.core.reset();
         host.core = std::make_unique<bs::session_client_core>(core_host_platform(), caps);
@@ -3953,6 +3955,10 @@ std::string BallanceMMOClient::core_host_anchor_finish(const std::string& step_r
     // The world stands still from here until the tick base arrives.
     fixed_tick_.set_hold(true);
     physics_view_.drain_event_log();   // install the listener, discard history
+    // Step DCL: the log's diagnostic entries (a body's birth state, revived,
+    // frozen, force, constraint) only under trace - drain_body_events logs
+    // them then and reads none otherwise; back on at the session's end.
+    physics_view_.set_event_log_diagnostics(host.core && host.core->config.trace);
     read_ball_forces(m_bml);
     // The script replay (game/script_replay.hpp): the mechanism scripts a
     // replayed tick re-runs, and the force blocks they drive.
@@ -4478,6 +4484,7 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason, bool leve
         else host.core->settle_script_diffs();
     }
     core_host_hold_unfreeze("the session ended");   // FULL step AHN: never left frozen
+    physics_view_.set_event_log_diagnostics(true);   // step DCL: the default outside a session
     // Step SPL: a placement still being made (the session ended between two
     // of its slices) is undone whole; the panel goes.
     if (placement_host.placement.in_progress()) {
@@ -5569,6 +5576,10 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         o.log = [this](const std::string& text) {
             if (host.line_logs++ < 200 || diag_trace_plan()) logger_->Info("Physics session: %s", text.c_str());
         };
+        // Step DCL: past the cap the engine builds no per-rewind line (the
+        // count stays at the cap; the write-failure lines' own cap of 16 is
+        // past either way).
+        o.log_open = [] { return host.line_logs < 200 || diag_trace_plan(); };
         // Inside the replay (an explosion's referential is placed); the
         // rewinds' end re-issues with inside = false (keep_live_cells).
         w.replay_activation = [this](uint32_t tick) { core_host_replay_activation(tick, true); };
@@ -5803,6 +5814,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         return core_tutorial_exit.activate(m_bml->GetCKContext(), error);
     };
     p.hooks.window = [this](const std::string& text) { logger_->Info("%s", text.c_str()); };
+    p.hooks.engine_log_open = [] { return host.line_logs < 200 || diag_trace_plan(); };   // step DCL: the binding's o.log_open
     // FULL step SAXH (protocol 24): the start handshake's lines go to the
     // player, in the game's own message area (the user, 2026-10-31: the wait
     // must not look like a hang); the core has logged them already.
@@ -6396,28 +6408,6 @@ bool BallanceMMOClient::core_host_on_physicalize(CK3dEntity* target, CKBOOL fixe
     if (!core_session_running() || !target) return false;
     auto& core = *host.core;
     const uint32_t tick = core.current_tick() + 1;   // this frame's physics step is still ahead
-    bs::ball_recipe r;
-    r.fixed = fixed != 0;
-    r.friction = friction;
-    r.elasticity = elasticity;
-    r.mass = mass;
-    r.start_frozen = startFrozen != 0;
-    r.enable_collision = enableColl != 0;
-    r.calc_mass_center = calcMassCenter != 0;
-    r.linear_damp = linearDamp;
-    r.rot_damp = rotDamp;
-    r.mass_center[0] = massCenter.x; r.mass_center[1] = massCenter.y; r.mass_center[2] = massCenter.z;
-    r.collision_surface = collSurface ? collSurface : "";
-    for (int i = 0; i < convexCnt && convexMesh; ++i)
-        r.convex_meshes.push_back(convexMesh[i] && convexMesh[i]->GetName() ? convexMesh[i]->GetName() : "");
-    for (int i = 0; i < ballCnt; ++i) {
-        bs::ball_recipe::sphere sphere;
-        if (ballCenter) { sphere.center[0] = ballCenter[i].x; sphere.center[1] = ballCenter[i].y; sphere.center[2] = ballCenter[i].z; }
-        sphere.radius = ballRadius ? ballRadius[i] : 0.0f;
-        r.balls.push_back(sphere);
-    }
-    for (int i = 0; i < concaveCnt && concaveMesh; ++i)
-        r.concave_meshes.push_back(concaveMesh[i] && concaveMesh[i]->GetName() ? concaveMesh[i]->GetName() : "");
     const std::string name = target->GetName() ? target->GetName() : "";
     // FULL step AUD3 (the user's (b), decision 59): the birth log is not fed
     // from here any more - the bridge event log's recipe line of the body
@@ -6444,7 +6434,31 @@ bool BallanceMMOClient::core_host_on_physicalize(CK3dEntity* target, CKBOOL fixe
     report.entity = name;
     report.tick = tick;
     report.ball_type = ball_row_of(m_bml, name);
-    report.recipe = r;
+    // The recipe from the block's arguments: the own ball's report only (step
+    // DCL: built for every Physicalize of the session before, and read for
+    // none of the others).
+    bs::ball_recipe& r = report.recipe;
+    r.fixed = fixed != 0;
+    r.friction = friction;
+    r.elasticity = elasticity;
+    r.mass = mass;
+    r.start_frozen = startFrozen != 0;
+    r.enable_collision = enableColl != 0;
+    r.calc_mass_center = calcMassCenter != 0;
+    r.linear_damp = linearDamp;
+    r.rot_damp = rotDamp;
+    r.mass_center[0] = massCenter.x; r.mass_center[1] = massCenter.y; r.mass_center[2] = massCenter.z;
+    r.collision_surface = collSurface ? collSurface : "";
+    for (int i = 0; i < convexCnt && convexMesh; ++i)
+        r.convex_meshes.push_back(convexMesh[i] && convexMesh[i]->GetName() ? convexMesh[i]->GetName() : "");
+    for (int i = 0; i < ballCnt; ++i) {
+        bs::ball_recipe::sphere sphere;
+        if (ballCenter) { sphere.center[0] = ballCenter[i].x; sphere.center[1] = ballCenter[i].y; sphere.center[2] = ballCenter[i].z; }
+        sphere.radius = ballRadius ? ballRadius[i] : 0.0f;
+        r.balls.push_back(sphere);
+    }
+    for (int i = 0; i < concaveCnt && concaveMesh; ++i)
+        r.concave_meshes.push_back(concaveMesh[i] && concaveMesh[i]->GetName() ? concaveMesh[i]->GetName() : "");
     report.pose.captured = true;   // taken before the body exists (design 2.3 host_hooks)
     const VxMatrix& world = target->GetWorldMatrix();
     for (int k = 0; k < 3; ++k) report.pose.position[k] = world[3][k];

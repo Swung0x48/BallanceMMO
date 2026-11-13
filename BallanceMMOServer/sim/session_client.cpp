@@ -1243,6 +1243,11 @@ namespace {
             for (int i = 0; i < args_.boot_ticks; ++i)
                 if (!engine_->tick(error)) { logf("boot tick: %s", error.c_str()); return false; }
             bmmo::physics::drain_event_log(engine_->physics());
+            // Step DCL: the event log's diagnostic entries (birth, revived,
+            // frozen, force, constraint) are read by nothing here
+            // (drain_body_events takes the recipes, creations, deletions and
+            // script wake-ups): recorded only under --trace.
+            bmmo::physics::set_event_log_diagnostics(args_.trace);
             return true;
         }
 
@@ -4997,10 +5002,17 @@ namespace {
                         bmmo::physics::outside_controllers::controller_names(outside_force_blocks_), true, 3, true);
                 return bmmo::session::savestate_replay_difference{d.where, d.named};
             };
-            // BMMO_REPLAY_DIFF=off drops the diagnostic: a timing run measures
-            // frames the mod has, and the first eight diffs cost 10-20 ms each
-            // (sparse capture's verify then compares the blobs byte for byte).
-            if (const char* diff = std::getenv("BMMO_REPLAY_DIFF"); diff && std::strcmp(diff, "off") == 0) world.diff_savestate = nullptr;
+            // The end-of-replay diff is off unless BMMO_REPLAY_DIFF=on (step
+            // DCL; on when unset before it): a run measures frames the mod
+            // has, the first eight diffs cost 10-20 ms each, and every rewind
+            // copied the live record's savestate for it while fewer than
+            // eight were logged - nothing but the 'savestate replay:' lines
+            // and the outside= counters reads it.  BMMO_REPLAY_DIFF=off also
+            // drops the binding from sparse capture's verify, which then
+            // compares the blobs byte for byte.
+            const char* replay_diff = std::getenv("BMMO_REPLAY_DIFF");
+            world.diff_replays = replay_diff && std::strcmp(replay_diff, "on") == 0;
+            if (replay_diff && std::strcmp(replay_diff, "off") == 0) world.diff_savestate = nullptr;
             // The clock before a restore, for the report line above (--trace).
             if (args_.trace && world.set_savestate) {
                 const auto inner = world.set_savestate;

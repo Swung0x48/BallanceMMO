@@ -83,6 +83,7 @@ namespace bmmo::session {
         std::function<void(bool ok, const std::string& error, const savestate_outcome& outcome)> on_savestate_restored;
         std::function<void(const std::string& error)> on_write_failed;   // a body, recheck or clock write the backend refused
         std::function<void(const std::string&)> log;
+        std::function<bool()> log_open;   // rollback_world::log_open
         std::function<void(const rollback_correction&)> on_correction;
     };
 
@@ -331,6 +332,7 @@ namespace bmmo::session {
             }
         }
         world.log = o.log;
+        world.log_open = o.log_open;
         world.on_correction = o.on_correction;
         return world;
     }

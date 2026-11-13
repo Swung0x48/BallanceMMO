@@ -3332,3 +3332,150 @@ game thread classifies them a frame or two later (not tried); the post-exit drop
 the overflow-forced paths, `rewound` and `unclassified` above 0, outside the unit test: every run's forced,
 rewound and unclassified are 0 and its queue never held more than one.
 A resync's settle with a diff queued, and a trafo set retired while one names it. The wire check.
+
+## Built (production diagnostics that nothing reads leave the frame, step DCL, 2026-11-13)
+
+**What it costs today.** The audit of `4cf106ae` (workflow `wf_6063dcb7-3fd`, read only) listed work the shipped
+builds do on every frame or every rewind whose result no simulation, decision or wire byte reads. The largest is the
+legacy corrector's pose histories, measured at 90-114 us of every frame on retail E-cores (S0 census, row `corr`,
+`.local-tools/work/S0/report_s1.txt`). The rest are strings built before a cap or a switch is checked, and copies
+kept for a diagnostic that is off. This step cuts the ones that lose nothing. Every decision, the K7 recorder, the
+TICK hash, the FINAL verdict and the status line's counters stay as they were (the exceptions are named below).
+
+**The cuts.**
+1. *The legacy ladder's pose histories* (`client_core_frame.cpp` `post_step`). The own ball's, each tracked
+   mechanism's and each mirror's `body_corrector::record` (with a `body_state` read per mechanism and mirror) and
+   the blend loop run only with `config.rollback` off. Their one reader is the compare in `on_snapshot`
+   (`client_core_messages.cpp`), which runs only on the rollback-off ladder; `blending()` is set only by that
+   compare, and `status_text` reads only the stats it writes (`remote_corr=`, `mech_max_err=`, `corrections:`,
+   0 with rollback on either way). `config.rollback` is fixed for a session (headless `--no-rollback`; retail
+   `session rollback on|off`, latched at the session's start).
+2. *The restore's record check* (`physics_savestate_restore.cpp` `restorer::validate` and the teardown check):
+   the `who` name of every object and friction system is a lambda called only by a failing check. Same text.
+3. *The reuse path's counter save* (`script_replay.hpp`): a root's copy attempt kept the whole `slot_memo_stats`
+   (about 270 bytes and its `notes` vector) aside to take its counts back on the fallback. It now keeps only the
+   eight counters `restore_memo_counts` writes (`memo_counts`). The save has to come before the attempt, so it
+   stays on every attempt; it is a 64-byte copy now. Counters and lines are the same.
+4. *The live scripts of a script-replayed rewind* (`rollback.hpp` `restore_and_replay`). The engine copied the
+   live record's script blob at the restore, for the end-of-replay compare. The compare now reads the record
+   itself at the last replayed tick (`recorded`, which is the live record of `current_tick` until the replayed
+   state replaces it a few lines below) and moves its blob into SDF's queue when they differ. Nothing writes a
+   record's scripts between the restore and that point (the writers are `capture` into a new state and the
+   anchor's resync blob). Predicting "recorded whole" at the restore was not used: `capture_replayed` decides it
+   after the capture (a body-set change, a reappearing name, verify).
+5. *`BMMO_REPLAY_DIFF`* (`session_client.cpp`, `rollback_world::diff_replays`): the headless end-of-replay
+   savestate text diff runs only with `BMMO_REPLAY_DIFF=on` (it ran whenever the switch was not `off` before).
+   Unset, the `diff_savestate` binding stays for sparse capture's verify (the semantic diff, as before) and
+   `diff_replays` is false: a rewind neither diffs nor copies the live record's savestate (the copy was made on
+   every rewind while fewer than eight were logged). `BMMO_REPLAY_DIFF=off` drops the binding as before (the
+   verify then compares the blobs byte for byte, as every L6 run since PERF did). The end-of-replay diff's only
+   outputs are the `savestate replay:` lines and the `outside=` section (`savestate_replay_outside_controllers`).
+6. *Lines past a log cap.* `rollback_world::log_open` (optional; the binding's `log_open`): false once the host's
+   `log` drops what it is given. The retail host's is `line_logs < 200 || BMMO_TRACE_PLAN`; the headless hosts set
+   none (they log every line). The per-rewind `rollback to tick ... re-simulated` line is built only while it is
+   open, and the input rewind's reason (`client_core_frame.cpp`, read only by the engine's log lines) is built
+   only while `session_hooks::engine_log_open` says so (retail: the same predicate). Past the cap the count stays
+   at 200 instead of growing; the write-failure lines' own cap (16, on the same count) is past either way. The
+   retail mirror-birth log (`core_host.cpp` `log_mirror_births`) checks its per-birth cap before the two history
+   lookups. Text identical while under the caps.
+7. *The bridge event log's diagnostic entries* (`physics_state.cpp`, bridge v39 `event_log_diagnostics`,
+   `physics_state.hpp` `set_event_log_diagnostics`): a body's birth state (`birth`, with its surface hash),
+   `revived`, `frozen`, `force` and `constraint` are recorded only while on. On by default (SimTool and the
+   client's automation print the whole log). The headless client sets it to `--trace` at boot; the retail host
+   to the session's `config.trace` at the anchor and back on at its end and at the next session's start (an end
+   that was skipped). The client hosts read none of these
+   entries unless tracing (`drain_body_events` takes `recipe`, `created`, `deleted`, `script_wakeup`; retail logs
+   `birth`, `force`, `constraint` under trace). The server's world drains the log only under `--trace`, so its
+   listener fills to its 256 KB bound once and records nothing more: left as it is.
+8. *Server strings* (`session_runner.cpp`): `observe_lateness`'s `[session N] S1` prefix (every tick) is built only
+   for a line; `observe_quorum`'s arrival trace (every tick) only under `--arrival-trace`. `capture_portable`
+   (`script_replay.hpp`, the server's resync and join states, called without a report) built every report note
+   and every script's block path to drop them: `note` takes the text as a lambda, called only when the lists are
+   kept, and the root's path is built only then.
+9. *The retail Physicalize recipe* (`core_host.cpp` `core_host_on_physicalize`): built from the block's arguments
+   for every Physicalize of the session and read only by the own ball's birth report; it is now built there,
+   into the report.
+
+**Counters that move.** None of the status line's counters changes for these cuts except through item 5. With the
+diff off, the fast LBM's clients no longer spend 10-20 ms on each of the first eight savestate diffs, so LVR's
+wall-clock gate sees fewer heavy frames: `live=` light 67 in `sdq1`, 7 as shipped (`dcl1`), 80 with
+`BMMO_REPLAY_DIFF=on` (`dcl1on`; 71 in `sdf2d`, two runs of one tree differ that much). `ccache=` hits follow
+`live=` (a light live record serves no cache). The `savestate replay:` lines (105 in the fast LBM) and the
+`outside=` section (0 in every run here) are gone unless `BMMO_REPLAY_DIFF=on`; `savestate_replay_mismatches` and
+`savestate_replay_outside_controllers` only ever counted the removed work. Retail's per-rewind lines past its cap
+are no longer built, and its `line_logs` stops at 200. The headless client's end-of-session `lookup_cache:` line
+counts the removed `body_state` reads no more (L6 client 0: hits 2 971 703 -> 2 796 500, fills equal). Scripts:
+`.local-tools/work/S3/ls3_cmp.py` and `SPX/deferral/judge.sh` count `savestate replay:` lines and need
+`BMMO_REPLAY_DIFF=on` to count what they did; no script in `scripts/` sets the switch or reads those lines.
+
+**Results** (`.local-tools/work/DCL`: `run_base.sh`, `run_dcl1.sh`, `run_l6.sh`, `run_norb.sh`, `run_gate.sh`,
+`cmp_lbm.sh`, `status_all.py`, `subfields.py`, `frames.py`; HEAD `29adc904` plus this step).
+- unit tests: 859/859. New: `AClosedLogTakesNoRewindLine` (a closed `log_open` takes the per-rewind line, the
+  replay is the same). `OneCycleMakesTheTablesCallsInOrder` no longer expects the mirror's `body_state` read.
+- builds: x64 BUILD-OK; x86 client CLIENT-BUILD-OK; the Arch server ARCH-BUILD-OK.
+- fast LBM as shipped (`dcl1`) and with `BMMO_REPLAY_DIFF=on` (`dcl1on`): 38/38 twins FINAL exact each, the rows
+  equal to `sdq1`'s. Over the 140 clients: `mism` 0, rb 1 711, resim 37 377, `scr=` 0 / 105 with the 105 lines
+  equal, `sdiff=` 105/105/0/0 max 1, every `mismatches=` 0, all equal to `sdq1`. The fields that differ are the
+  wall-clock ones (`t_cap`, `t_rep`, `t_rest`, `t_max`, the ms of `whole`, `light` and `lifetime`) and `live=` /
+  `ccache=` (above), as between `sdq1` and `sdf2d`. `dcl1on`'s 105 `savestate replay:` lines equal `sdq1`'s. Every
+  client journal equal past the build id to `sdq1`'s; the 12 Level 13 server journals differ, as between any two
+  runs since LVR.
+- L6 re-drive as shipped (`pf_dcl1_1`) and inline (`pf_dcli_1`): every `mismatches=` and `mism` 0, rb 72 749,
+  resim 663 877, `scr=` 24 / 743 and the 128 lines, `sdiff=` 767/767/0/0 max 1 (deferred), all equal to
+  `pf_sdq1_1`; the 14 journals equal to `pf_sdq1_1`'s. With `BMMO_LIVE_RECORD_MS=0` (`pf_dclz_1` against HEAD's
+  `pf_dclhz_1`, run today: no MS=0 run of HEAD as shipped existed): every counter equal (resim 677 038), only the
+  wall-clock fields differ; journals equal to `pf_sdq1_1`'s.
+- End-of-session report lines (`slot_memo:`, `script_reuse:`, `membership:`, links, the union's `lookups:` and
+  `refs=`): with `BMMO_LIVE_RECORD_MS=0` every line equal client by client but `lookup_cache:` (hits only); as
+  shipped `slot_memo:` / `script_reuse:` also differ where `live=` does, as between two runs of HEAD.
+- Sparse verify (item 5's other reader): OBJB's verify recipe on a0_first, a4_swing_seed0 and a6m. The first cut
+  dropped the binding when the switch was unset (`dclv`: the byte compare, today's `BMMO_REPLAY_DIFF=off` path);
+  with `BMMO_REPLAY_DIFF=on` (`dclvon`) and on the final tree with the switch unset (`dclfv`: the semantic diff, no
+  end-of-replay diff): 6/6 twins FINAL exact each, 95 anchors compared, 0 differing in all three, every
+  `mismatches=` 0, `refs=` differing 0; `dclfv`'s `sv=` and `verify=` fields equal `dclv`'s and `dclvon`'s client
+  by client, and it logs no `savestate replay:` line (`dclvon` 180).
+- Server (item 8): the 2 557 `S1` lines of the 38 arms' server logs (lateness summaries, raise / lower, quorum,
+  patience, reset, lead-ack) equal to `sdq1`'s in count and shape, the numbers aside (two runs of HEAD differ in
+  the numbers too); no run had `--arrival-trace` on.
+- g++ (WSL Arch): `linux_sim_syntax.sh` and `linux_test_syntax.sh` ok, `client_core_frame.cpp` and
+  `client_core.cpp` ok with the headless client's flags (the physics sources cannot be checked with them: no
+  `bmmo_build_id.h`, IVP's protected members).
+- Rollback off (`--no-rollback`, A0, `dcl_norb` and the final tree's `dclf_norb` against HEAD's `dclh_norb`):
+  every status field equal, the corrector's compares matched (`unmatched=0`; client 3 compared 3, hard 2,
+  mechanisms blended 3, hard 15), the 33 correction and 162 resync lines equal client by client.
+- Frame time on the dev machine, client 0 of the L6 re-drive (13 clients on one box, 0.1 ms buckets), p50 / p99 /
+  max: `pf_sdq1_1` 2.3 / 7.5 / 11.2 ms, HEAD today `pf_dclh_1` 2.4 / 7.6 / 11.4, `pf_dcl1_1` 2.3 / 7.4 / 11.4.
+  Within the run-to-run spread: these runs already had `BMMO_REPLAY_DIFF=off`, and the histories' cost on a
+  P-core is below a bucket.
+- The review (no defect) and its points taken: the verify keeps the semantic diff when the switch is unset
+  (`diff_replays`, item 5); the retail host turns the event log's diagnostics back on at `core_host_start` too, for
+  a previous session whose end was skipped (item 7); the three legacy record blocks sit in one `if
+  (!config.rollback)` (item 1). Reruns on the final tree (`.local-tools/work/DCL/fix/run_fix.sh`, `ssr_lines.py`,
+  `live_sum.py`): fast LBM as shipped (`dclf1`) 38/38 twins FINAL exact, rows equal to `sdq1`'s, over the 140
+  clients `mism` 0, rb 1 711, resim 37 377, `scr=` 0 / 105 with the 105 lines equal, `sdiff=` 105/105/0/0 max 1,
+  every `mismatches=` 0, 0 `savestate replay:` lines, the status fields that differ from `dcl1`'s only the
+  wall-clock ones and `live=` / `ccache=` (`live=` light 6, `dcl1` 7), every client journal equal past the build
+  id to `sdq1`'s (the 12 Level 13 server journals differ, as before); with `BMMO_REPLAY_DIFF=on` (`dclf1on`)
+  38/38 FINAL exact, the same counters, its 105 `savestate replay:` lines equal to `sdq1`'s client log by client
+  log (`live=` light 87); the L6 re-drive as shipped (`pf_dclf1_1`): every `mismatches=` and `mism` 0, rb 72 749,
+  resim 663 877, `scr=` 24 / 743 and the 128 lines, `sdiff=` 767/767/0/0 max 1, all equal to `pf_sdq1_1`, the 14
+  journals equal to `pf_sdq1_1`'s past the build id, the status fields that differ from `pf_dcl1_1`'s only the
+  wall-clock ones and `live=`.
+- The gate on the final tree (`.local-tools/work/DCL/gate/run_gate.sh`, `gate.log`; the product files' hashes
+  equal before and after it and to the reruns'): x64 BUILD-OK, 859/859, x86 CLIENT-BUILD-OK, the Arch server
+  ARCH-BUILD-OK at the x86 build's id (the server logs' id matches). Retail at K = 20, L12 and L11 at human key
+  rates (`dclg_l12_h_150_1`, `dclg_ctl_h_150_1` against `r6on`): 0 mismatches (22 and 18 `mismatches=0` lines),
+  FINAL rows bit-equal (L12 ball 2/2, body 14/14 on both clients; L11 ball 2/2, body 23/23, piece 32/32 on both),
+  `refs=` every fault 0 (L12 37 roots, 8 writes; L11 42 roots, 13 + 5 writes), `sdiff=` queued equal to classified
+  on every client's last status line (2/2, 4/4, 9/9, 10/10; forced, unclassified, rewound 0, max 1). The per-rewind
+  lines stayed under the cap (22, 57, 62, 92 per client). The builder's first gate run is kept as
+  `scripts/retail/dclb_*` and `DCL/gate_builder`.
+
+Bridge v39: the x86 client and its physics_RT bridge ship together (the client asks for exactly v39).
+
+**Not exercised:** the retail census row `corr` (not attempted; with rollback on the block no longer runs); retail
+past its 200-line cap, so the core's empty-reason branch ran nowhere (the engine half: the unit test); the K7 clock
+sites (unchanged by inspection: no clock read added, moved or removed; no capture replayed); the event log's diagnostics switched on retail under trace; a failing
+record check's text (no test makes one); the 8845HS timing; the wire check. Added by the review's fixes: the
+`core_host_start` reset after a session whose end was skipped (no run skips an end); a unit test of
+`diff_replays` false with the binding present (the fast LBM `dclf1` runs that case: 0 lines, every counter equal).

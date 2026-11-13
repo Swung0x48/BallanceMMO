@@ -6911,9 +6911,11 @@ namespace {
         from = fake.calls.size();
         ASSERT_TRUE(core.post_step(true));
         {
+            // Step DCL: no body_state read for the mirror's legacy pose
+            // history (rollback on: nothing reads it).
             const std::vector<std::string> expected = {
                 "unforce_own:Ball_Wood", "record_pending_activation:127", "discover_navigation:126", "own_ball",
-                "own_body_upkeep:Ball_Wood:body", "body_state:Ball_0_BMMO_4", "drain_body_events:126",
+                "own_body_upkeep:Ball_Wood:body", "drain_body_events:126",
                 "reportable_wakeup:P_Box", "reportable_wakeup:P_Box", "observe_input", "own_camera_rows:1.000000", "own_driven_entity",
                 "movable_bodies", "note_script_resets:126", "bind_world", "hook:after_record:126", "send:2",
                 "poll_sector:126", "drive:Ball_0_BMMO_4:6", "bind_world", "hook:after_amend:126",

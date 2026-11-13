@@ -1191,6 +1191,11 @@ namespace bmmo::physics {
         api_->event_log_keep_muted_recipes(manager_, keep ? 1 : 0);
     }
 
+    void physics_view::set_event_log_diagnostics(bool on) const {
+        if (!available() || api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->event_log_diagnostics) return;
+        api_->event_log_diagnostics(manager_, on ? 1 : 0);
+    }
+
     std::string physics_view::drain_muted_recipes() const {
         if (!available() || api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->drain_muted_recipes) return {};
         const int32_t size = api_->drain_muted_recipes(manager_, nullptr, 0);   // measured, not drained

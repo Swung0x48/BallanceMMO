@@ -142,7 +142,11 @@ namespace bmmo::session {
             return recorded_input_at(name, tick, out);
         };
         const scope_guard keep_cells = keep_live_cells();
-        const std::string reason = own ? "own input substituted at tick " + std::to_string(anchor)
+        // Read only by the engine's log lines (step DCL: not built past the
+        // host's log cap).
+        const bool logged = !platform_.hooks.engine_log_open || platform_.hooks.engine_log_open();
+        const std::string reason = !logged ? std::string()
+                                 : own ? "own input substituted at tick " + std::to_string(anchor)
                                        : entity + " input corrected at tick " + std::to_string(anchor);
         if (has_own) s.own_replay_pacer_.ran();
         s.remote_replay_pacer_.ran();
@@ -907,37 +911,40 @@ namespace bmmo::session {
         const bool physicalized = own.physicalized;
         if (!ball_name.empty()) s.own_ball_entities_.insert(ball_name);   // is_ball (step P)
         platform_.own_body_upkeep(own);
-        if (physicalized) {
-            bmmo::session::ball_pose pose;
-            pose.tick = tick;
-            for (int k = 0; k < 3; ++k) { pose.position[k] = own.state.position[k]; pose.linear[k] = own.state.linear[k]; pose.angular[k] = own.state.angular[k]; }
-            for (int k = 0; k < 4; ++k) pose.rotation[k] = own.state.rotation[k];
-            s.corrector_.record(pose);
+        // The legacy ladder's pose histories (the own ball, the mechanisms,
+        // the mirrors): read only by its compare (on_snapshot), which runs
+        // with the rollback engine off - with it on, the engine keeps its own
+        // records and nothing reads these (step DCL).
+        if (!config.rollback) {
+            if (physicalized) {
+                bmmo::session::ball_pose pose;
+                pose.tick = tick;
+                for (int k = 0; k < 3; ++k) { pose.position[k] = own.state.position[k]; pose.linear[k] = own.state.linear[k]; pose.angular[k] = own.state.angular[k]; }
+                for (int k = 0; k < 4; ++k) pose.rotation[k] = own.state.rotation[k];
+                s.corrector_.record(pose);
+            }
+            for (const auto& name: s.mechanism_tracking_.tracked_entities()) {
+                bmmo_physics_body_state local{};
+                if (!platform_.body_state(name, local)) continue;
+                bmmo::session::ball_pose pose;
+                pose.tick = tick;
+                for (int k = 0; k < 3; ++k) { pose.position[k] = local.position[k]; pose.linear[k] = local.linear[k]; pose.angular[k] = local.angular[k]; }
+                for (int k = 0; k < 4; ++k) pose.rotation[k] = local.rotation[k];
+                s.mechanism_correctors_[name].record(pose);
+            }
+            for (auto& [id, remote]: s.remotes_) {
+                if (!remote.physicalized || !remote.navigation) continue;
+                bmmo_physics_body_state local{};
+                if (!platform_.body_state(remote.entity, local)) continue;
+                bmmo::session::ball_pose pose;
+                pose.tick = tick;
+                for (int k = 0; k < 3; ++k) { pose.position[k] = local.position[k]; pose.linear[k] = local.linear[k]; pose.angular[k] = local.angular[k]; }
+                for (int k = 0; k < 4; ++k) pose.rotation[k] = local.rotation[k];
+                remote.corrector.record(pose);
+            }
         }
         s.own_physicalized_ = physicalized;
         s.own_body_entity_ = physicalized ? ball_name : std::string();
-
-        // Mechanism states after this tick (the legacy blending path;
-        // with the rollback engine on, the engine keeps its own records).
-        for (const auto& name: s.mechanism_tracking_.tracked_entities()) {
-            bmmo_physics_body_state local{};
-            if (!platform_.body_state(name, local)) continue;
-            bmmo::session::ball_pose pose;
-            pose.tick = tick;
-            for (int k = 0; k < 3; ++k) { pose.position[k] = local.position[k]; pose.linear[k] = local.linear[k]; pose.angular[k] = local.angular[k]; }
-            for (int k = 0; k < 4; ++k) pose.rotation[k] = local.rotation[k];
-            s.mechanism_correctors_[name].record(pose);
-        }
-        for (auto& [id, remote]: s.remotes_) {
-            if (!remote.physicalized || !remote.navigation) continue;
-            bmmo_physics_body_state local{};
-            if (!platform_.body_state(remote.entity, local)) continue;
-            bmmo::session::ball_pose pose;
-            pose.tick = tick;
-            for (int k = 0; k < 3; ++k) { pose.position[k] = local.position[k]; pose.linear[k] = local.linear[k]; pose.angular[k] = local.angular[k]; }
-            for (int k = 0; k < 4; ++k) pose.rotation[k] = local.rotation[k];
-            remote.corrector.record(pose);
-        }
 
         // Lifecycle events from the bridge's object log, read before the
         // rollback record below: a body created or deleted during this
@@ -1159,8 +1166,9 @@ namespace bmmo::session {
         poll_own_trafo(tick);
         retire_trafo(tick);
 
-        // Continue running blends.
-        if (config.correct) {
+        // Continue running blends (the legacy ladder's: none start with the
+        // rollback engine on).
+        if (config.correct && !config.rollback) {
             if (physicalized) apply_blend(ball_name, s.corrector_);
             for (auto& [name, corrector]: s.mechanism_correctors_) apply_blend(name, corrector);
             for (auto& [id, remote]: s.remotes_)

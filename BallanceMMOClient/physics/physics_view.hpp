@@ -237,6 +237,9 @@ namespace bmmo::physics {
         // birth-log feed (session_host_world.hpp birth_feed).
         void set_event_log_keep_muted_recipes(bool keep) const;
         std::string drain_muted_recipes() const;
+        // ---- bridge API v39 (step DCL): the event log's diagnostic entries
+        // (physics_state.hpp set_event_log_diagnostics), on by default.
+        void set_event_log_diagnostics(bool on) const;
         // ---- bridge API v26 (step OWG): the own ball's player group set before
         // its birth tick's PSIs (physics_state.hpp queue_own_group): 1 set now,
         // 2 queued into this frame's PreSimulate pass, 0 with `error`.

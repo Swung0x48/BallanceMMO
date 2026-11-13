@@ -908,6 +908,13 @@ namespace {
         return 1;
     }
 
+    // v39 (step DCL): the event log's diagnostic entries switched.
+    int32_t api_event_log_diagnostics(void* manager, int32_t on) {
+        (void)manager;
+        bmmo::physics::set_event_log_diagnostics(on != 0);
+        return 1;
+    }
+
     int32_t api_drain_muted_recipes(void* manager, char* buffer, uint32_t buffer_size) {
         (void)manager;
         if (!buffer) return static_cast<int32_t>(bmmo::physics::muted_recipes_size());
@@ -1162,6 +1169,7 @@ namespace {
         api_capture_world_hash_tick,
         api_has_body_id,
         api_contact_sound_resync,
+        api_event_log_diagnostics,
     };
 }
 

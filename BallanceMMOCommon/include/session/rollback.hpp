@@ -402,6 +402,10 @@ namespace bmmo::session {
         // sparse capture's verify, two replays of one tick).
         std::function<std::string(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, bool& logical)> diff_scripts;
         std::function<void(const std::string&)> log;
+        // Optional: false once `log` drops what it is given (the retail
+        // host's line cap).  The per-rewind line's text is built only while
+        // this is unset or true (step DCL).
+        std::function<bool()> log_open;
         // Optional: every decision the engine takes about a snapshot, so the
         // session journal can record it without parsing the log lines.
         std::function<void(const rollback_correction&)> on_correction;
@@ -421,6 +425,10 @@ namespace bmmo::session {
         // difference does not use up those 8.
         std::function<savestate_replay_difference(const std::vector<uint8_t>& live, const std::vector<uint8_t>& replayed)>
             diff_savestate;
+        // Step DCL: false leaves diff_savestate to the sparse verify's blob
+        // compare - the end-of-replay check above and the live savestate it
+        // copies on every rewind are skipped.
+        bool diff_replays = true;
         // Optional, as a pair: a body born inside the window is re-created
         // inside the replay the way the live frame created it, instead of
         // being parked at its birth pose and re-posed after its birth tick.
@@ -1805,12 +1813,16 @@ namespace bmmo::session {
             // window sets the bodies and drops the history.
             const bool scripts_replayed = replay_scripts_ && at->have_scripts && world.restore_scripts && !frozen
                                         && window <= reach;
-            // The live record of `current_tick`, kept aside before the replay
-            // overwrites it: what the re-executed scripts must arrive at.
-            std::vector<uint8_t> live_scripts, live_savestate;
-            bool have_live_scripts = false, have_live_savestate = false;
+            // The live record of `current_tick`'s savestate, kept aside before
+            // the replay overwrites it: what the re-simulated world must arrive
+            // at (the headless text diff's).  Its scripts are read from the
+            // record itself at the last replayed tick, before the replayed
+            // state replaces it (step DCL: no copy per rewind).
+            std::vector<uint8_t> live_savestate;
+            bool have_live_savestate = false;
             if (const tick_state* live = find(current_tick);
-                    live && live->have_savestate && world.diff_savestate && world.log && savestate_replay_logs_ < 8) {
+                    live && live->have_savestate && world.diff_savestate && world.diff_replays && world.log
+                    && savestate_replay_logs_ < 8) {
                 live_savestate = live->savestate;
                 have_live_savestate = true;
             }
@@ -1819,10 +1831,6 @@ namespace bmmo::session {
             // that made a window-born fixed body: it must not be destroyed).
             bool scripts_restored = false;
             if (scripts_replayed) {
-                if (const tick_state* live = find(current_tick); live && live->have_scripts) {
-                    live_scripts = live->scripts;
-                    have_live_scripts = true;
-                }
                 if (world.restore_scripts(at->scripts, anchor)) {
                     ++stats_.script_restores;
                     scripts_restored = true;
@@ -2767,14 +2775,19 @@ namespace bmmo::session {
                 // classification goes to a later frame (the live blob moved
                 // into the queue: the replayed state overwrites its record
                 // below).
+                // The live record is `recorded` here (t is current_tick): its
+                // scripts are what the live frame left until the replayed state
+                // overwrites it below.
                 bool script_differs = false, script_logical = true;
                 std::string script_where;
-                if (t == current_tick && scripts_replayed && have_live_scripts && state.have_scripts && !rs
-                        && state.scripts != live_scripts) {
+                size_t live_script_size = 0;
+                if (t == current_tick && scripts_replayed && recorded && recorded->have_scripts && state.have_scripts && !rs
+                        && state.scripts != recorded->scripts) {
+                    live_script_size = recorded->scripts.size();
                     if (defer_script_diffs_ && world.diff_scripts)
-                        queue_script_diff(world, t, std::move(live_scripts), state.scripts);
+                        queue_script_diff(world, t, std::move(recorded->scripts), state.scripts);
                     else
-                        script_differs = classify_scripts(world, live_scripts, state.scripts, script_logical, script_where);
+                        script_differs = classify_scripts(world, recorded->scripts, state.scripts, script_logical, script_where);
                 }
                 if (t == current_tick) timer.cost_ends();
                 if (t == current_tick && have_live_savestate && state.have_savestate && world.log
@@ -2807,7 +2820,7 @@ namespace bmmo::session {
                     }
                 }
                 if (script_differs)
-                    count_script_difference(world, t, script_logical, script_where, state.scripts.size(), live_scripts.size());
+                    count_script_difference(world, t, script_logical, script_where, state.scripts.size(), live_script_size);
                 if (recorded) {
                     // The rows stay with their tick for the next replay.
                     state.rows = std::move(recorded->rows);
@@ -2829,7 +2842,7 @@ namespace bmmo::session {
                 return true;
             }
             for (const auto& entity: polled) world.nav_poll(entity, true);
-            if (world.log)
+            if (world.log && (!world.log_open || world.log_open()))
                 world.log("rollback to tick " + std::to_string(anchor) + " (" + reason + "), re-simulated "
                           + std::to_string(lag) + " ticks"
                           + (rows_reapplied ? ", " + std::to_string(rows_reapplied) + " snapshot row(s) of "

@@ -618,6 +618,7 @@ namespace bmmo::physics {
             // and births would otherwise be logged as live events
             // (game/script_replay.hpp); the clients mute the log around it.
             bool muted = false;
+            bool diagnostics = true;   // set_event_log_diagnostics (step DCL)
             void record(const char* kind, IVP_Event_Object* event) {
                 if (muted || !event || text.size() > 256 * 1024) return;
                 char stamp[64];
@@ -632,7 +633,7 @@ namespace bmmo::physics {
             // Design 9.26 diagnostics: the state a body is born with, before
             // its first PSI - "t=<s> birth <name>|pos=..|q=..|v=..|w=..|m=..|I=..|damp=..|tlast=..|surface=..".
             void record_birth(IVP_Event_Object* event) {
-                if (muted) return;
+                if (muted || !diagnostics) return;
                 IVP_Real_Object* object = event ? event->real_object : nullptr;
                 const IVP_Core* core = object ? object->get_core() : nullptr;
                 if (!core || text.size() > 256 * 1024) return;
@@ -790,8 +791,8 @@ namespace bmmo::physics {
                     if (n < 4096) keep[n++] = std::malloc(16 + (state >> 16) % 3000);
                 }
             }
-            void event_object_revived(IVP_Event_Object* event) override { record("revived", event); }
-            void event_object_frozen(IVP_Event_Object* event) override { record("frozen", event); }
+            void event_object_revived(IVP_Event_Object* event) override { if (diagnostics) record("revived", event); }
+            void event_object_frozen(IVP_Event_Object* event) override { if (diagnostics) record("frozen", event); }
             void event_environment_deleted(IVP_Environment* deleted) override {
                 g_surface_memo_generation.fetch_add(1);   // step OPA
                 g_body_set_generation.fetch_add(1);
@@ -859,7 +860,7 @@ namespace bmmo::physics {
         // A SetPhysicsForce block built its controller (design 9.26
         // diagnostics): "t=<s> force <name>|f=..|p=..|<immediate|deferred>".
         void record_force(IVP_Real_Object* object, const IVP_U_Point* force, const IVP_U_Point* pos, int deferred) {
-            if (g_event_log.muted) return;
+            if (g_event_log.muted || !g_event_log.diagnostics) return;
             if (!object || !force || !pos || g_event_log.text.size() > 256 * 1024) return;
             IVP_Environment* environment = object->get_environment();
             char line[400];
@@ -873,7 +874,7 @@ namespace bmmo::physics {
         // A Set Physics Ball Joint built its constraint (design 9.26
         // diagnostics): "t=<s> constraint <reference>|<attached>|<immediate|deferred>".
         void record_constraint(IVP_Real_Object* reference, IVP_Real_Object* attached, int deferred) {
-            if (g_event_log.muted) return;
+            if (g_event_log.muted || !g_event_log.diagnostics) return;
             if (!reference || g_event_log.text.size() > 256 * 1024) return;
             IVP_Environment* environment = reference->get_environment();
             char stamp[64];
@@ -894,6 +895,7 @@ namespace bmmo::physics {
 
     void set_event_log_muted(bool muted) { g_event_log.muted = muted; }
     void set_event_log_keep_muted_recipes(bool keep) { g_event_log.keep_muted_recipes = keep; }
+    void set_event_log_diagnostics(bool on) { g_event_log.diagnostics = on; }
     std::string drain_muted_recipes() {
         std::string out;
         out.swap(g_event_log.muted_recipes);

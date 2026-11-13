@@ -1799,7 +1799,8 @@ namespace bmmo::sim {
 
     void session_runner::observe_lateness(session_state& s, uint32_t tick) {
         using bmmo::session::lateness_action;
-        const std::string prefix = "[session " + std::to_string(s.id) + "] S1 ";
+        // Built for a line only (step DCL: this runs every tick).
+        const auto prefix = [&s] { return "[session " + std::to_string(s.id) + "] S1 "; };
         const bool shared = shared_absolute(s);
         for (auto& [player, entry]: s.lateness) {
             auto& meter = entry.meter;
@@ -1815,13 +1816,13 @@ namespace bmmo::sim {
                 if (config_.lead_adjust) {
                     apply_lead_decision(s, player, decision, text);
                 } else {
-                    log(prefix + text + " (observe only: nothing sent)");
+                    log(prefix() + text + " (observe only: nothing sent)");
                     // The box keeps it too, so a journal read offline shows where
                     // the lead would have moved.  A note changes no replay.
                     if (s.journal.is_open() && !s.journal.capped()) s.journal.note(tick, "lateness: " + text);
                 }
             } else if (decision.action == lateness_action::give_up) {
-                log(prefix + "gave-up player=" + std::to_string(player) + " tick=" + std::to_string(tick)
+                log(prefix() + "gave-up player=" + std::to_string(player) + " tick=" + std::to_string(tick)
                     + ": two raises did not restore its arrivals; no decision until its next assignment");
             }
         }
@@ -1859,7 +1860,7 @@ namespace bmmo::sim {
                           + (meter.at_cap() ? " at-cap" : "");
                 }
             }
-            log(prefix + text);
+            log(prefix() + text);
         }
     }
 
@@ -2008,7 +2009,9 @@ namespace bmmo::sim {
             ? -bmmo::session::lateness_slack_ticks(s.scheduler.deadline(tick), at)
             : bmmo::session::quorum_step_time(members);
         std::vector<double> normalized;
-        std::string trace = "[session " + std::to_string(s.id) + "] S1 arrival tick=" + std::to_string(tick);
+        // The --arrival-trace line, built only under it (step DCL: every tick).
+        std::string trace = config_.arrival_trace ? "[session " + std::to_string(s.id) + "] S1 arrival tick=" + std::to_string(tick)
+                                                  : std::string();
         size_t counted = 0;
         for (size_t i = 0; i < members.size(); ++i) {
             const auto& m = members[i];
