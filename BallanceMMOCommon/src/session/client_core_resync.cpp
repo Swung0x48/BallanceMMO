@@ -497,6 +497,10 @@ namespace bmmo::session {
         std::set<std::string> trafo_gone;
         std::vector<journal_trafo_entry> trafo_journal;
         if (s.trafo_active_) {
+            // Step SDF: a set the reconcile unmakes or retires is deselected
+            // at the base, before a queued script diff that names its
+            // scripts would be classified: every queued one first.
+            settle_script_diffs();
             reconcile_trafo(st, anchor, trafo_gone, trafo_journal);
             for (const auto& body: st.rows) {
                 if (body.kind != body_kind::Mechanism || !trafo_rows.count(body.name)) continue;

@@ -97,6 +97,19 @@ namespace bmmo::session {
             }();
             return mode;
         }
+        // Step SDF: BMMO_SCRIPT_DIFF = inline | deferred, read once per
+        // process (deferred when unset or unknown): the end-of-replay script
+        // diff of a rewind is classified on a later frame that replayed
+        // nothing, at its end (rollback_engine::set_defer_script_diffs,
+        // session_client_core::end_frame);
+        // inline classifies it on the rewinding frame, as before.
+        bool script_diff_deferred_from_env() {
+            static const bool deferred = [] {
+                const char* text = std::getenv("BMMO_SCRIPT_DIFF");
+                return !(text && !std::strcmp(text, "inline"));
+            }();
+            return deferred;
+        }
         // Text that is not a number keeps the default (atof would read 0,
         // every frame that replayed heavy).
         double live_record_ms_from_env() {
@@ -509,6 +522,10 @@ namespace bmmo::session {
         s.rollback_.set_live_record_light(live != live_record_mode::whole);   // step LVR
         s.live_record_ms_ = live_record_ms_from_env();
         s.merge_input_ = merge_input_from_env();   // step MRG
+        // Step SDF: a diff still queued names the previous session's
+        // selection and objects: not classified against this one's.
+        drop_script_diffs("of the previous session");
+        s.rollback_.set_defer_script_diffs(script_diff_deferred_from_env());
         s.input_delay_ = msg.input_delay;
         s.sector_lead_ = msg.sector_lead;
         s.seed_ = msg.seed;
@@ -957,6 +974,7 @@ namespace bmmo::session {
     // SessionEnd: drop the mirrors and go idle; a later SessionStart of the
     // same room reloads the level (host restart) through begin.
     void session_client_core::end(const std::string& reason) {
+        settle_script_diffs();   // step SDF: with the session's binding, before anything of it goes
         if (platform_.hooks.ending) platform_.hooks.ending();
         // Step M1: the member lives' account.  A parked event whose life was
         // never told of is dropped here (the server cannot produce one).

@@ -4422,6 +4422,10 @@ void BallanceMMOClient::core_host_frame() {
     // pre_step, before its after_rewinds hook arms the line again).
     core_manager_trace_due = false;
     host.core->pre_step();
+    // Step SDF: the frame's end for the core (post_step, the mailbox and
+    // pre_step have run every rewind of it): a queued script diff is
+    // classified here when none ran.
+    if (core_session_running()) host.core->end_frame();
     // FULL step R6B (BEAMF-S (b)): a frame that made an own body through the
     // bridge (a live beam, a rewind's remake, settle_own_due, a resync's
     // remake - the drain and pre_step above, every replay finished) re-arms
@@ -4463,8 +4467,16 @@ void BallanceMMOClient::core_host_frame() {
 // edits handed back, the clock guard dropped, the core ended when it still
 // runs (journal, body guard, mirrors, status), the own replica gone, the tick
 // driver off.  Nothing while no core session runs.
-void BallanceMMOClient::core_host_end_local(const std::string& reason) {
+void BallanceMMOClient::core_host_end_local(const std::string& reason, bool level_gone) {
     if (host.phase == retail_host::phase_type::idle) return;
+    // Step SDF: the script diffs still queued are classified through the
+    // level's behaviours first, before the host's edits below are handed
+    // back; after the Exit Level chain destroyed them, they are dropped
+    // unclassified instead.
+    if (host.core && host.core->session_phase() != bs::client_core_state::phase::idle) {
+        if (level_gone) host.core->drop_script_diffs("at an end after the level's teardown");
+        else host.core->settle_script_diffs();
+    }
     core_host_hold_unfreeze("the session ended");   // FULL step AHN: never left frozen
     // Step SPL: a placement still being made (the session ended between two
     // of its slices) is undone whole; the panel goes.

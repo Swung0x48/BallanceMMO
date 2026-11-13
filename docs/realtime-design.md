@@ -3137,3 +3137,198 @@ client already ran (it keeps the live pose, as before: the same gap as at HEAD);
 frame moves at every later sector); retail in verify; the wire check; `--compare-scripts` dumps of older runs,
 which do not parse the new hold. Left out of the design: the `hold_choice` counter of sparse verify (the float
 count it would split is 0 now).
+
+## Built (the end-of-replay script diff leaves the rewinding frame, step SDF, 2026-11-13)
+
+**What it costs today.** On the 8845HS the frames of the public L6 re-drive still over 15.15 ms at HEAD are mostly
+1849 and 2089 (client 0), each over by at most 1.1 ms; 0.78-0.94 ms of each is the end-of-replay script diff
+(`.local-tools/work/RSH`, `DEPTH`). At the last replayed tick of a rewind, when the re-executed scripts differ in
+bytes from the live record, `rollback_world::diff_scripts` walks both records and classifies the difference
+(logical, float only, or none outside the written-cell section). By design a replay that corrected an input
+differs from the live record, so it runs in the same 44 of the ~518 deep rewinds of every run. Its only readers
+are `script_mismatches` / `script_float_mismatches` (the status line's `scr=`) and the capped `script replay: the
+scripts re-executed to tick ...` lines. No simulation reads it.
+
+**The rule.** `BMMO_SCRIPT_DIFF = inline | deferred` (`client_core.cpp` `script_diff_deferred_from_env`, deferred
+when unset, latched at each session start: `rollback_engine::set_defer_script_diffs`; the engine's own default
+and SimTool's engines stay inline). Deferred, the byte compare stays on the rewinding frame, and a difference is
+queued (`rollback_script_diff.cpp` `queue_script_diff`): its tick, the live blob moved (the replayed state
+overwrites that record right after) and one copy of the replayed blob. A later call classifies it with the same
+code as inline (`classify_scripts`, `count_script_difference`), so the counts and the log lines are the same in the
+same order. Only the log lines' place in the log moves. The queue holds four. A fifth classifies the oldest on the
+rewinding frame (`forced`, logged once) instead of dropping it.
+
+- *When* (`client_core_frame.cpp` `session_client_core::end_frame`, which each host calls at its frame's end:
+  the headless client after `post_step`, inside its timed frame (`session_client.cpp` `pace_and_frame`); retail after
+  `pre_step` (`core_host.cpp` `core_host_frame`, whose frame is `post_step`, the mailbox, then `pre_step`)): one
+  item on a frame that replayed nothing - `replay_work()` (replayed ticks + rewinds + snapshot rollbacks + resyncs)
+  unchanged since the previous `end_frame`, so the message path and both steps count whatever the host's order -
+  a rule with no clock read. Or forced, on a frame that replayed, once the oldest is 64 ticks old (counted forced
+  and rewound).
+- *Settled* (`settle_script_diffs`: everything queued classified): before the headless 5 s report and the end
+  report (`session_client.cpp` `report()`: every 5 s of wall clock, between two frames, so a settle there costs
+  the gap after a frame that queued one), in `end()` before `hooks.ending` and before anything of
+  the session is torn down, and at a resync's apply before its trafo reconcile (`client_core_resync.cpp`, while
+  trafo sets run: below).
+- *Unclassified* (`session_client_core::drop_script_diffs`, counted and logged): what a new session finds still
+  queued (`begin`: its binding names the previous session's selection), and what the retail fallback end finds
+  (`OnPostExitLevel`'s `core_host_end_local(..., level_gone)`: an exit that did not pass `OnPreExitLevel` ends the
+  session after the Exit Level chain destroyed the level's behaviours). Also counted unclassified: a classifying
+  binding with no `diff_scripts`, where `classify_scripts` would count the blob logical by its sizes.
+- *Counters*: ` sdiff=queued/classified/forced/unclassified/max queue/rewound` at the end of the status line, only
+  while deferred. `rewound`: classifications `end_frame` made on a frame that replayed - the age-forced ones, and
+  0 otherwise by construction (the rule and the count read the same stamp at the frame's last core call).
+
+**What the classification reads** (`game/script_replay.hpp` `diff` / `diff_walk` / `diff_behavior`, through the
+hosts' one binding, `rollback_binding_scripts.hpp` `world.diff_scripts`, `diff(..., cells = false)`). It reads the
+two blobs, the session's selection (`sel.scripts`, `sel.satellites`) and the live CK graph. Through the graph it
+gets names (`CKContext::GetObject`, `GetName`) and each changed parameter's class (`GetLocalParameter` /
+`GetOutputParameter`, then `GetGUID`: float or logical). The hold section is compared byte by byte
+(`compare_hold`). With `cells = false` it changes no counter (`written_cells_stats` moves only in the sparse
+verify's call, which stays inline). It writes nothing to the world, the CK context or any state a tick reads.
+Deferral therefore changes nothing as long as the named objects are the same:
+
+- the selection is the session's, made at its anchor (`core_host.cpp` `core_host_anchor_finish`,
+  `session_client.cpp` `anchor`) and changed only by the next session's anchor, after `begin` has dropped the
+  queue;
+- the level's behaviours outlive the session, and `end()` settles the queue before `hooks.ended` tears the trafo
+  sets down (retail `core_host_end_local`: `end` before `trafo_teardown`; headless `end_trafo_sets` from
+  `hooks.ended`). The one end that comes after the level's teardown, retail's `OnPostExitLevel` fallback, drops the
+  queue instead (above);
+- the only behaviours a running session destroys are trafo sets' scripts. A set deselected live:
+  `retire_trafo_sets` destroys its scripts `history_ticks` (96, or 128 above the reach floor) after a deselect
+  that comes at or after the queued tick, and the 64-tick age bound classifies first (a static_assert ties it to
+  the default history). A set a resync's reconcile unmakes or retires (`retire_trafo_set_now` deselects it at the
+  resync's base, which can be before the queued tick, so `retire_trafo_sets` can destroy it within 64 ticks of
+  the queued one): the apply settles the queue before the reconcile.
+
+If a named behaviour were gone anyway, its parameter would read as logical where inline read float (a null
+parameter is not a float one). The proof below therefore compares the lines one by one, not only the counts.
+
+**The rewind cost meter.** The inline diff ran before `timer.cost_ends()` (step B5RX), inside the replay stage
+of the meter's sample. Deferred, its time leaves the sample on the rewinds that make it: about 9 % of the deep ones, 61 of client 0's
+rewinds on the L6 re-drive and 767 of the 72 749 over its 13 clients (about 1 %). The replay
+ms per tick reads lower, so retail's running cap (`(B - restore_ms) / replay_ms_per_tick`) reads equal or higher,
+and binds only above the 48-tick floor. An overflow-forced classification stays in the meter (it runs in
+`queue_script_diff`, before `cost_ends`); an age-forced one runs in `end_frame` after the rewind's sample, out of it. The headless clients run
+the cost on the captured clock as before, and the K7 capture's clock reads are unchanged: the classification reads
+no clock site (nor does the `world()` binding it calls: `bind_session_world`, `bind_script_replay` and the hosts'
+`bind_world` read none), and the byte compare and `cost_ends` keep their order. Also lower: the rewind's own `t_rep` /
+`t_max` stats, and the work LVR's heavy gate sees on those frames (about 0.8 ms). So `live=` light counts may
+differ from an inline run. They decide no record a rewind restores, and the journals must not differ.
+
+**Results** (`.local-tools/work/SDF`: `run_sdf.sh`, `sdf_sum.py`, the `sum_*`, `rows_*` and `armj_*` files; HEAD
+`4cf106ae` plus this step).
+- unit tests: 858/858. `DeferredScriptDiffsCountAndLogAsInline`: six differing rewinds, deferred, give inline's
+  counts and lines in the same order. Two of them are forced by the four-item bound. A hook-less classifier leaves
+  the other four unclassified.
+- builds: x64 BUILD-OK; x86 client CLIENT-BUILD-OK (core_host.cpp has `/bigobj` since `4cf106ae`; no C1128).
+- fast LBM, as shipped (`sdfd`) and inline (`sdfi`): 38/38 twins FINAL exact each, every row equal to `ob2n`'s.
+  Over the 140 client logs: `scr=` logical 0 and float 105 in `ob2n`, `sdfd` and `sdfi`, the 105 lines equal line
+  for line, 0 differences. `sdfd` queued 105, classified 105, forced 0, unclassified 0, max queue 1. Every
+  `mismatches=` and `mism` 0. Journals: every client journal equal past the build id to `ob2n`'s and between the
+  two. The 12 Level 13 server journals differ, as they do between any two runs since LVR.
+- L6 re-drive, as shipped (`pf_sdfd_1`) and inline (`pf_sdfi_1`): every `mismatches=` and `mism` 0, 72 749 rewinds
+  each. The 14 journals equal to `pf_ob2s_1`'s. `scr=` logical 24 and float 743 over the 13 clients in all three
+  runs, the 128 logged lines equal. `sdfd` queued 767, classified 767, forced 0, unclassified 0, max queue 1
+  (client 0: 61). Replayed ticks 663 877 in both (`pf_ob2s_1` 664 032: LVR's wall-clock gate; client 0 `live=`
+  light 1 deferred, 0 inline).
+
+**One review, two defects fixed and a sentence corrected** (`.local-tools/work/SDF`).
+- A set a resync's reconcile retires is deselected at the resync's base (`retire_trafo_set_now`), so its scripts
+  could go before the 64-tick bound classified a queued diff naming them (a null behaviour: a float difference
+  counted logical, or a reused id read). The apply now settles the queue before the reconcile
+  (`client_core_resync.cpp`, inside the trafo branch).
+- Retail's `OnPostExitLevel` fallback ended the session after the Exit Level chain destroyed the level's
+  behaviours, and `end()` classified the queue there. It now passes `level_gone` (`BallanceMMOClient.cpp`,
+  `core_host_end_local`), which drops the queue unclassified, logged, before the end (`drop_script_diffs`, shared
+  with `begin`).
+- The meter sentence: only the overflow-forced classification stays in the meter.
+- Taken from its points: the queue has out-of-line move members too (an engine move no longer copies blobs). Left:
+  the headless 5 s settle is on the wall clock; `script_diff_full_logged_` is not reset per session, like the
+  engine's other log-once flags. Its point that a rewind later in the same frame could follow a quiet-frame
+  classification is the frame-end rule below.
+
+Rerun after the fixes, as shipped (the fixes leave the inline path as it was): 858/858 (the SDF test also drops
+four, counted unclassified); x64 BUILD-OK; x86 client CLIENT-BUILD-OK; the Arch server ARCH-BUILD-OK, the two g++
+syntax checks and the step's common sources (`rollback_script_diff.cpp`, `client_core*.cpp`) ok. Fast LBM `sdf2d`:
+38/38 twins FINAL exact, the rows file equal to `sdfd`'s and `ob2n`'s, every client's `mism`, `rb`, `resim`, `scr=`
+and script lines equal to `sdfd`'s (140 clients: rb 1 711, resim 37 377, `scr=` 0 / 105, `sdiff=` 105/105/0/0 max 1),
+every client journal equal to `sdfd`'s (the 12 Level 13 server journals differ, as between any two runs). L6
+re-drive `pf_sdf2d_1`: every `mismatches=` and `mism` 0, rb 72 749, resim 663 877, `scr=` 24 / 743, the 128 lines,
+`sdiff=` 767/767/0/0 max 1, all equal to `pf_sdfd_1`; the 14 journals equal to `pf_sdfd_1`'s and `pf_ob2s_1`'s.
+
+**The 8845HS A/B** (`.local-tools/work/SDF` `run_sdp_8845.sh`, `sdp_frames.py`: the slow-frame build of this step,
+client 0 pinned, three interleaved pairs inline / deferred, 13 clients on the one box, BMMO_REPLAY_DIFF=off). Frame
+1849's replay part fell 11.4 -> 9.1 ms on average, but frame 1850, which rewinds 17 ticks in every run, rose in all
+three pairs (replay part 7.9 -> 9.7 ms), so 1849 + 1850 stayed about 28.5 ms in both arms; 1849 and 2089 each still
+went over budget in one deferred run. Inconclusive: inline alone spans p99 10.6-11.3 ms and 541-1 152 frames over
+10 ms between its runs, every deferred run falls inside that spread, the other 12 clients show the same p99 gap,
+and inline always ran first in a pair (drift, not the lever). The logs carry no classification line or status
+line between 1849 and 1850, so they could not say where 1849's diff was classified.
+
+**The frame-end rule** (`.local-tools/work/SDQ`; its review point: the old rule, in `pre_step` after
+`replay_corrected_inputs`, checked "no replayed tick since the previous frame's call", which by its form does not
+exclude a rewind later in the same frame). Traced: after that call nothing in a frame reaches a rewind outside the
+test tools. `post_step` calls none of `rewind_world`'s callers (the lifecycle, own-echo, trafo, sector, input and
+resync paths all run in the message path or in `pre_step` before the call); `apply_held_lifecycle` applies events
+stamped for the frame's own tick, which `rewind_for_lifecycle` does not replay (not late); the `after_rewinds`
+hook rewinds only under the headless `--force-rollback` options; the message path runs before `pre_step` on retail
+and between frames on the headless client, so before the next call. Measured first, with the old call site and a
+frame-end check (`end_frame` counting a
+classification whose frame then replayed, plus diagnostic lines, never committed) on the local L6 re-drive
+(`pf_sdq0_1`): 767 classifications over the 13 clients, 0 on a frame that replayed after the call, 0 forced, and
+every classifying frame replayed nothing (work_after_call 0 in all 767). Client 0's diff queued at 1849 (tick 1848)
+was classified at 1851, the one queued at 2089 at 2093; frame 1850 replays 17 ticks locally too (in both arms) and
+so classified nothing. The "landed on 1850" reading is refuted, on this machine by count and on any schedule by the
+trace: the 8845's 1850 replays 17 ticks before the call and could not classify, so the frame-end rule does not move
+it there, and its rise in the A/B stays unexplained (noise is the reading the spread allows). The rule is still
+made exact by construction, a hardening: `end_frame` is the frame's last core call on each host and its stamp covers
+the whole frame (above, *When*), and it also counts a restore that replays no tick. With it (`pf_sdqd_1`, the same diagnostics) every one of the 767
+classifications lands on the same (client, tick) as under the old rule; they run 1 to 7 frames after the queuing
+frame (537 two ticks after the queued tick, 163 three, 24 four, 22 five, 1 seven, 20 eight).
+
+Timing on the dev machine (the diagnostic `sdq_frame:` lines: `std::chrono::steady_clock` around the headless
+client's `frame()` + `end_frame`, the same span as `frame_time:`; 13 clients on one box, one run, so indicative
+only): the 767 classifying frames median 2.63 ms, p99 3.73, max 4.36, none with replay work; the 767 queuing
+frames median 5.74, p99 10.22, max 11.31. Client 0's whole run: p50 2.2, p99 7.1, max 10.7 ms. Client 0 around the
+named frames, deferred / inline: 1849 8.12 / 9.53, 1850 8.08 / 7.43, 1851 (classifies) 2.84 / 2.73, 2089 8.74 /
+8.96, 2093 (classifies) 2.06 / 2.25 ms.
+
+Rerun as shipped (the frame-end rule, no diagnostics): 858/858; x64 BUILD-OK; x86 client CLIENT-BUILD-OK. Fast LBM
+`sdq1`: 38/38 twins FINAL exact, the rows equal to `sdf2d`'s; 140 clients' `mism` 0, rb 1 711, resim 37 377, every
+`mismatches=` 0, `scr=` 0 / 105 and the 105 lines equal to `sdf2d`'s, `sdiff=` 105/105/0/0 max 1 rewound 0; every
+client journal equal to `sdf2d`'s (the 12 Level 13 server journals differ, as between any two runs). L6 re-drive
+`pf_sdq1_1`: 13 clients' `mism` 0, rb 72 749, resim 663 877, every `mismatches=` 0, `scr=` 24 / 743 and the 128
+lines equal to `pf_sdf2d_1`'s, `sdiff=` 767/767/0/0 max 1 rewound 0 (client 0: 61/61/0/0/1/0); the 14 journals
+equal to `pf_sdf2d_1`'s and `pf_ob2s_1`'s. Inline once (`pf_sdqi_1`): the same counters and lines, the 14 journals
+equal to `pf_ob2s_1`'s, `pf_sdfi_1`'s status counters. "Inline reproduces HEAD" holds for the journals and the
+script lines: resim and `live=` differ from HEAD's `pf_ob2s_1` (663 877 vs 664 032 replayed ticks) through LVR's
+wall-clock gate, `ob2s` being a slower run (client 0 p50 3.2 ms vs 2.2, `live=` eligible 36-95 per client vs
+0-3); a counter-level comparison with HEAD takes BMMO_LIVE_RECORD=whole or BMMO_LIVE_RECORD_MS=0.
+
+**Its review: no defects.** Taken from its points: the HEAD wording above; retail's `core_host_end_local` settles
+the queue first (when the level is not gone, the core not idle), before it hands back the host's script edits, so
+the classification reads the behaviours as the session left them by construction (the edits it hands back were
+sources, constants and data arrays, never a selected block's locals or outputs, so the order was harmless before);
+`replay_work()` (resim ticks, rewinds, rollbacks, resyncs) leaves out `frozen` and `savestates_restored`, which
+retail's own restore sums count: a frozen restore returns before `++rollbacks`, so a frame that only restored a
+frozen hold reads as quiet, and both are absent in snapshot-free sessions. Left: `rewound` stays (it equals the
+age-forced subset of `forced` by construction, documented as such); no unit test drives `end_frame` (few tests).
+
+The gate on the final tree (`.local-tools/work/SDQ/gate` `run_gate.sh`, `gate.log`; only `core_host.cpp` and this
+document changed after `sdq1` / `pf_sdq1_1`, so the fast LBM and the L6 re-drive were not rerun): 858/858; x64
+BUILD-OK; x86 client CLIENT-BUILD-OK; the Arch server ARCH-BUILD-OK. Retail at K = 20, L12 and L11 at human key
+rates (`sdqg_l12_h_150_1`, `sdqg_ctl_h_150_1`), as shipped: 0 mismatches (every `mismatches=` 0, 22 and 18 lines),
+FINAL rows bit-equal to the `r6on` sessions (L12 2 ticks, 2 balls, 14 bodies; L11 6 ticks, 2 balls, 23 bodies,
+32 trafo pieces), `sdiff=` on the end's status line 3/3/0/0/1/0 and 5/5/0/0/1/0 on L12, 8/8/0/0/1/0 and
+11/11/0/0/1/0 on L11 (queued = classified, forced, unclassified and rewound 0), `scr=` present, no drop logged.
+
+**Not exercised.** The 8845HS timing of frames 1849 and 2089 under the frame-end rule (the lever's measure); the
+dev machine's runs show where the classification lands, not the 8845's cost. On retail (run in the gate above,
+`end_frame` and the end's settle): its `session` status, which the console window's thread can run, does not settle
+the queue, so the line it prints may leave up to the queue's items unclassified - `sdiff=` shows them - and the
+game thread classifies them a frame or two later (not tried); the post-exit drop. The age-forced and
+the overflow-forced paths, `rewound` and `unclassified` above 0, outside the unit test: every run's forced,
+rewound and unclassified are 0 and its queue never held more than one.
+A resync's settle with a diff queued, and a trafo set retired while one names it. The wire check.

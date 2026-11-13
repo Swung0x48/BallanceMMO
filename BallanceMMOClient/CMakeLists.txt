@@ -141,6 +141,7 @@ set(BMMO_CLIENT_SRC
         session/room_client.cpp
         session/core_host.cpp
         ../BallanceMMOCommon/src/session/proximity_hold.cpp
+        ../BallanceMMOCommon/src/session/rollback_script_diff.cpp
 )
 
 # MinHook (BSD-2-Clause) for the CKInputManager::PreProcess hook used by

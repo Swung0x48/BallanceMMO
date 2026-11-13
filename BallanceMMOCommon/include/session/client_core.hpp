@@ -442,6 +442,11 @@ namespace bmmo::session {
         // live capture for its live record to be light (BMMO_LIVE_RECORD_MS,
         // latched at the session start; the switch is the engine's).
         double live_record_ms_ = 10.5;
+        // Step SDF: the engine's replay work (replay_work) at the previous
+        // end_frame, and the classifications end_frame made on a frame that
+        // replayed (the age-forced ones).
+        uint64_t script_diff_work_ = 0;
+        uint64_t script_diffs_rewound_ = 0;
         uint64_t input_merged_ = 0, merge_not_older_ = 0, merge_unrecorded_ = 0, merge_resync_base_ = 0;
         uint64_t merge_refused_ = 0, merge_excluded_ = 0;
         // Sector rewinds made and missed (a resync each), and the live passes
@@ -1716,6 +1721,13 @@ namespace bmmo::session {
         // refused (R1: false, logged, nothing done): the retail anchor path
         // could skip one, the headless frame always pairs them.
         bool post_step(bool stepped);
+        // Step SDF: the host's frame is over - called where nothing of the
+        // frame can rewind any more: the headless client after post_step,
+        // retail after pre_step (its frame is post_step, the mailbox, then
+        // pre_step).  A queued end-of-replay script diff is classified here
+        // when the frame replayed nothing since the previous call, or
+        // forced once it is 64 ticks old.  Nothing while no session runs.
+        void end_frame();
 
         // ---- pacing (E9; the host owns the clock, design 1.3) ----
         // How far behind its schedule the host's pacer may fall before it
@@ -1982,6 +1994,15 @@ namespace bmmo::session {
         // The status line (the headless 5 s report and the session's end;
         // the retail F3 overlay), with the host's counters at their places.
         std::string status_text(const host_counters& h) const;
+        // Step SDF: every queued end-of-replay script diff classified, so a
+        // status line that follows counts them (a host calls it before its
+        // own status_text; end() does, and a resync's trafo reconcile).
+        void settle_script_diffs();
+        // Step SDF: every queued one dropped, counted unclassified and
+        // logged with `why`: the objects its classification would name are
+        // gone or another session's (a new session's start; the retail
+        // fallback end after the level's teardown).
+        void drop_script_diffs(const char* why);
         // The window: line that `tick` closes (post_step step 31), "" when
         // it closes none - and on the first window edge, which only sets the
         // base.  Every call at a new window index moves the base, so the
@@ -2195,6 +2216,9 @@ namespace bmmo::session {
         bool correction_near_own_ball() const;   // step A2
         void telemetry_tick(uint32_t tick);       // step A6
         void calibrate_rewind_cost();
+        // Step SDF: replayed ticks, rewinds, snapshot rollbacks and resyncs
+        // so far - a frame whose end_frame sees it moved replayed.
+        uint64_t replay_work() const;
         void retry_owed_resync();
         // Every rewind the core asks of the engine outside a snapshot
         // (inputs, lifecycle events, sector stamps, the forced one):

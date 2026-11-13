@@ -6491,6 +6491,80 @@ TEST(RollbackEngine, SparseVerifyAsksForTheWrittenCellsAndTheReplaysCheckDoesNot
     EXPECT_GE(std::count(asked.begin(), asked.end(), false), 1) << "the last ticks' checks";
 }
 
+// Step SDF: a deferred end-of-replay script diff, classified later, gives the
+// counts and the log lines the rewinding frame gives inline; with the queue
+// full (four) a fifth classifies the oldest on its frame (forced), none lost;
+// a binding with no diff_scripts leaves what is queued unclassified, and so
+// does a drop (a new session's start, the retail end after the teardown).
+TEST(RollbackEngine, DeferredScriptDiffsCountAndLogAsInline) {
+    struct outcome {
+        bmmo::session::rollback_stats stats;
+        std::vector<std::string> lines;
+        size_t pending = 0;
+    };
+    const auto run = [](bool defer, bool hookless = false, bool drop = false) {
+        outcome o;
+        fake_world world;
+        world.bodies["Plate"].position[0] = 40.0;
+        world.bodies["Plate"].linear[1] = -0.5f;
+        rollback_engine engine;
+        engine.set_defer_script_diffs(defer);
+        auto w = world.adapter();
+        uint8_t captures = 0;   // every capture differs from every other
+        w.capture_scripts = [&](std::vector<uint8_t>& out) {
+            out = {7, ++captures};
+            return true;
+        };
+        w.restore_scripts = [](const std::vector<uint8_t>&, uint32_t) { return true; };
+        w.diff_scripts = [](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, bool& logical) {
+            logical = b[1] % 3 == 0;
+            return "byte 1 " + std::to_string(a[1]) + " vs " + std::to_string(b[1]);
+        };
+        w.log = [&](const std::string& line) {
+            if (line.rfind("script replay: the scripts", 0) == 0) o.lines.push_back(line);
+        };
+        rollback_tracked tracked;
+        tracked.mechanisms = {"Plate"};
+        uint32_t tick = 0;
+        while (tick < 10) {
+            w.step();
+            engine.record(w, ++tick, tracked, {});
+        }
+        for (int r = 0; r < 6; ++r) {
+            w.step();
+            engine.record(w, ++tick, tracked, {});
+            EXPECT_TRUE(engine.rewind_to(w, tick - 3, tick, no_input, "test"));
+        }
+        o.pending = engine.script_diffs_pending();
+        if (hookless) w.diff_scripts = nullptr;
+        if (drop) EXPECT_EQ(engine.drop_script_diffs(), 4u);
+        else engine.classify_script_diffs(w);
+        EXPECT_EQ(engine.script_diffs_pending(), 0u);
+        o.stats = engine.stats();
+        return o;
+    };
+    const outcome now = run(false), later = run(true), unhooked = run(true, true), dropped = run(true, false, true);
+    EXPECT_EQ(now.stats.script_mismatches + now.stats.script_float_mismatches, 6u);
+    EXPECT_GT(now.stats.script_mismatches, 0u);
+    EXPECT_GT(now.stats.script_float_mismatches, 0u);
+    EXPECT_EQ(now.stats.script_diffs_queued, 0u) << "inline queues nothing";
+    EXPECT_EQ(later.pending, 4u) << "the queue's bound";
+    EXPECT_EQ(later.stats.script_diffs_queued, 6u);
+    EXPECT_EQ(later.stats.script_diffs_forced, 2u) << "the fifth and the sixth classified the oldest on their frame";
+    EXPECT_EQ(later.stats.script_diffs_classified, 6u);
+    EXPECT_EQ(later.stats.script_diffs_unclassified, 0u);
+    EXPECT_EQ(later.stats.script_diff_queue_max, 4u);
+    EXPECT_EQ(later.stats.script_mismatches, now.stats.script_mismatches);
+    EXPECT_EQ(later.stats.script_float_mismatches, now.stats.script_float_mismatches);
+    EXPECT_EQ(later.lines, now.lines) << "the same lines, in the same order";
+    EXPECT_EQ(unhooked.stats.script_diffs_classified, 2u) << "the forced two";
+    EXPECT_EQ(unhooked.stats.script_diffs_unclassified, 4u);
+    EXPECT_EQ(unhooked.stats.script_mismatches + unhooked.stats.script_float_mismatches, 2u) << "no count for the four";
+    EXPECT_EQ(dropped.stats.script_diffs_classified, 2u);
+    EXPECT_EQ(dropped.stats.script_diffs_unclassified, 4u);
+    EXPECT_EQ(dropped.stats.script_mismatches + dropped.stats.script_float_mismatches, 2u);
+}
+
 // Step LFL: a replayed tick that only its lifetime change would record whole
 // (here a mechanism born at 6) is recorded light under set_lifetime_light,
 // keeping the extras of the name born there.  A later rewind anchored after

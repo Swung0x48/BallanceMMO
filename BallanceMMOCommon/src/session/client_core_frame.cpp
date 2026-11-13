@@ -30,6 +30,51 @@
 
 namespace bmmo::session {
 
+    uint64_t session_client_core::replay_work() const {
+        const auto& r = s.rollback_.stats();
+        return r.resim_ticks + r.rewinds + r.rollbacks + r.resyncs;
+    }
+
+    // Step SDF: the oldest queued end-of-replay script diff classified at
+    // the end of a frame that replayed nothing - no rewind, snapshot
+    // rollback, resync or replayed tick since the previous end_frame, so
+    // the host's message path and both steps count, whatever their order -
+    // a rule with no clock.  Or forced, on a frame that replayed (counted
+    // rewound), once it is kScriptDiffAge ticks old, so a run of replaying
+    // frames cannot keep it past the objects it names: the walk names
+    // blocks and takes a parameter's float class from the live behaviours,
+    // and the only ones a session destroys are a trafo set's scripts: a
+    // retired set's history_ticks (96 or 128) after a deselect that comes at
+    // or after the queued tick (retire_trafo_sets); a set a resync's
+    // reconcile unmakes or retires (deselected at the resync's base,
+    // possibly before the queued tick) after the queue was settled at the
+    // apply (try_apply_resync).  The selection itself is the session's,
+    // fixed from its anchor on.
+    void session_client_core::end_frame() {
+        constexpr int32_t kScriptDiffAge = 64;
+        static_assert(kScriptDiffAge < rollback_thresholds{}.history_ticks, "classified before a retired set's scripts go");
+        if (s.phase_ != client_core_state::phase::running) return;
+        const uint64_t work = replay_work();
+        const bool replayed = work != s.script_diff_work_;
+        s.script_diff_work_ = work;
+        if (!s.rollback_.script_diffs_pending()) return;
+        const bool old = static_cast<int32_t>(current_tick() - s.rollback_.oldest_script_diff()) >= kScriptDiffAge;
+        if (replayed && !old) return;
+        s.rollback_.classify_script_diffs(world(), 1, replayed);
+        if (replayed) ++s.script_diffs_rewound_;
+    }
+
+    // Every queued script diff classified (before a status line, at the
+    // session's end).
+    void session_client_core::settle_script_diffs() {
+        if (s.rollback_.script_diffs_pending()) s.rollback_.classify_script_diffs(world());
+    }
+
+    void session_client_core::drop_script_diffs(const char* why) {
+        if (const size_t dropped = s.rollback_.drop_script_diffs())
+            logf("script replay: %zu deferred script diff(s) %s dropped unclassified", dropped, why);
+    }
+
     // One replay for every input correction this frame collected.
     void session_client_core::replay_corrected_inputs() {
         s.own_replay_pacer_.frame();

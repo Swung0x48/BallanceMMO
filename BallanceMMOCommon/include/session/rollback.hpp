@@ -915,6 +915,16 @@ namespace bmmo::session {
         // the replay (rollback_world::remote_generation).
         uint64_t replay_lives_ended = 0;
         uint64_t script_float_mismatches = 0;  // float parameters only (sensors, timers)
+        // Step SDF (set_defer_script_diffs): the last replayed ticks whose
+        // scripts differ in bytes from the live record, queued for a later
+        // frame's classification; classified there; classified on a frame
+        // the queue's rule did not choose (forced: the queue full, on the
+        // rewinding frame; the oldest 64 ticks old, on a frame that
+        // replayed); left unclassified (dropped: a new session found them
+        // queued, the retail end after the level's teardown; or the
+        // classifying binding has no diff_scripts); the deepest queue.
+        uint64_t script_diffs_queued = 0, script_diffs_classified = 0, script_diffs_forced = 0;
+        uint64_t script_diffs_unclassified = 0, script_diff_queue_max = 0;
         uint64_t clock_rewinds = 0;      // restores that put the environment's clock back first
         // The IVP savestate (rollback_world::set_savestate): restores that put
         // the engine's whole collision state back at the anchor in place of the
@@ -1034,6 +1044,7 @@ namespace bmmo::session {
         void clear() {
             invalidate_history();
             stats_ = {};
+            script_diffs_.items.clear();
             detailed_logs_ = 0;
             resim_traces_ = 0;
         }
@@ -2752,19 +2763,18 @@ namespace bmmo::session {
                 // then the rewind's cost ends, then the savestate check - the
                 // headless client's text diff, out of the meter; the lines
                 // are logged in their old order (savestate, then scripts).
+                // Step SDF: deferred, the byte compare stays here and the
+                // classification goes to a later frame (the live blob moved
+                // into the queue: the replayed state overwrites its record
+                // below).
                 bool script_differs = false, script_logical = true;
                 std::string script_where;
                 if (t == current_tick && scripts_replayed && have_live_scripts && state.have_scripts && !rs
                         && state.scripts != live_scripts) {
-                    script_differs = true;
-                    if (world.diff_scripts) {
-                        script_logical = false;   // not the written cells (decision Q4)
-                        script_where = world.diff_scripts(live_scripts, state.scripts, script_logical);
-                        // An empty answer: the bytes differ only in what the
-                        // hook does not compare (step RK2: the record's
-                        // written-cell section) - not a mismatch.
-                        if (script_where.empty()) script_differs = false;
-                    }
+                    if (defer_script_diffs_ && world.diff_scripts)
+                        queue_script_diff(world, t, std::move(live_scripts), state.scripts);
+                    else
+                        script_differs = classify_scripts(world, live_scripts, state.scripts, script_logical, script_where);
                 }
                 if (t == current_tick) timer.cost_ends();
                 if (t == current_tick && have_live_savestate && state.have_savestate && world.log
@@ -2796,15 +2806,8 @@ namespace bmmo::session {
                         }
                     }
                 }
-                if (script_differs) {
-                    if (script_logical) ++stats_.script_mismatches; else ++stats_.script_float_mismatches;
-                    if (world.log && (script_logical ? script_mismatch_logs_ : script_float_logs_)++ < script_log_cap_)
-                        world.log(std::string("script replay: the scripts re-executed to tick ") + std::to_string(t)
-                                  + (script_logical ? " differ from the live record: " : " differ in float parameters only: ")
-                                  + (script_where.empty() ? std::to_string(state.scripts.size()) + " vs "
-                                                              + std::to_string(live_scripts.size()) + " bytes"
-                                                          : script_where));
-                }
+                if (script_differs)
+                    count_script_difference(world, t, script_logical, script_where, state.scripts.size(), live_scripts.size());
                 if (recorded) {
                     // The rows stay with their tick for the next replay.
                     state.rows = std::move(recorded->rows);
@@ -2942,6 +2945,29 @@ namespace bmmo::session {
         // over the same records (the blobs are still captured), for the A/B in
         // one binary.
         void set_script_log_cap(uint32_t n) { script_log_cap_ = n; }
+        // Step SDF (docs/realtime-design.md): the end-of-replay check of the
+        // re-executed scripts against the live record keeps its byte compare
+        // on the rewinding frame; deferred, a difference's classification
+        // (rollback_world::diff_scripts: logical, float only, or none outside
+        // the written cells), its count and its log line wait in a queue for
+        // classify_script_diffs.  No simulation reads them.  Off (the
+        // default): classified at the last replayed tick, as before.
+        // The step's code is out of line (src/session/rollback_script_diff.cpp:
+        // core_host.cpp is near MSVC's section limit).
+        void set_defer_script_diffs(bool defer) { defer_script_diffs_ = defer; }
+        bool defer_script_diffs() const { return defer_script_diffs_; }
+        size_t script_diffs_pending() const { return script_diffs_.items.size(); }
+        uint32_t oldest_script_diff() const { return script_diffs_.items.empty() ? 0u : script_diffs_.items.front().tick; }
+        // The `most` oldest queued differences classified with `world`'s
+        // diff_scripts - the binding of the session that queued them: the
+        // walk names the blobs' blocks through its selection and the CK
+        // objects it names, and takes a parameter's class from them.
+        // `forced`: on a frame the queue's rule did not choose.
+        void classify_script_diffs(const rollback_world& world, size_t most = static_cast<size_t>(-1), bool forced = false);
+        // What is queued, dropped and counted unclassified: the objects it
+        // names are gone or another session's (a new session's start, the
+        // retail end after the level's teardown).  The count.
+        size_t drop_script_diffs();
         const rollback_thresholds& thresholds() const { return thresholds_; }
         void set_exact_restore(bool enable) { exact_restore_ = enable; }
         // RC2 (b) (step RCB): the capture's per-body read cache - a body
@@ -4043,6 +4069,21 @@ namespace bmmo::session {
             return true;
         }
 
+        // The last replayed tick's scripts `replayed`, whose bytes differ
+        // from the live record `live`: whether they differ outside what the
+        // check leaves out, and how.  An empty answer from diff_scripts: the
+        // bytes differ only in the record's written-cell section (step RK2,
+        // decision Q4: never compared) - not a mismatch.  Without the hook:
+        // a logical difference, named by the sizes.
+        static bool classify_scripts(const rollback_world& world, const std::vector<uint8_t>& live,
+                                     const std::vector<uint8_t>& replayed, bool& logical, std::string& where);
+        void count_script_difference(const rollback_world& world, uint32_t tick, bool logical, const std::string& where,
+                                     size_t replayed_size, size_t live_size);
+        // Step SDF: a difference queued for classify_script_diffs; a full
+        // queue's oldest is classified first, on this frame (logged once).
+        void queue_script_diff(const rollback_world& world, uint32_t tick, std::vector<uint8_t>&& live,
+                               const std::vector<uint8_t>& replayed);
+
         // Step SRT4, verify mode: `old` is the record a rewind to its tick
         // would have restored had every replayed tick been captured whole
         // (verify captures light ticks whole); `fresh` the same tick
@@ -4452,5 +4493,26 @@ namespace bmmo::session {
         uint32_t script_float_logs_ = 0;
         bool trace_plan_ = false;
         uint32_t plan_traces_ = 0;
+        // Step SDF: the queued differences, oldest first.  Four at most: a
+        // fifth classifies the oldest on its own frame (forced).  The queue's
+        // special members are out of line too: inline, the engine's own
+        // special members instantiated its vector in every user.
+        static constexpr size_t kScriptDiffQueue = 4;
+        struct script_diff_queue {
+            struct item {
+                uint32_t tick = 0;
+                std::vector<uint8_t> live, replayed;
+            };
+            script_diff_queue();
+            script_diff_queue(const script_diff_queue&);   // SimTool copies its engines
+            script_diff_queue& operator=(const script_diff_queue&);
+            script_diff_queue(script_diff_queue&&) noexcept;
+            script_diff_queue& operator=(script_diff_queue&&) noexcept;
+            ~script_diff_queue();
+            std::vector<item> items;
+        };
+        bool defer_script_diffs_ = false;
+        bool script_diff_full_logged_ = false;
+        script_diff_queue script_diffs_;
     };
 }

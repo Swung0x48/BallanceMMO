@@ -373,6 +373,15 @@ namespace bmmo::session {
         // contradicted, hints for a tick stepped past the reach, and the
         // bytes of the hint sections received.  Only once the server sent
         // one.
+        // Step SDF: sdiff=queued/classified/forced/unclassified/max queue/
+        // rewound - the end-of-replay script diffs deferred to a later frame
+        // (BMMO_SCRIPT_DIFF), only while they are deferred; rewound: those
+        // end_frame classified on a frame that replayed (forced by age).
+        const std::string sdiff = !s.rollback_.defer_script_diffs() ? std::string() : textf(
+            " sdiff=%llu/%llu/%llu/%llu/%llu/%llu", static_cast<unsigned long long>(rs.script_diffs_queued),
+            static_cast<unsigned long long>(rs.script_diffs_classified), static_cast<unsigned long long>(rs.script_diffs_forced),
+            static_cast<unsigned long long>(rs.script_diffs_unclassified), static_cast<unsigned long long>(rs.script_diff_queue_max),
+            static_cast<unsigned long long>(s.script_diffs_rewound_));
         const std::string hints = s.hint_bytes_ == 0 ? std::string() : textf(
             " hints=%llu/%llu/%llu/%llu/%llu", static_cast<unsigned long long>(s.hint_news_),
             static_cast<unsigned long long>(s.hint_rewinds_), static_cast<unsigned long long>(s.hint_wrong_),
@@ -655,7 +664,7 @@ namespace bmmo::session {
                      // starved reports now, the longest run, and the resyncs
                      // the starved rule asked for.
                      s.starved_run_, s.starved_run_max_, static_cast<unsigned long long>(s.starved_resyncs_),
-                     trafo.c_str(), probes.c_str(), arrays.c_str(), outside.c_str(), drain.c_str(), coalesced.c_str(), ccache.c_str()) + sparse + n3 + hints;
+                     trafo.c_str(), probes.c_str(), arrays.c_str(), outside.c_str(), drain.c_str(), coalesced.c_str(), ccache.c_str()) + sparse + n3 + hints + sdiff;
     }
 
 }

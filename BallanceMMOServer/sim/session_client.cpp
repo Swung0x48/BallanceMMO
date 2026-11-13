@@ -3715,6 +3715,7 @@ namespace {
             ++flow_steps_;
             const auto frame_started = std::chrono::steady_clock::now();
             frame();
+            core_.end_frame();   // step SDF: the frame's end, every rewind of it run
             const auto frame_ended = std::chrono::steady_clock::now();
             note_frame_time(frame_ended - frame_started);
             // Step A6: the telemetry window's times (start to start, and the frame).
@@ -5088,6 +5089,7 @@ namespace {
             return h;
         }
         void report() {
+            core_.settle_script_diffs();   // step SDF: the line counts every rewind's script diff
             log_line(core_.status_text(counters()));
             // RC4 (step B6RC's fix-up, review 2): what the dormant-script
             // encoding did in this process - trafo scripts written as one byte

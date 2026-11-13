@@ -425,7 +425,7 @@ void BallanceMMOClient::OnPostExitLevel() {
     // a session) leaves the level and goes on; any other exit ends a session
     // (FULL step RTDF: already at OnPreExitLevel, with a leave; this end is
     // the fallback for an exit that did not pass there).
-    if (!core_host_reload_exit()) core_host_end_local("left the level");
+    if (!core_host_reload_exit()) core_host_end_local("left the level", true);
     core_host_release_placement("the level exit");   // step SP10: the sector placement's copies go with the level
     // The guard's callback hangs on a level script, so the teardown destroys it
     // with the script; disabling it here hands the time factor back anyway.
