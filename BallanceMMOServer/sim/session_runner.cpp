@@ -158,6 +158,11 @@ namespace bmmo::sim {
         if (callbacks_.log) callbacks_.log(text);
     }
 
+    void session_runner::warn(const std::string& text) {
+        if (callbacks_.warn) callbacks_.warn(text);
+        else log(text);
+    }
+
     session_runner::input_stamp::input_stamp(clock::time_point at) : outer_(t_input_stamp) { t_input_stamp = at; }
     session_runner::input_stamp::~input_stamp() { t_input_stamp = outer_; }
 
@@ -349,7 +354,7 @@ namespace bmmo::sim {
             std::error_code ec;
             std::filesystem::create_directories(config_.journal_dir, ec);
             if (ec) {
-                log(prefix + config_.journal_dir.string() + ": " + ec.message());
+                warn(prefix + config_.journal_dir.string() + ": " + ec.message());
                 return;
             }
         }
@@ -375,8 +380,8 @@ namespace bmmo::sim {
         s.journal.set_compressed(true);   // a zstd stream (session/zstd_stream.hpp)
         if (!s.journal.open(path, header, config_.journal_max_bytes, error, std::move(poster),
                             bmmo::session::kJournalMaxQueued, config_.journal_flush, {},
-                            [this, prefix](const std::string& text) { log(prefix + text); })) {
-            log(prefix + error);
+                            [this, prefix](const std::string& text) { warn(prefix + text); })) {
+            warn(prefix + error);
             return;
         }
         {
@@ -430,6 +435,9 @@ namespace bmmo::sim {
             options.log = [this, session](const std::string& text) {
                 log("[session " + std::to_string(session) + "] " + text);
             };
+            options.warn = [this, session](const std::string& text) {
+                warn("[session " + std::to_string(session) + "] " + text);
+            };
             options.progress = [this, session](bmmo::session::boot_phase phase) {
                 if (callbacks_.on_boot_progress) callbacks_.on_boot_progress(session, phase);
             };
@@ -442,7 +450,7 @@ namespace bmmo::sim {
             if (!s->world) {
                 s->failed = true;
                 info.error = error;
-                log("[session " + std::to_string(session) + "] world boot failed: " + error);
+                warn("[session " + std::to_string(session) + "] world boot failed: " + error);
                 // A session that never reached the anchor is exactly when the
                 // box is wanted: the header (anchor fields 0), who was in the
                 // room and why it died, then close.
@@ -473,7 +481,7 @@ namespace bmmo::sim {
                 const auto [player, join_order] = players[i];
                 std::string add_error;
                 if (!s->world->add_player(player, join_order, add_error, 1)) {
-                    log("[session " + std::to_string(session) + "] add_player failed: " + add_error);
+                    warn("[session " + std::to_string(session) + "] add_player failed: " + add_error);
                     if (s->world->trafo_failed()) {
                         // Fail closed (trafo-replication design 2.4): a set
                         // that fails its invariants ends the session.
@@ -589,7 +597,7 @@ namespace bmmo::sim {
         change.tick = s.world->tick_index();
         std::string error;
         if (!s.world->add_player(player, join_order, error, life)) {
-            log("[session " + std::to_string(s.id) + "] add_player failed: " + error);
+            warn("[session " + std::to_string(s.id) + "] add_player failed: " + error);
             change.in_world = false;
             if (s.world->trafo_failed()) {
                 s.failed = true;
@@ -1360,11 +1368,12 @@ namespace bmmo::sim {
         });
     }
 
-    void session_runner::describe(uint32_t session) {
-        post([this, session] {
+    void session_runner::describe(uint32_t session, std::function<void(const std::string&)> out) {
+        post([this, session, out = std::move(out)] {
+            const auto say = [&](const std::string& text) { if (out) out(text); else log(text); };
             auto it = sessions_.find(session);
             if (it == sessions_.end() || !it->second->world) {
-                log("[session " + std::to_string(session) + "] no such session");
+                say("[session " + std::to_string(session) + "] no such session");
                 return;
             }
             auto& s = *it->second;
@@ -1385,7 +1394,7 @@ namespace bmmo::sim {
                       + " rx=" + std::to_string(buffer.received())
                       + " kept=" + std::to_string(buffer.stored())
                       + " late=" + std::to_string(buffer.stale());
-            log("[session " + std::to_string(session) + "] " + text);
+            say("[session " + std::to_string(session) + "] " + text);
         });
     }
 
@@ -1467,7 +1476,7 @@ namespace bmmo::sim {
                 for (uint32_t id: now) is += (is.empty() ? "" : ",") + std::to_string(id);
                 const std::string text = "proximity union: the candidate set changed between two steps ({" + was
                     + "} after the last, {" + is + "} at " + std::to_string(tick) + ")";
-                if (s.probe_set_drift <= 20) log("[session " + std::to_string(s.id) + "] " + text);
+                if (s.probe_set_drift <= 20) warn("[session " + std::to_string(s.id) + "] " + text);
                 if (recording) s.journal.note(tick, text);
             }
             s.world->place_probes();
@@ -1673,12 +1682,12 @@ namespace bmmo::sim {
                     + " applied at tick " + std::to_string(tick) + " while the id's newest life here is "
                     + std::to_string(s.world->life_of(e.player)) + ": the world runs it on that life's set ("
                     + std::to_string(s.trafo_life_mismatches) + " so far)";
-                log("[session " + std::to_string(s.id) + "] " + text);
+                warn("[session " + std::to_string(s.id) + "] " + text);
                 if (recording) s.journal.note(tick, text);
             }
             std::string error;
             if (!s.world->apply_event(e.player, e.event, error)) {
-                log("[session " + std::to_string(s.id) + "] event from " + std::to_string(e.player)
+                warn("[session " + std::to_string(s.id) + "] event from " + std::to_string(e.player)
                     + " stamped " + std::to_string(e.origin) + " at tick " + std::to_string(tick) + " failed: " + error);
                 if (recording) s.journal.note(tick, "event failed: " + error);
             }
@@ -1689,7 +1698,7 @@ namespace bmmo::sim {
         if (!s.world->tick(error)) {
             s.failed = true;
             s.running = false;
-            log("[session " + std::to_string(s.id) + "] tick " + std::to_string(tick) + " failed: " + error);
+            warn("[session " + std::to_string(s.id) + "] tick " + std::to_string(tick) + " failed: " + error);
             if (recording)
                 s.journal.note(tick, "end: tick " + std::to_string(tick) + " failed: " + error);
             if (callbacks_.on_failed) callbacks_.on_failed(s.id, error);

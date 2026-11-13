@@ -1059,6 +1059,9 @@ def run_case(args, sector, case_dir):
         '  journal_max_mb: 64\n'
         f'  journal_checkpoint_ticks: {args.checkpoint_ticks}\n'
         'auto_flush_log: true\n'
+        # Step SLQ: the server's diagnostics (S1, S5, the airship and resync
+        # lines this harness reads) are verbose lines.
+        f'log_verbose: {str(not args.quiet_server_log).lower()}\n'
     )
     (case_dir / 'config.yml').write_text(config, encoding='utf8')
 
@@ -1865,6 +1868,38 @@ def s5_summary(lines):
         out[key] = {'n': n, 'p50': ordered[min(n - 1, int(0.50 * n))], 'p99': ordered[min(n - 1, int(0.99 * n))],
                     'max': ordered[-1]}
     return out
+
+
+# Step SLQ: the server says its log level; the last of these lines in its log
+# decides (an external server's sits before the case, a console "verbose off"
+# after it).
+VERBOSE_MARKS = ('Verbose logging on.', 'Verbose logging off.')
+
+
+def server_log_level_problems(case_dir, quiet):
+    """A case whose server log is not verbose fails: the rows read its
+    diagnostics, which the default level leaves out (silently empty rows).
+    The problem is also the summary's 'server_log_level', which
+    lbm_fast_judge.py fails a twin on (the harness's VERDICT is not read
+    there)."""
+    if quiet:
+        return [], []
+    text = server_log_text(case_dir)
+    if not text:
+        return [], ['no server log to check its level (verbose expected)']
+    last = None
+    for line in text.splitlines():
+        for mark in VERBOSE_MARKS:
+            if line.rstrip().endswith(mark):
+                last = mark
+    # A server built before step SLQ has no marker and writes every line: its
+    # runner's boot line is a verbose one from the step on.
+    if last is None and '[Sim] [session ' in text and '] booting level ' in text:
+        return [], []
+    if last != VERBOSE_MARKS[0]:
+        return ['the server log is not verbose (set log_verbose: true, or --verbose): '
+                'the rows read its diagnostics'], []
+    return [], []
 
 
 def server_log_text(case_dir):
@@ -3683,6 +3718,9 @@ def report_only(args):
         case['dir'] = str(base / f'sector{case["sector"]}')
         problems, warnings = verdict(case, {ev.client for ev in args.events if ev.kind != 'none'},
                                      args.expect_refused)
+        level_problems, level_warnings = server_log_level_problems(pathlib.Path(case['dir']), args.quiet_server_log)
+        problems, warnings = problems + level_problems, warnings + level_warnings
+        case['server_log_level'] = '; '.join(level_problems)
         case['problems'], case['warnings'] = problems, warnings
         print(f'=== sector {case["sector"]} ===', flush=True)
         if warnings:
@@ -3860,6 +3898,9 @@ def main():
                     help='world agreement J5: client N leaves the room at its tick T and joins it again '
                          'on the same connection, MS ms later when given (--rejoin-at; not client 0)')
     ap.add_argument('--server-log', default='', help='H5: an external server\'s log, copied into the case')
+    ap.add_argument('--quiet-server-log', action='store_true',
+                    help='step SLQ: the server at its default log level (log_verbose: false): the rows read from '
+                         'its diagnostics stay empty and its log is not checked for "Verbose logging on."')
     ap.add_argument('--control', action='append', default=[],
                     help='H8: a control run (its directory or summary.json) whose event report is the band; repeatable')
     ap.add_argument('--arm', default='', help='H8: the arm of design 5.2 (A0, A0j, A1 .. A9c) whose own criteria '
@@ -3992,6 +4033,9 @@ def main():
             case.setdefault('events', []).append(journal_events(args, j))
         problems, warnings = verdict(case, {ev.client for ev in args.events if ev.kind != 'none'},
                                      args.expect_refused)
+        level_problems, level_warnings = server_log_level_problems(pathlib.Path(case['dir']), args.quiet_server_log)
+        problems, warnings = problems + level_problems, warnings + level_warnings
+        case['server_log_level'] = '; '.join(level_problems)
         case['problems'], case['warnings'] = problems, warnings
         failed += bool(problems)
         results.append(case)

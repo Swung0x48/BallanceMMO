@@ -43,6 +43,10 @@
 #endif
 
 using bmmo::Printf, bmmo::Sprintf, bmmo::LogFileOutput, bmmo::FatalError;
+// Step SLQ: the kinds of the server's own lines under the log threshold
+// (bmmo::set_log_threshold): the operator's lines are important (Printf's
+// default), the diagnostics verbose, an internal failure error.
+static constexpr bmmo::log_type kVerbose = bmmo::log_type::verbose, kError = bmmo::log_type::error;
 
 // Step K4b: the stamp every runner command posted while an input is handled
 // carries (session_runner::input_stamp); nothing to stamp without the runner.
@@ -154,6 +158,23 @@ public:
     // (sim/assign_copies.hpp: one datagram, not K).  0 (the default, and
     // every build without the flag): no volley.
     void set_test_assign_volley(int k) { test_assign_volley_ = k; }
+
+    // Step SLQ: the log's level.  Verbose writes the physics sessions'
+    // diagnostics too (the runner's and the worlds' [Sim] lines, the
+    // per-session internals); otherwise the log keeps the operator's lines,
+    // warnings and internal failures.  On under log_verbose, --verbose, the
+    // console's "verbose on", and with the switches whose lines are
+    // diagnostics (physics.debug_trace, physics.arrival_trace, the runner's
+    // BMMO_* debug variables).  The marker line says when it turns on or off.
+    void set_verbose_arg() { verbose_arg_ = true; }
+    void set_log_verbose(bool on) {
+        std::lock_guard lk(state_mutex_);
+        apply_log_verbose(on);
+    }
+    bool log_verbose() {
+        std::lock_guard lk(state_mutex_);
+        return log_verbose_;
+    }
 
     // Main network loop. Each iteration:
     //   1. update(): drain incoming messages and run connection callbacks;
@@ -518,11 +539,30 @@ public:
         return true;
     }
 
+    // state_mutex_ held.  The first call sets the level; a later one says
+    // the change only.
+    void apply_log_verbose(bool on) {
+        if (log_level_set_ && on == log_verbose_) return;
+        bmmo::set_log_threshold(on ? bmmo::log_type::verbose : bmmo::log_type::msg);
+        if (on || log_level_set_) Printf(on ? "Verbose logging on." : "Verbose logging off.");
+        log_verbose_ = on;
+        log_level_set_ = true;
+    }
+
     bool load_config() {
         std::lock_guard lk(state_mutex_);
         const bool prev_ghost_mode = config_.ghost_mode;
         if (!config_.load())
             return false;
+        {
+            const auto debug_env = [](const char* name) {
+                const char* v = std::getenv(name);
+                return v && *v;
+            };
+            apply_log_verbose(verbose_arg_ || config_.log_verbose || config_.physics_debug_trace
+                              || config_.physics_arrival_trace || debug_env("BMMO_SESSION_STALL")
+                              || debug_env("BMMO_RUNNER_JITTER") || debug_env("BMMO_TRACE_LIVE_ORDER"));
+        }
 #if !BMMO_WITHOUT_GNS
         if (!coordinated()) bmmo::net::gns::set_log_level(config_.logging_level);
 #endif
@@ -776,9 +816,10 @@ public:
 
     // Removes a client from its room (voluntary Leave or a disconnect) and
     // notifies the remaining members. `ack` sends the leaver a RequestAccepted.
-    void room_remove_and_notify(bmmo::net::connection c, bool ack) {
+    // `name`: a disconnected client's (gone from clients_ by now; step SLQ).
+    void room_remove_and_notify(bmmo::net::connection c, bool ack, const std::string& name = {}) {
 #if BMMO_BUILD_SIM
-        physics_session_member_left(c);
+        physics_session_member_left(c, ack ? "left the room" : "disconnected", name);
 #endif
         auto rr = rooms_.leave(c);
         if (!rr.was_member) {
@@ -786,6 +827,9 @@ public:
                     bmmo::room::error_code::NotInRoom, 0);
             return;
         }
+        Printf("%s (#%u) left room %u.", name.empty() ? get_client_name(c) : name, c, rr.room);
+        if (rr.new_host != bmmo::net::kInvalidConnection)
+            Printf("Room %u: %s is the host now.", rr.room, get_client_name(rr.new_host));
         if (ack && clients_.contains(c))
             send_room_event(c, bmmo::room::event_type::RequestAccepted,
                     bmmo::room::error_code::None, rr.room);
@@ -1091,6 +1135,15 @@ public:
         };
         std::map<bmmo::net::connection, member_guard> guards;
         uint64_t rejected_events = 0, flagged_events = 0;
+        // Step SLQ: the operator's lines - the level's load time, the ticks
+        // the session ran (its length: no clock is read for it), the resyncs
+        // the members asked for (the start handshake's too; a base-missed
+        // re-answer is the same resync).
+        double load_seconds = 0;
+        bool ran = false;
+        uint32_t first_tick = 0, last_tick = 0;
+        uint32_t resyncs = 0;
+        std::map<bmmo::net::connection, uint32_t> member_resyncs;
     };
 
     void init_physics_runner() {
@@ -1136,7 +1189,10 @@ public:
         rc.journal_flush = config_.session_io_journal_flush;
         physics_seed_ = rc.seed;
         bmmo::sim::session_callbacks callbacks;
-        callbacks.log = [](const std::string& text) { Printf("[Sim] %s", text); };
+        // Step SLQ: the runner's and the worlds' lines are diagnostics; their
+        // internal failures come through warn.
+        callbacks.log = [](const std::string& text) { Printf(kVerbose, "[Sim] %s", text); };
+        callbacks.warn = [](const std::string& text) { Printf(kError, "[Sim] %s", text); };
         callbacks.on_world_ready = [this](const bmmo::sim::world_ready_info& info) { on_world_ready(info); };
         callbacks.on_boot_progress = [this](uint32_t session, bmmo::session::boot_phase phase) {
             on_boot_progress(session, phase);
@@ -1226,7 +1282,7 @@ public:
         if (s.mechanism_slots) {
             const auto choice = bmmo::session::capped_join_order(used, retiring, s.mechanism_slots);
             if (choice.verdict == bmmo::session::join_order_verdict::order) order = choice.order;
-            else Printf("Physics session %u: ERROR join order %u assigned at or above the %u mechanism slots.", s.id,
+            else Printf(kError, "Physics session %u: ERROR join order %u assigned at or above the %u mechanism slots.", s.id,
                         static_cast<unsigned>(order), static_cast<unsigned>(s.mechanism_slots));
         }
         s.join_orders[c] = order;
@@ -1278,7 +1334,7 @@ public:
         session_latency out;
         out.worst_rtt_ms = static_cast<uint32_t>(worst);
         out.input_delay = bmmo::session::input_delay_for_ping(worst, config_.physics_input_delay);
-        Printf("Room %u: input delay %u ticks (%.0f ms) for a worst round trip of %d ms (%s).",
+        Printf(kVerbose, "Room %u: input delay %u ticks (%.0f ms) for a worst round trip of %d ms (%s).",
                r.id, out.input_delay, out.input_delay * 1000.0 / bmmo::session::TICK_RATE, worst, detail.c_str());
         return out;
     }
@@ -1293,7 +1349,7 @@ public:
         const session_latency latency = measure_session_latency(r);
         s.input_delay = latency.input_delay;
         s.sector_lead = bmmo::session::sector_lead_for_ping(s.input_delay, static_cast<int>(latency.worst_rtt_ms));
-        Printf("Room %u: sector lead %u ticks (%.0f ms): a crossing starts its sector that far ahead, on every member.",
+        Printf(kVerbose, "Room %u: sector lead %u ticks (%.0f ms): a crossing starts its sector that far ahead, on every member.",
                r.id, s.sector_lead, s.sector_lead * 1000.0 / bmmo::session::TICK_RATE);
         // Design 9.2: the members present at the start are anchored at the same
         // lead a late joiner is, measured from tick 0 (the world has not ticked
@@ -1333,13 +1389,13 @@ public:
         // cannot run it is refused at its SessionReady (handle_session_ready).
         s.world_options = config_.physics_trafo_inputs ? bmmo::session::WORLD_TRAFO_INPUTS : 0u;
         if (s.world_options & bmmo::session::WORLD_TRAFO_INPUTS)
-            Printf("Room %u: the trafo is an input in this session (world option trafo inputs).", r.id);
+            Printf(kVerbose, "Room %u: the trafo is an input in this session (world option trafo inputs).", r.id);
         // Protocol 12 (sector placement design 2.4, step S5): the same rule
         // for the placement - the config's, refused at SessionReady for a
         // member without CAP_PLACEMENT.
         if (config_.physics_placement_clones) {
             s.world_options |= bmmo::session::WORLD_PLACEMENT_CLONES;
-            Printf("Room %u: every PH row gets its own object in this session (world option placement clones).", r.id);
+            Printf(kVerbose, "Room %u: every PH row gets its own object in this session (world option placement clones).", r.id);
         }
         // Step G2 (world-agreement-gaps-design.md 2.4, 5): the proximity
         // union's rule in the server's world; from step G3 every client runs
@@ -1348,7 +1404,7 @@ public:
         // (kept on the wire, no protocol change) and physics.proximity_union
         // is ignored (config_manager.cpp).
         s.world_options |= bmmo::session::WORLD_PROXIMITY_UNION;
-        Printf("Room %u: every world places the mechanism proximity probes by the union's rule in this session "
+        Printf(kVerbose, "Room %u: every world places the mechanism proximity probes by the union's rule in this session "
                "(world option proximity union; BodyRevived retired).", r.id);
         // Step Q7 (world-agreement-gaps-design.md 2.10, 5): one mechanism
         // responds to every player - K slot copies of every per-player unit
@@ -1358,7 +1414,7 @@ public:
             s.world_options |= bmmo::session::WORLD_PLAYER_MECHANISMS;
             s.mechanism_slots = bmmo::session::units::mechanism_slot_count(
                 config_.maximum_members, static_cast<uint32_t>(bmmo::session::MAX_PLAYERS_PER_SESSION));
-            Printf("Room %u: one mechanism responds to every player in this session (world option player mechanisms, "
+            Printf(kVerbose, "Room %u: one mechanism responds to every player in this session (world option player mechanisms, "
                    "%u slots; join orders below it).", r.id, static_cast<unsigned>(s.mechanism_slots));
         }
         // Step RK3 (record-format-gaps-design.md 8 row K3 = C4, option (c)):
@@ -1367,7 +1423,7 @@ public:
         // the other levels, so it is set whatever the level.
         if (config_.physics_session_clock) {
             s.world_options |= bmmo::session::WORLD_SESSION_CLOCK;
-            Printf("Room %u: the Level 1 tutorial is switched off in every world of this session (world option "
+            Printf(kVerbose, "Room %u: the Level 1 tutorial is switched off in every world of this session (world option "
                    "session clock).", r.id);
         }
         // Trafo-replication design 2.6: every session seeds its explosions by
@@ -1450,7 +1506,12 @@ public:
         rooms_.reset_session(s.room);
         if (runner_) runner_->destroy_session(session, reason);
         broadcast_room_states();
-        Printf("Physics session %u (room %u) ended: %s", session, s.room, reason);
+        const uint32_t seconds = s.ran ? static_cast<uint32_t>((s.last_tick - s.first_tick + 1) / bmmo::session::TICK_RATE) : 0;
+        Printf("Physics session %u (room %u, level %d) ended after %um%02us: %s (%zu player%s, %u resync%s, %llu event%s "
+               "flagged, %llu rejected).", session, s.room, s.map.level, seconds / 60, seconds % 60, reason,
+               s.lives.size(), s.lives.size() == 1 ? "" : "s", s.resyncs, s.resyncs == 1 ? "" : "s",
+               static_cast<unsigned long long>(s.flagged_events), s.flagged_events == 1 ? "" : "s",
+               static_cast<unsigned long long>(s.rejected_events));
     }
 
     void send_session_start(physics_session_state& s, bmmo::net::connection to, uint32_t first_tick) {
@@ -1518,7 +1579,7 @@ public:
                     && std::find(s.members.begin(), s.members.end(), m) != s.members.end())
                 to.push_back(static_cast<uint32_t>(m));
         ++s.member_messages;
-        Printf("Physics session %u: SessionMember %s p%u life %u join order %u at tick %u to %zu member(s)%s.", s.id,
+        Printf(kVerbose, "Physics session %u: SessionMember %s p%u life %u join order %u at tick %u to %zu member(s)%s.", s.id,
                kind == bmmo::session::MEMBER_ADDED ? "added" : "removed", entry.id, static_cast<unsigned>(entry.life),
                static_cast<unsigned>(entry.join_order), tick, to.size(),
                test_hold_member_ms() ? Sprintf(" (held %u ms)", test_hold_member_ms()).c_str() : "");
@@ -1578,7 +1639,7 @@ public:
         auto it = physics_sessions_.find(c.session);
         if (it == physics_sessions_.end()) return;
         const auto member = static_cast<bmmo::net::connection>(c.player);
-        Printf("Physics session %u: %s (life %u) could not be added to the world: %s", c.session,
+        Printf(kError, "Physics session %u: %s (life %u) could not be added to the world: %s", c.session,
                get_client_name(member), static_cast<unsigned>(c.life), error);
         // Only while the member is still on this life: one that left and
         // came back meanwhile is on a newer life, which this does not end.
@@ -1587,7 +1648,7 @@ public:
         const bool same_life = lives.count(member) && lives.at(member) == c.life;
         if (cs != client_session_.end() && cs->second == c.session && same_life) {
             send_session_end(c.session, member, "could not be added to the world: " + error);
-            physics_session_member_left(member);
+            physics_session_member_left(member, nullptr);   // the line above says who and why
         }
         if (auto again = physics_sessions_.find(c.session); again != physics_sessions_.end()) {
             again->second.retiring_orders.erase({member, c.life});
@@ -1625,7 +1686,7 @@ public:
         msg.serialize();
         for (const auto m: s.members) send(m, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
         static constexpr const char* kPhases[] = {"booting the game", "entering the level", "preparing the world"};
-        Printf("Physics session %u: boot phase %u (%s) at %.3f s, sent to %zu players.", session,
+        Printf(kVerbose, "Physics session %u: boot phase %u (%s) at %.3f s, sent to %zu players.", session,
                static_cast<unsigned>(phase), kPhases[static_cast<size_t>(phase)],
                std::chrono::duration<double>(instant(bmmo::session::clock_site::server_boot_log) - s.boot_requested).count(),
                s.members.size());
@@ -1664,7 +1725,8 @@ public:
         // rule did not hold: the passes queued during the boot carry their
         // earlier stamps).
         s.start_deadline = info.ready_at + bmmo::sim::kStartBarrierTimeout;
-        Printf("Physics session %u: world ready %.3f s after the boot request (anchor %016llx, placement %016llx), "
+        s.load_seconds = std::chrono::duration<double>(info.ready_at - s.boot_requested).count();
+        Printf(kVerbose, "Physics session %u: world ready %.3f s after the boot request (anchor %016llx, placement %016llx), "
                "SessionStart sent to %zu players.", s.id,
                std::chrono::duration<double>(info.ready_at - s.boot_requested).count(),
                static_cast<unsigned long long>(s.anchor_hash), static_cast<unsigned long long>(s.anchor_placement),
@@ -1696,6 +1758,9 @@ public:
         auto it = physics_sessions_.find(session);
         if (it == physics_sessions_.end()) return;
         auto& s = it->second;
+        if (!s.ran) s.first_tick = tick;   // step SLQ: the session's length
+        s.ran = true;
+        s.last_tick = tick;
         s.relay.push(tick, applied);
         s.relay.set_hints(std::move(queued));   // protocol 37
         // Unreliable, no delay, with the window: a lost datagram costs nothing
@@ -1830,7 +1895,7 @@ public:
         r.open = false;
         if (s.s2_lines > kHeldRunLines) return;
         if (++s.s2_lines > kHeldRunLines) {
-            Printf("Physics session %u: S2 lines capped at %u.", s.id, kHeldRunLines);
+            Printf(kVerbose, "Physics session %u: S2 lines capped at %u.", s.id, kHeldRunLines);
             return;
         }
         std::string delays;
@@ -1843,7 +1908,7 @@ public:
         const auto source = [](uint32_t t) {
             return t == bmmo::session::INPUT_SOURCE_DEFAULT ? std::string("d") : std::to_string(t);
         };
-        Printf("Physics session %u: S2 held player=%u ticks=%u..%u n=%u sent=%u total=%u copies=%llu epoch=%u src=%s..%s delay=%s",
+        Printf(kVerbose, "Physics session %u: S2 held player=%u ticks=%u..%u n=%u sent=%u total=%u copies=%llu epoch=%u src=%s..%s delay=%s",
                s.id, static_cast<unsigned>(m), r.first, r.last, r.count, r.sent, n.held_total,
                static_cast<unsigned long long>(n.copies), n.epoch, source(r.source_min), source(r.source_max), delays);
     }
@@ -1855,7 +1920,9 @@ public:
         auto& s = it->second;
         if (!s.ticking) {
             s.ticking = true;
-            Printf("Physics session %u: ticking (first snapshot at tick %u).", s.id, snapshot.tick);
+            Printf(kVerbose, "Physics session %u: ticking (first snapshot at tick %u).", s.id, snapshot.tick);
+            Printf("Physics session %u is running (level %d loaded in %.1f s, %zu player%s).", s.id, s.map.level,
+                   s.load_seconds, s.members.size(), s.members.size() == 1 ? "" : "s");
         }
         for (const auto& body: snapshot.bodies) {
             if (body.kind != bmmo::session::body_kind::Ball) continue;
@@ -1930,7 +1997,7 @@ public:
         if (msg.frame.size() > bmmo::session_resync_state_msg::kMaxBytesField)
             cut += " frame " + std::to_string(msg.frame.size()) + " bytes";
         if (!cut.empty())
-            Printf("Physics session %u: the resync state for %s is cut on the wire (%s): the client will refuse what is cut.",
+            Printf(kError, "Physics session %u: the resync state for %s is cut on the wire (%s): the client will refuse what is cut.",
                    s.id, get_client_name(c), cut.c_str());
         // A state that did not compress is not sent: the member's hold
         // times out and asks again, as for a state that never came.
@@ -1948,7 +2015,7 @@ public:
             if (player == out.player) own_clone = name;
         const std::string reference = out.ref_kind == bmmo::session::RESYNC_REF_PREVIOUS
             ? "against the state of tick " + std::to_string(out.ref_tick) : std::string("plain");
-        Printf("Physics session %u: resync state for %s: tick %u (base %u), %zu bodies, %zu script bytes, %zu savestate "
+        Printf(kVerbose, "Physics session %u: resync state for %s: tick %u (base %u), %zu bodies, %zu script bytes, %zu savestate "
                "bytes, own clone %s, union {%s}, body %u bytes as a %zu-byte zstd frame %s (coded in %llu us), "
                "%zu bytes on the wire (result %d), emitted in %llu us%s%s.",
                s.id, get_client_name(c), out.tick, out.base, out.state.rows.size(), out.state.scripts.size(),
@@ -1972,7 +2039,7 @@ public:
         const auto c = static_cast<bmmo::net::connection>(player);
         if (std::find(s.members.begin(), s.members.end(), c) == s.members.end()) return;
         const uint32_t again = resync_member(s, c, 0);
-        Printf("Physics session %u: resync base %u for %s was stepped before the request reached the runner: re-assigned at %u.",
+        Printf(kVerbose, "Physics session %u: resync base %u for %s was stepped before the request reached the runner: re-assigned at %u.",
                s.id, base, get_client_name(c), again);
     }
 
@@ -2068,11 +2135,14 @@ public:
                 s.start_deadline = instant(bmmo::session::clock_site::server_start_deadline_join) + bmmo::sim::kStartBarrierTimeout;
             }
         }
-        Printf("Physics session %u: %s joined%s (life %u, join order %u).", s.id, get_client_name(c),
-               s.late.count(c) ? " late" : "", static_cast<unsigned>(life), static_cast<unsigned>(join_order));
+        // Step SLQ: the life and the join order are the SessionMember line's (verbose).
+        Printf("Physics session %u: %s joined%s.", s.id, get_client_name(c), s.late.count(c) ? " late" : "");
     }
 
-    void physics_session_member_left(bmmo::net::connection c) {
+    // `why` and `name` for the operator's line (step SLQ; none when the caller
+    // logged why already): a disconnected client's name is gone from clients_
+    // by now.
+    void physics_session_member_left(bmmo::net::connection c, const char* why, const std::string& name = {}) {
         auto cs = client_session_.find(c);
         if (cs == client_session_.end()) return;
         const uint32_t session = cs->second;
@@ -2096,6 +2166,13 @@ public:
             s.start_waiting.erase(w);
             return;
         }
+        if (why) {
+            const auto r = s.member_resyncs.find(c);
+            const uint32_t resyncs = r != s.member_resyncs.end() ? r->second : 0;
+            Printf("Physics session %u: %s left (%s; %u resync%s).", s.id, name.empty() ? get_client_name(c) : name,
+                   why, resyncs, resyncs == 1 ? "" : "s");
+        }
+        s.member_resyncs.erase(c);
         s.members.erase(std::remove(s.members.begin(), s.members.end(), c), s.members.end());
         s.assign_repeats.erase(std::remove_if(s.assign_repeats.begin(), s.assign_repeats.end(),
                                               [c](const physics_session_state::assign_repeat& r) { return r.to == c; }),
@@ -2162,7 +2239,7 @@ public:
                 ++sent;
             }
         if (sent)
-            Printf("Physics session %u: %zu Trafo event(s) applied at or after tick %u resent to %s with its state.", s.id, sent,
+            Printf(kVerbose, "Physics session %u: %zu Trafo event(s) applied at or after tick %u resent to %s with its state.", s.id, sent,
                    base, get_client_name(c));
     }
 
@@ -2251,7 +2328,7 @@ public:
         auto lead = s.leads.find(c);
         if (lead == s.leads.end() || !(lead->second.caps & bmmo::session::CAP_LEAD)) return;
         if (n == s.notices.end() || !n->second.assigned || n->second.epoch != notice.epoch) {
-            Printf("Physics session %u: SessionLead %u for %s decided under base %u, now %u: not sent.",
+            Printf(kVerbose, "Physics session %u: SessionLead %u for %s decided under base %u, now %u: not sent.",
                    s.id, notice.id, get_client_name(c), notice.epoch,
                    n == s.notices.end() ? 0u : n->second.epoch);
             return;
@@ -2273,7 +2350,7 @@ public:
             c, notice.id, msg.raw.str(), kLeadRepeats, instant(bmmo::session::clock_site::server_lead_repeat) + kLeadRepeatSpacing});
         lead->second.outstanding = notice.id;
         lead->second.outstanding_k = notice.k;
-        Printf("Physics session %u: SessionLead %u to %s: %+d ticks, held [%u, %u), base %u.", s.id, notice.id,
+        Printf(kVerbose, "Physics session %u: SessionLead %u to %s: %+d ticks, held [%u, %u), base %u.", s.id, notice.id,
                get_client_name(c), notice.k, notice.held_from, notice.effective, notice.epoch);
     }
 
@@ -2297,7 +2374,7 @@ public:
         lead->second.offset = std::max(0, lead->second.offset + applied);
         retire_lead_repeats(s, c);
         runner_->acknowledge_lead(s.id, c, msg.seq, applied);
-        Printf("Physics session %u: %s applied %+d ticks of SessionLead %u (%+d sent, %+d acked); lead offset %d, L_eff %u.",
+        Printf(kVerbose, "Physics session %u: %s applied %+d ticks of SessionLead %u (%+d sent, %+d acked); lead offset %d, L_eff %u.",
                s.id, get_client_name(c), applied, msg.seq, lead->second.outstanding_k, static_cast<int>(msg.applied),
                lead->second.offset,
                bmmo::sim::effective_lead_ticks(lead->second.assigned_lead, lead->second.offset));
@@ -2312,7 +2389,7 @@ public:
         bmmo::net::connection_status status{};
         const int ping = link_status(c, status) ? status.ping_ms : -1;
         auto ms = [](uint16_t tenths) { return tenths / 10.0; };
-        Printf("Physics session %u: telemetry %s (#%u, %s): tick=%u ticks=%u frames=%u interval p50=%.1f p99=%.1f "
+        Printf(kVerbose, "Physics session %u: telemetry %s (#%u, %s): tick=%u ticks=%u frames=%u interval p50=%.1f p99=%.1f "
                "p999=%.1f max=%.1f ms over33=%u over50=%u over100=%u work p99=%.1f max=%.1f ms rewinds=%u "
                "replayed=%u resyncs=%u holds=%u starved=%u behind=%.1f inbound p50=%.1f p99=%.1f max=%.1f ms "
                "ping=%d ms",
@@ -2428,7 +2505,7 @@ public:
             }
         if (sent && s.handshake.current_phase() == bmmo::session::start_handshake::phase::idle) {
             s.handshake.begin(steady_us(instant(bmmo::session::clock_site::server_handshake_begin)));
-            Printf("Physics session %u: start handshake: the start base %u went to %zu member(s); waiting for every "
+            Printf(kVerbose, "Physics session %u: start handshake: the start base %u went to %zu member(s); waiting for every "
                    "member to confirm it (clock samples).", s.id, s.start_tick_base, sent);
         }
     }
@@ -2469,7 +2546,7 @@ public:
         msg.serialize();
         for (const auto m: s.members)
             if (!s.late.count(m)) send(m, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
-        Printf("Physics session %u: start handshake (status of start %u): %s", s.id, seq, text.c_str());
+        Printf(kVerbose, "Physics session %u: start handshake (status of start %u): %s", s.id, seq, text.c_str());
     }
 
     // One SessionStartAt (reliable, then copies one per main-loop pass).
@@ -2511,7 +2588,7 @@ public:
                 s.start_waiting.clear();
                 for (const auto c: waiting) {
                     client_session_.erase(c);
-                    Printf("Physics session %u: %s waited for the start handshake: joining late.", id, get_client_name(c));
+                    Printf(kVerbose, "Physics session %u: %s waited for the start handshake: joining late.", id, get_client_name(c));
                     join_member(s, c);
                 }
             }
@@ -2542,7 +2619,7 @@ public:
                                      get_client_name(static_cast<bmmo::net::connection>(m)),
                                      s.handshake.confirmed_seq(m),
                                      static_cast<long long>((s.handshake.answer_in_flight_until(m) - now) / 1000));
-                Printf("Physics session %u: start handshake: start %u awaiting confirmation before its deadline; "
+                Printf(kVerbose, "Physics session %u: start handshake: start %u awaiting confirmation before its deadline; "
                        "not counted missing while "
                        "their answer may still be in flight:%s", id, s.handshake.seq(), waits.c_str());
             }
@@ -2572,7 +2649,7 @@ public:
                                        get_client_name(static_cast<bmmo::net::connection>(m)), e->best.rtt_us / 1000.0,
                                        static_cast<long long>(e->best.offset_us), e->samples);
                 }
-                Printf("Physics session %u: start handshake: start %u at +%lld ms (confirm by +%lld ms, worst rtt "
+                Printf(kVerbose, "Physics session %u: start handshake: start %u at +%lld ms (confirm by +%lld ms, worst rtt "
                        "%.1f ms):%s", id, s.handshake.seq(), static_cast<long long>(in_ms),
                        static_cast<long long>((sch.deadline_us - now) / 1000),
                        s.handshake.worst_rtt_us(members) / 1000.0, offsets.c_str());
@@ -2604,12 +2681,12 @@ public:
                 const auto origin = now_tp + std::chrono::microseconds(sch.x_us - now);
                 runner_->start_at(id, origin);
                 if (r.commit)
-                    Printf("Physics session %u: start handshake: start %u committed (%s started on it); its instant "
+                    Printf(kVerbose, "Physics session %u: start handshake: start %u committed (%s started on it); its instant "
                            "is %+lld ms from now (the schedule starts from it).", id, r.commit_seq,
                            get_client_name(static_cast<bmmo::net::connection>(r.committed_by)),
                            static_cast<long long>((sch.x_us - now) / 1000));
                 else
-                    Printf("Physics session %u: start handshake: all %u members confirmed start %u; the schedule "
+                    Printf(kVerbose, "Physics session %u: start handshake: all %u members confirmed start %u; the schedule "
                            "starts in %lld ms.", id, r.total, s.handshake.seq(),
                            static_cast<long long>((sch.x_us - now) / 1000));
             }
@@ -2623,11 +2700,11 @@ public:
                         watched += Sprintf(" %s (confirmed start %u)", get_client_name(static_cast<bmmo::net::connection>(m)),
                                            s.handshake.confirmed_seq(m));
                 if (!watched.empty())
-                    Printf("Physics session %u: start handshake: may run on another start than %u (watched until "
+                    Printf(kVerbose, "Physics session %u: start handshake: may run on another start than %u (watched until "
                            "they confirm a later one or report):%s", id, r.commit_seq, watched.c_str());
             }
             for (const auto& x: r.resync) {
-                Printf("Physics session %u: start handshake: %s %s on start %u while start %u is committed: resynced "
+                Printf(kVerbose, "Physics session %u: start handshake: %s %s on start %u while start %u is committed: resynced "
                        "onto start %u%s.", id, get_client_name(static_cast<bmmo::net::connection>(x.member)),
                        x.known ? "runs" : "may run", x.ran_on, r.resync_onto, r.resync_onto,
                        x.known ? " (it said so)"
@@ -2643,7 +2720,7 @@ public:
                    get_client_name(m));
             send_session_end(session, m, "refused: this client did not confirm the session start in time (its start "
                                          "handshake ended: a message lost, or its anchor hold gave up first)");
-            physics_session_member_left(m);
+            physics_session_member_left(m, nullptr);
         }
     }
 
@@ -2661,8 +2738,10 @@ public:
             s.start_repeats.erase(std::remove_if(s.start_repeats.begin(), s.start_repeats.end(),
                                                  [c](const physics_session_state::start_repeat& r) { return r.to == c; }),
                                   s.start_repeats.end());
+            ++s.resyncs;   // step SLQ
+            ++s.member_resyncs[c];
             const uint32_t base = resync_member(s, c, 0);
-            Printf("Physics session %u: start handshake: %s resynced at tick %u: from start %u onto start %u.", s.id,
+            Printf(kVerbose, "Physics session %u: start handshake: %s resynced at tick %u: from start %u onto start %u.", s.id,
                    get_client_name(c), base, x.ran_on, s.start_resync_onto);
         }
     }
@@ -2693,7 +2772,7 @@ public:
             Printf("Physics session %u: %s refused: start %u (base %u) was %u ticks late.", s.id,
                    get_client_name(c), msg.seq, msg.first_tick, msg.late_ticks);
             send_session_end(s.id, c, "The connection was lost for too long while the session was starting.");
-            physics_session_member_left(c);
+            physics_session_member_left(c, nullptr);
             return;
         }
         const auto arrival = arrival_of(received);
@@ -2714,10 +2793,10 @@ public:
             const bool resync_before = s.handshake.resync_pending();
             s.handshake.started_on(c, msg.seq);
             if (s.handshake.committed_seq() != before)
-                Printf("Physics session %u: %s already started on start %u (a later start reached it too late): "
+                Printf(kVerbose, "Physics session %u: %s already started on start %u (a later start reached it too late): "
                        "start %u is committed.", s.id, get_client_name(c), msg.seq, msg.seq);
             else if (!resync_before && s.handshake.resync_pending())
-                Printf("Physics session %u: %s runs on start %u, but the schedule ticks from start %u: it is resynced.",
+                Printf(kVerbose, "Physics session %u: %s runs on start %u, but the schedule ticks from start %u: it is resynced.",
                        s.id, get_client_name(c), msg.seq, s.handshake.committed_seq());
             return;
         }
@@ -2736,7 +2815,7 @@ public:
         s.corrected[c] = msg.first_tick;
         send_start_at(s, c, msg.first_tick, 0, bmmo::session::START_AT_FLAG_CORRECTION, sent->second,
                       e->arrival_local(sent->second));
-        Printf("Physics session %u: %s's base %u was due at its +%lld us (rtt %.1f ms, offset %+lld us): correction sent.",
+        Printf(kVerbose, "Physics session %u: %s's base %u was due at its +%lld us (rtt %.1f ms, offset %+lld us): correction sent.",
                s.id, get_client_name(c), msg.first_tick, static_cast<long long>(e->arrival_local(sent->second)),
                e->best.rtt_us / 1000.0, static_cast<long long>(e->best.offset_us));
     }
@@ -2835,7 +2914,7 @@ public:
                    static_cast<long long>(bmmo::sim::kStallRemoveTimeout.count()));
             send_session_end(session, m, "no input from this client for "
                              + std::to_string(bmmo::sim::kStallRemoveTimeout.count()) + " s (the game stopped responding)");
-            physics_session_member_left(m);
+            physics_session_member_left(m, nullptr);
         }
     }
 
@@ -2870,7 +2949,7 @@ public:
             // Ready late-joins it to what is now a running session.
             // Leaving it in the room matters - the client is told the session
             // ended and has no way to learn it was removed from the room.
-            physics_session_member_left(m);
+            physics_session_member_left(m, "did not report ready");
         }
     }
 
@@ -2924,7 +3003,7 @@ public:
                    client_it->second.name, what, msg.caps, s.world_options);
             const uint32_t session = s.id;
             send_session_end(session, c, reason ? reason : bmmo::session::ready_refusal_reason(refusal));
-            physics_session_member_left(c);
+            physics_session_member_left(c, nullptr);
         };
         // Step B9DX (the user, 2026-10-28: refuse it outright, no more
         // compatibility): a client without the session core (no CAP_PLACEMENT:
@@ -3019,7 +3098,7 @@ public:
             const uint32_t horizon = runner_->leaving_horizon(s.id);
             const uint32_t clamped = bmmo::session::late_join_base(assigned, horizon);
             if (clamped != assigned)
-                Printf("Physics session %u: %s's base %u moved to %u, the removal of a leaving life (J4).", s.id,
+                Printf(kVerbose, "Physics session %u: %s's base %u moved to %u, the removal of a leaving life (J4).", s.id,
                        client_it->second.name, assigned, clamped);
             join_clamp_delta = clamped - assigned;
             assigned = clamped;
@@ -3045,7 +3124,7 @@ public:
         runner_->player_ready(msg.session, c, assigned, assigned_lead + join_clamp_delta);
         if (late) send_session_assign(s, c, assigned, state ? bmmo::session::ASSIGN_FLAG_STATE_FOLLOWS : 0);
         else assign_start_members(s);
-        Printf("Physics session %u: %s ready (assigned tick %u; physics %s, %s; caps %08x).", s.id, client_it->second.name,
+        Printf(kVerbose, "Physics session %u: %s ready (assigned tick %u; physics %s, %s; caps %08x).", s.id, client_it->second.name,
                 assigned, msg.physics_sha256.substr(0, 12), msg.build_id, msg.caps);
         if (late) {
             // catch the late joiner up: everyone's current ball, every sector
@@ -3057,7 +3136,7 @@ public:
             resend_trafo_relayed(s, c, assigned);
             if (state) {
                 runner_->request_resync_state(s.id, c, assigned);
-                Printf("Physics session %u: the state of tick %u follows to the late joiner %s alone (protocol 10).", s.id,
+                Printf(kVerbose, "Physics session %u: the state of tick %u follows to the late joiner %s alone (protocol 10).", s.id,
                        assigned - 1, client_it->second.name);
             } else {
                 runner_->request_full_snapshot(s.id);
@@ -3082,6 +3161,8 @@ public:
         auto& s = it->second;
         if (!runner_->running(s.id)) return;
         if (auto lead = s.leads.find(c); lead != s.leads.end()) lead->second.resync_claim = msg.held;
+        ++s.resyncs;   // step SLQ
+        ++s.member_resyncs[c];
         resync_member(s, c, msg.last_full_tick);
     }
 
@@ -3134,10 +3215,10 @@ public:
                                           lead != s.leads.end() ? lead->second.resync_claim : bmmo::session::resync_ref_id{});
         }
         else runner_->request_full_snapshot(s.id);
-        Printf("Physics session %u: %s resynced at tick %u (last full snapshot it had: %u; held counted through tick %u).",
+        Printf(kVerbose, "Physics session %u: %s resynced at tick %u (last full snapshot it had: %u; held counted through tick %u).",
                s.id, get_client_name(c), assigned, last_full_tick, counted_through);
         if (state)
-            Printf("Physics session %u: the state of tick %u follows to %s alone (protocol 10).", s.id, assigned - 1,
+            Printf(kVerbose, "Physics session %u: the state of tick %u follows to %s alone (protocol 10).", s.id, assigned - 1,
                    get_client_name(c));
         return assigned;
     }
@@ -3179,7 +3260,7 @@ public:
             auto& bases = s->second.uplink_bases[c];
             frames = msg.resolved_frames(bases);
             if (!frames && s->second.uplink_undecoded++ == 0)
-                Printf("Physics session %u: an input datagram of %s turned a camera base not held yet (its frames dropped).",
+                Printf(kVerbose, "Physics session %u: an input datagram of %s turned a camera base not held yet (its frames dropped).",
                        msg.session, client_it->second.name);
             if (msg.first_tick > bmmo::session::kRelayRing) bases.forget_before(msg.first_tick - bmmo::session::kRelayRing);
         }
@@ -3233,7 +3314,7 @@ public:
             if (guard.revived_ignored++ == 0) {
                 const std::string text = Sprintf("BodyRevived from %s ignored (world option proximity union): %s at %u",
                                                  client_it->second.name, msg.name.c_str(), msg.tick);
-                Printf("Physics session %u: %s.", s.id, text.c_str());
+                Printf(kVerbose, "Physics session %u: %s.", s.id, text.c_str());
                 runner_->journal_note(s.id, text);
             }
             return;
@@ -3253,7 +3334,7 @@ public:
             if (intake == bmmo::session::event_intake::rate_limited) {
                 if (guard.events_in_window == rate_limit + 1) {
                     ++s.rejected_events;
-                    Printf("Physics session %u: %s sends more than %u events per second; dropping the excess.",
+                    Printf(kVerbose, "Physics session %u: %s sends more than %u events per second; dropping the excess.",
                            s.id, client_it->second.name, rate_limit);
                 }
                 // A Trafo event never applied must reach its owner as
@@ -3266,7 +3347,7 @@ public:
             auto flag = [&](const std::string& why) {
                 ++s.flagged_events;
                 if (s.flagged_events <= 50)
-                    Printf("Physics session %u: suspicious event from %s at tick %u: %s.", s.id,
+                    Printf(kVerbose, "Physics session %u: suspicious event from %s at tick %u: %s.", s.id,
                            client_it->second.name, msg.tick, why);
             };
             if (msg.type == bmmo::session::event_type::Physicalize) {
@@ -3288,7 +3369,7 @@ public:
                     && std::isfinite(r.linear_damp) && std::isfinite(r.rot_damp);
                 if (msg.ball_type >= ball_types || !finite || r.mass <= 0.0f) {
                     ++s.rejected_events;
-                    Printf("Physics session %u: rejected Physicalize from %s (ball type %u, malformed recipe).", s.id,
+                    Printf(kError, "Physics session %u: rejected Physicalize from %s (ball type %u, malformed recipe).", s.id,
                            client_it->second.name, msg.ball_type);
                     return;
                 }
@@ -3412,7 +3493,7 @@ public:
         if (v.nearest >= 0 && static_cast<size_t>(v.nearest) < s.trafo_points.size())
             nearest = Sprintf("%s at %.3f m", s.trafo_points[static_cast<size_t>(v.nearest)].name.c_str(), v.distance);
         if (s.rejected_trafos <= 50)
-            Printf("Physics session %u: REJECTED Trafo %s %s from %s (player %u) stamped for tick %u (server tick %u): %s; "
+            Printf(kVerbose, "Physics session %u: REJECTED Trafo %s %s from %s (player %u) stamped for tick %u (server tick %u): %s; "
                    "position (%.3f, %.3f, %.3f), nearest trafo %s (reach %.2f m); piece type %u, the player's last ball "
                    "type %s - possible cheating or corruption.",
                    s.id, bmmo::session::trafo_is_reset(msg.flags) ? "reset" : "explosion",
@@ -3552,7 +3633,7 @@ public:
         char timing[64] = "";
         if (a.timed)
             std::snprintf(timing, sizeof(timing), " margin=%d slack=%.2f", static_cast<int>(a.margin), a.slack);
-        Printf("Physics session %u: S5 event player=%u type=%s origin=%u applied=%u late=%d delay_us=%lld delay_ticks=%.2f "
+        Printf(kVerbose, "Physics session %u: S5 event player=%u type=%s origin=%u applied=%u late=%d delay_us=%lld delay_ticks=%.2f "
                "to=%zu%s%s", s.id, a.player, session_event_type_name(msg.type), a.origin, a.applied,
                static_cast<int>(static_cast<int32_t>(a.applied - a.origin)), static_cast<long long>(delay_us),
                static_cast<double>(delay_us) / 15000.0, recipients,
@@ -3587,7 +3668,7 @@ public:
                     static_cast<unsigned long long>(s.flagged_events), static_cast<unsigned long long>(s.rejected_events),
                     static_cast<unsigned long long>(s.restamped_events), static_cast<unsigned long long>(s.superseded_births),
                     journal.empty() ? "off" : journal.c_str());
-            runner_->describe(id);
+            runner_->describe(id, [](const std::string& text) { Printf("[Sim] %s", text); });
         }
     }
 #endif
@@ -3646,6 +3727,7 @@ public:
                         if (m.id != c)
                             send_room_event(m.id, event_type::PlayerJoined, error_code::None, msg.room, c, c);
                 broadcast_room_states();
+                Printf("%s (#%u) joined room %u.", client_it->second.name, c, msg.room);
                 break;
             }
             case action::Leave:
@@ -3778,7 +3860,11 @@ public:
                     for (const auto& m: r->members)
                         send_room_event(m.id, event_type::SessionStarting, error_code::None, room, c);
                     broadcast_room_states();
-                    Printf("Room %u started physics session %u on level %d (world booting).", room, session, level);
+                    std::string players;
+                    for (const auto& m: r->members)
+                        players += (players.empty() ? "" : ", ") + get_client_name(m.id);
+                    Printf("Room %u started physics session %u on level %d with %zu player%s: %s.", room, session, level,
+                           r->members.size(), r->members.size() == 1 ? "" : "s", players);
 #else
                     send_room_event(c, event_type::RequestDenied, error_code::PhysicsUnavailable, room);
 #endif
@@ -3875,8 +3961,10 @@ public:
                     break;
                 }
 #if BMMO_BUILD_SIM
-                physics_session_member_left(msg.target);
+                physics_session_member_left(msg.target, "kicked from the room");
 #endif
+                Printf("Room %u: %s kicked %s (#%u).", rr.room, client_it->second.name, get_client_name(msg.target),
+                       msg.target);
                 send_room_event(msg.target, event_type::Kicked, error_code::None, rr.room, c, msg.target);
                 for (auto m: rr.remaining) {
                     send_room_event(m, event_type::PlayerLeft, error_code::None, rr.room, c, msg.target);
@@ -3904,7 +3992,7 @@ public:
                     send_room_event(m, event_type::RoomClosed, error_code::None, room, c);
                 send_room_event(c, event_type::RequestAccepted, error_code::None, room, c);
                 broadcast_room_states();
-                Printf("Room %u closed by #%u.", room, c);
+                Printf("Room %u closed by %s (#%u).", room, client_it->second.name, c);
                 break;
             }
             default:
@@ -4083,7 +4171,7 @@ protected:
         username_.erase(bmmo::message_utils::to_lower(name));
         clients_.erase(itClient);
         ghost_spectator_clients_.erase(client);
-        room_remove_and_notify(client, false); // notify roommates a member left
+        room_remove_and_notify(client, false, name); // notify roommates a member left
 
         Printf(bmmo::color_code(msg.code), "%s (#%u) disconnected.", name, client);
 
@@ -4705,7 +4793,7 @@ protected:
                     const auto session = physics_sessions_.find(cs->second);
                     if (session != physics_sessions_.end() && session->second.ticking) {
                         send_session_end(cs->second, networking_msg->conn, "Level finished.");
-                        physics_session_member_left(networking_msg->conn);
+                        physics_session_member_left(networking_msg->conn, "finished the level");
                         rooms_.set_ready(networking_msg->conn, false);
                         notify_ready_changed(networking_msg->conn);
                     }
@@ -5333,6 +5421,9 @@ protected:
     uint32_t test_hold_member_ms_ = 0;
     // --assign-volley (step SAXE, test builds): see set_test_assign_volley.
     int test_assign_volley_ = 0;
+    // Step SLQ: --verbose (kept across a reload), and whether the log is verbose now.
+    bool verbose_arg_ = false;
+    bool log_verbose_ = false, log_level_set_ = false;
     // The main loop's pass counter (step SAXE): one more at the start of every
     // update(), before its messages are handled, so an assignment made while
     // handling them, at the barrier or on the simulation thread belongs to
@@ -5375,10 +5466,10 @@ protected:
 // `hold_member_ms`: the test flag --hold-member-ms (BMMO_SERVER_TEST_FLAGS
 // builds only; step M0); `assign_volley`: --assign-volley (the same; step
 // SAXE).
-static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_path, bool& dry_run,
+static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_path, bool& dry_run, bool& verbose,
                       uint32_t& hold_member_ms, int& assign_volley, std::string& capture_inbound,
                       std::string& replay_inbound, std::string& coordinator) {
-    enum option_values { DryRun = UINT8_MAX + 1, HoldMemberMs, AssignVolley, CaptureInbound, ReplayInbound, Coordinator };
+    enum option_values { DryRun = UINT8_MAX + 1, Verbose, HoldMemberMs, AssignVolley, CaptureInbound, ReplayInbound, Coordinator };
 #if !defined(BMMO_SERVER_TEST_FLAGS)
     (void)hold_member_ms;  // the flags exist in test builds only
     (void)assign_volley;
@@ -5392,6 +5483,7 @@ static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_pa
         {"help", no_argument, 0, 'h'},
         {"version", no_argument, 0, 'v'},
         {"dry-run", no_argument, 0, DryRun},
+        {"verbose", no_argument, 0, Verbose},
 #if defined(BMMO_SERVER_TEST_FLAGS)
         {"hold-member-ms", required_argument, 0, HoldMemberMs},
         {"assign-volley", required_argument, 0, AssignVolley},
@@ -5418,6 +5510,7 @@ static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_pa
                 puts("  -h, --help\t\t Display this help and exit.");
                 puts("  -v, --version\t\t Display version information and exit.");
                 puts("      --dry-run\t\t Test the server by starting it and exiting immediately.");
+                puts("      --verbose\t\t Log the physics sessions' diagnostics too (as log_verbose: true).");
 #if defined(BMMO_SERVER_TEST_FLAGS)
                 puts("      --hold-member-ms=MS\t (test build) Send the SessionMember messages MS ms late.");
                 puts("      --assign-volley=K\t (test build) K extra UnreliableNoNagle SessionAssign copies in its own pass.");
@@ -5435,6 +5528,9 @@ static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_pa
                 return -1;
             case DryRun:
                 dry_run = true;
+                break;
+            case Verbose:
+                verbose = true;
                 break;
 #if defined(BMMO_SERVER_TEST_FLAGS)
             case HoldMemberMs:
@@ -5460,12 +5556,12 @@ static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_pa
 
 int main(int argc, char** argv) {
     uint16_t port = 26676;
-    bool dry_run = false;
+    bool dry_run = false, verbose = false;
     std::string log_path;
     uint32_t hold_member_ms = 0;
     int assign_volley = 0;
     std::string capture_inbound, replay_inbound, coordinator;
-    if (parse_args(argc, argv, port, log_path, dry_run, hold_member_ms, assign_volley, capture_inbound, replay_inbound,
+    if (parse_args(argc, argv, port, log_path, dry_run, verbose, hold_member_ms, assign_volley, capture_inbound, replay_inbound,
                    coordinator) < 0)
         return 0;
 
@@ -5530,6 +5626,7 @@ int main(int argc, char** argv) {
     printf("Starting server at port %u.\n", port);
     server server(port, std::move(transport));
     server.set_status_writer(log_io.strand());   // step IOX
+    if (verbose) server.set_verbose_arg();   // step SLQ
     if (hold_member_ms) {
         server.set_test_hold_member_ms(hold_member_ms);
         printf("Test flag: --hold-member-ms %u (the SessionMember messages leave %u ms late).\n", hold_member_ms,
@@ -5956,6 +6053,18 @@ int main(int argc, char** argv) {
         }
     });
     console.register_command("flushlog", bmmo::flush_log);
+    // Step SLQ: "verbose on" / "verbose off" (until a reload, which applies the
+    // config's log_verbose again); no argument says which.
+    console.register_command("verbose", [&] {
+        const std::string arg = console.get_next_word(true);
+        if (arg != "on" && arg != "off") {
+            if (!arg.empty()) Printf("Usage: \"verbose [on|off]\".");
+            else Printf("Verbose logging is %s.", server.log_verbose() ? "on" : "off");
+            return;
+        }
+        if (server.log_verbose() == (arg == "on")) Printf("Verbose logging is already %s.", arg);
+        else server.set_log_verbose(arg == "on");
+    });
     console.register_command("help", [&] { Printf(console.get_help_string().c_str()); });
 
     server.wait_till_started();

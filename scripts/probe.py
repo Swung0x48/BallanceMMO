@@ -87,7 +87,8 @@ def main():
                   '  snapshot_interval: 2\n  input_delay: 6\n  maximum_physics_rooms: 1\n'
                   '  event_rate_limit: 20\n  spawn_impulse: 3\n'
                   f'  journal_dir: {str(case_dir / "journals").replace(chr(92), "/")}\n'
-                  '  journal_max_mb: 64\n  journal_checkpoint_ticks: 660\nauto_flush_log: true\n')
+                  '  journal_max_mb: 64\n  journal_checkpoint_ticks: 660\nauto_flush_log: true\n'
+                  'log_verbose: true\n')   # step SLQ: the session diagnostics in server.log
         (case_dir/'config.yml').write_text(config)
         handles, children, proxies = [], [], []
         print(f'START {args.label} {case} port={port}', flush=True)

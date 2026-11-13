@@ -372,6 +372,39 @@ physics:
   restarts on crash), not the executable directly. After editing
   `config.yml`, type `reload` in the server console rather than restarting
   the process.
+- **The log's level** (step SLQ, 2026-11-13). By default the server log keeps
+  what a player or an operator reads: every line of the shadow-ball server
+  (`main`: connections, logins, chat, cheat, ready, finishes, kicks, bans,
+  console output), the start-up lines (`Physics sessions enabled (...)`, the
+  custom maps), the room lines (`P (#C) created room N.`, `joined room`,
+  `left room`, `Room N: P is the host now.`, `kicked`, a map set or cleared,
+  a restart vote, `Room N closed by P (#C).`), the session lines
+  (`Room R started physics session N on level L with K players: A, B, C.`,
+  `Physics session N is running (level L loaded in 6.2 s, K players).`,
+  `P joined.` / `P joined late.`, `P left (<why>; X resyncs).`, every refusal
+  and wait, a stalled or never-ready member, and
+  `Physics session N (room R, level L) ended after 12m34s: <reason> (K players, X resyncs, Y events flagged, Z rejected).`,
+  the length counted in session ticks), every console command's output
+  (`sessions` included), warnings and internal failures (marked `[Sim]` when
+  they come from a session's runner or world). The
+  physics sessions' diagnostics are verbose: the runner's and the worlds'
+  `[Sim]` lines, the start handshake, the resync states, the SessionLead and
+  S2 / S5 lines, telemetry, the per-room world options. Turn them on with
+  `log_verbose: true` in `config.yml` (written as `false` on first start),
+  `--verbose` on the command line, or `verbose on` in the console
+  (`verbose off` turns them off again, `verbose` alone says which; a `reload`
+  applies the config's value again). `physics.debug_trace`,
+  `physics.arrival_trace` and the runner's debug variables
+  (`BMMO_SESSION_STALL`, `BMMO_RUNNER_JITTER`, `BMMO_TRACE_LIVE_ORDER`) turn
+  them on too. The log says `Verbose logging on.` when they turn on (at start
+  or from the console) and `Verbose logging off.` when the console turns them
+  off. The test harness (`scripts/arena_map_test.py`, and through it
+  `lbm_fast.sh` and the re-drives) writes `log_verbose: true` and fails a case
+  whose server log is not verbose, since its rows read those lines
+  (`--quiet-server-log` runs the default level, unchecked; a server built
+  before the switch passes, as it logs everything), and `lbm_fast_judge.py`
+  does not count such a twin exact. The journals are
+  the same at either level. `logging_level` stays the network library's own.
 - The server validates client-reported physics events at the rate/shape
   level (design section 9.4): more than `event_rate_limit` events/second per
   player are dropped, malformed `Physicalize` payloads are rejected outright,

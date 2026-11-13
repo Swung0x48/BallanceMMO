@@ -14,6 +14,13 @@ namespace bmmo {
     void DebugOutput(bmmo::log_type eType, const char* pszMsg, int ansiColor);
     void DebugOutput(bmmo::log_type eType, const char* pszMsg);
 
+    // Step SLQ: the least serious kind DebugOutput writes, process-wide
+    // (everything by default: the client, SimTool and the tests write every
+    // line; the server sets msg, or verbose under log_verbose).  A bug line
+    // always passes.
+    void set_log_threshold(bmmo::log_type least_serious);
+    bool log_passes(bmmo::log_type type);
+
     void RightTrim(char* text);
 
     template <typename T>
@@ -78,6 +85,23 @@ namespace bmmo {
 
     inline void Printf(int ansiColor, const char* fmt) {
         Printf(ansiColor, "%s", fmt);
+    }
+
+    // A line of the given kind (step SLQ).  A line under the threshold is not
+    // formatted - but its arguments are always evaluated, being arguments: a
+    // call site never guards a Printf on the level (some read a recorded
+    // clock site, which a replay of a capture must see read).
+    template <typename ... Args>
+    inline void Printf(bmmo::log_type type, const char* fmt, Args&& ... args) {
+        if (!log_passes(type)) return;
+        char text[2048]{};
+        std::snprintf(text, sizeof(text), fmt, ConvertArgument(args)...);
+        RightTrim(text);
+        DebugOutput(type, text);
+    }
+
+    inline void Printf(bmmo::log_type type, const char* fmt) {
+        Printf(type, "%s", fmt);
     }
 
     inline void FatalError(const char* fmt, ...) {

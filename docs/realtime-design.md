@@ -3479,3 +3479,176 @@ sites (unchanged by inspection: no clock read added, moved or removed; no captur
 record check's text (no test makes one); the 8845HS timing; the wire check. Added by the review's fixes: the
 `core_host_start` reset after a session whose end was skipped (no run skips an end); a unit test of
 `diff_replays` false with the binding present (the fast LBM `dclf1` runs that case: 0 lines, every counter equal).
+
+## Built (the server log keeps what an operator reads, step SLQ, 2026-11-13)
+
+**Why.** The user, 2026-11-13: the server prints far too much; it needs the normal server log (`origin/main`'s, the
+shadow-ball server) plus the lines a player or a server operator understands - a room joined or left, a session
+started or ended - and the physics and script systems' internal state only in a verbose mode. On the public test
+the server logs held 85 668 lines (16.1 MB) over 458 wall-minutes, 187 a minute, in bursts of 80-520 a second at
+each world boot. Design: `.local-tools/work/SDF/srvlog_design.txt` (read only, at `4cf106ae`), followed as written
+except where named below.
+
+**The level.** One threshold, process-wide, in `DebugOutput` (`misc.cpp`): `bmmo::set_log_threshold(log_type)`, an
+atomic, `everything` by default, so the client, SimTool, the headless client and the tests write every line as
+before; a `bug` line always passes. The server sets `msg`, or `verbose` when verbose is on (`warning` ranks below
+`important`, so the threshold is never `important`). A new `Printf(log_type, fmt, args...)` skips the formatting of
+a dropped line; being a function, its arguments are always evaluated - two server lines read a recorded clock site
+in their arguments (`server_boot_log`, `server_event_relay_delay`), and no call site guards a `Printf` on the
+level, so a capture replays with the same clock reads at either level. `logging_level` stays the network
+library's own (at most `msg`, so its lines pass).
+
+**What the default log keeps.** Every line `main` prints, word for word (checked mechanically:
+`.local-tools/work/SLQ/main_lines.py`, the 85 format strings of `origin/main`'s `server.cpp`: 82 are in the tree,
+none tagged; the 3 others are two lines commented out on `main` and the public notification, which this branch
+already prints with a `[Muted] ` prefix). The start-up lines (`Physics sessions enabled (...)`, the custom maps, the
+unavailable / bad-config lines), the coordinator and capture lines of the test builds. Room lines: `created room`
+(read by `trial_start.py`), a map set or cleared, the restart vote, and new: `P (#C) joined room N.`,
+`P (#C) left room N.`, `Room N: P is the host now.`, `Room N: A kicked B (#C).`, `Room N closed by P (#C).` (was
+`closed by #C`). Session lines: `Room R started physics session N on level L with K players: A, B, C.` (was
+`(world booting)`), new `Physics session N is running (level L loaded in 6.2 s, K players).` at the first snapshot,
+`Physics session N: P joined.` / `P joined late.` (the life and join order are the verbose `SessionMember` line's;
+`joined late` stays for `late_other_level.py`), new `Physics session N: P left (<why>; X resyncs).` (`left the
+room`, `disconnected`, `kicked from the room`, `finished the level`, `did not report ready` (the barrier's own line
+is a count only); none where the caller's own default line says who and why: the refusals, `sent no input`, a
+member the world could not add), every refusal and wait, the build mismatch, the mod denial, a released join
+order, the `sessions` command's both lines (the runner's `describe` prints through the console's own callback, not
+the verbose `[Sim]` sink), and
+`Physics session N (room R, level L) ended after 12m34s: <reason> (K players, X resyncs, Y events flagged, Z rejected).`
+(was `(room R) ended: <reason>`). The length is the ticks the session ran (the first to the last tick the runner
+relayed) over `TICK_RATE`, and the load time the world-ready instant the runner reports: no clock is read for
+either. Resyncs are counted where a member asks (`handle_session_resync`) and where the start handshake resyncs
+one; the base-missed re-answer is the same resync, not counted again. `K players` is the lives the session gave
+(late joiners included). Internal failures print by default at `error`: the server's `ERROR join order`, a member
+that could not be added to the world, a malformed Physicalize, a resync state cut on the wire (the client will
+refuse it; the design had it verbose, the review did not); the runner's journal directory / open / writer
+failures, world boot failed, `add_player failed` (both), an event that failed, a tick that failed, a trafo life
+mismatch and the proximity union's candidate set changed between two steps (both guards, capped and noted as
+before; not in the design's list); the world's checkpoint activation NOT held, the depth test NOT pinned, the
+checkpoint chain's phase cell and sector cell NOT split, the Level 1 tutorial's exit NOT found and its frame-9
+freeze NOT held (each says this world acts apart from the clients'), the airship zone and spawn ghost setup errors,
+the auto clone failures, `ERROR join order`, a failed spawn impulse, the tutorial exit not activated, the proximity
+hold not restored, the trafo quiesce line when it says NOT EXPECTED (split from the expected one, same text), a
+trafo input with no set held, the trafo hold FIRED, the leaks. These were printed in production before the step
+at the same rate; the ones with no cap (no set held, the leaks, the hold not restored, an event that failed) keep
+none: a cap would also cut SimTool's stderr, which the world shares.
+
+**What moves to verbose, word for word.** 44 of the server's own lines (`Printf(kVerbose, ...)`): the room's world
+option lines, `SessionMember`, boot phases, `world ready`, `ticking (first snapshot`, S2 and its cap, resync state /
+base re-assigned / `resynced at` / `state follows`, Trafo resent, the SessionLead lines, telemetry, the
+start handshake (but its refusal), `base was due` / `moved`, `ready (assigned tick`, the camera base, BodyRevived,
+the rate limit, suspicious events, REJECTED Trafo (as the design has it: its count is the end line's `rejected`),
+S5. Every runner and world line not in the error list: the
+server's `callbacks.log` prints `[Sim] %s` at `verbose`, the new `callbacks.warn` at `error`.
+`session_callbacks::warn`, `physics_world::options::warn` and the members `session_runner::warn` /
+`physics_world::warn` fall back to `log` when unset, so SimTool, `trafo_synth.hpp` and the tests (which set only
+`log`) print what they did, byte for byte; the runner's world lambda passes `warn` with the same `[session N]`
+prefix. No line is classified by its text. The game layer and the engine are unchanged (their failures come back
+as error strings `physics_world` logs). Lines that bypass the logger stay (the engine's spawn-impulse stdout line,
+`physics_RT stdout redirected`, `[crash]`).
+
+**The switches.** `log_verbose: false` (top level, next to `log_level_restarts`; `yaml_load_value` writes it back,
+so a `config.yml` gains the key on the first start), `--verbose` (kept across a `reload`), the console's `verbose
+on` / `verbose off` (`verbose` alone says which; until the next `reload`, which applies the config again), and
+`physics.debug_trace`, `physics.arrival_trace` and the runner's debug variables `BMMO_SESSION_STALL`,
+`BMMO_RUNNER_JITTER`, `BMMO_TRACE_LIVE_ORDER` turn it on (their lines are verbose). The level is set in
+`load_config`, before the runner is built. The log says `Verbose logging on.` when it turns on (at the start or
+later) and `Verbose logging off.` when it turns off. The journals do not go through the log: every note is its own
+`journal.note` call, so a line built once for both keeps its note at either level.
+
+**Consumers.** `scripts/arena_map_test.py` writes `log_verbose: true` (this covers `lbm_fast.sh`, the L6
+re-drives, `late_player_harness.py`'s server) and fails a case whose server log's last level marker is not
+`Verbose logging on.` (an external server's sits before the case, a console `off` after it; no log at all is a
+note; a log with no marker that holds the runner's `[Sim] [session N] ... booting level` line passes: a server
+built before this step writes every line), in `--report-only` too; `--quiet-server-log` writes `false` and skips
+the check. The problem is also the case summary's `server_log_level`, and `scripts/lbm_fast_judge.py` does not
+count such a twin FINAL exact (it prints `FAIL (not counted exact)`): the judge reads no VERDICT, and a server log
+that is not verbose leaves the server-read rows empty on both twins, equal, so silent. `scripts/probe.py`, `retail_two_client_test.py`
+write the key; `capture_replay.py` sets it in the replay's copy of the config (a capture made before the key has
+none). `.local-tools/arch_server_lp.sh` (and through it `arch_server_snap.sh`, `ab_template.sh`, the retail
+recipes' `work/RT1/rt1_retail.py`, which `S0`/`SRT` reuse) sets or appends it in the `config.yml` it edits, as do the live starters `work/H4`, `K7`,
+`LBM7`, `LBM8`, `OCK`, `RLD`, `a4`. `telemetry_report.py` and `ghost_state.py` say in their headers that they read
+verbose lines, as do `work/PERF/pt_server_resync.py` and `make_report_data.py`; `work/SRV/srvload.py`'s and the
+public-test analyzer `work/ARCH/pt/server.py`'s end-line patterns take the new wording (the analyzer reads many
+verbose lines too: whether public tests run verbose is the user's open question); `work/NPLAYERS/four_rooms.sh` /
+`two_rooms.sh` wait for `ticking (first snapshot` or `is running (level`. Outside the repo: the 8845
+re-drive package (`~/bmmo-kept-pkg`) must be rebuilt from these scripts; the production `~/bmmo-server/config.yml`
+gets `log_verbose: false` on its next start. CI checks only `--dry-run`'s exit.
+
+**Results** (`.local-tools/work/SLQ`: `run_slq.sh`, `run_pt_quiet.sh`, `cmp_lbm.sh`, `log_kinds.py`,
+`l6_journals.py`, `main_lines.py`, `console_toggle.py`, `run_capture.sh`; HEAD `16412e11` plus this step).
+- Builds: x64 BUILD-OK, 859/859 tests; x86 client CLIENT-BUILD-OK; the Arch server ARCH-BUILD-OK at the x86
+  build's id. `--dry-run` exits 0 and writes `log_verbose: false` into a `config.yml` without it; with
+  `--verbose` it prints the marker.
+- Fast LBM as shipped (`slq1`): 38/38 twins FINAL exact, the rows equal to `dclf1`'s; over the 140 clients `mism`
+  0, rb 1 711, resim 37 377, `scr=` 0 / 105, `sdiff=` 105/105/0/0 max 1, every `mismatches=` 0, the status fields
+  that differ only the wall-clock ones and LVR's (`t_cap`, `t_rep`, `t_max`, `t_rest`, `whole`, `light`,
+  `lifetime`, `live`, `ccache`); every client journal equal past the build id to `dclf1`'s, the 12 Level 13
+  server journals that differ between any two runs differ (the same 12 as `sdq1` / `dclf1`). All 38 server logs
+  end verbose (the marker). Their lines by kind (stamps, numbers, build id, label masked) equal `dclf1`'s but for
+  the reworded and new lines: 13 034 -> 13 586 lines.
+- The L6 re-drive as shipped (`pf_slq1_1`): every `mismatches=` and `mism` 0, rb 72 749, resim 663 877, `sdiff=`
+  as `pf_dclf1_1`, the 14 journals equal to `pf_dclf1_1`'s past the build id; its server log 2 225 -> 2 239 lines.
+- The default level: the same re-drive with `--quiet-server-log` (`pf_slqq_1`): the same counters, the 14
+  journals equal to `pf_dclf1_1`'s, the server log 51 lines (3.6 kB) against 2 225 (571 kB): the start-up, 13
+  connection requests and logins, `Ticking started.`, the room created and 12 joins, the session start with its
+  13 players and its running line (the recipe stops the run before anyone leaves). Two fast-LBM arms at the
+  default level (`slqq`: `a5d_resync`, `a8_r1`): 4/4 FINAL exact, the client journals equal to `slq1`'s, 45 and 46
+  lines against 347 and 342 (a late joiner, a resync counted in the leaver's line and the end line, every
+  disconnect, the host changes, the end). One `a8_r1_on` criterion reads the server's verbose lines and is n/a
+  there, as `--quiet-server-log` says.
+- The console: a real-time A0 session against a server started at the default level (`console_toggle.py`,
+  `slqc2`): `verbose` said off; `verbose on` printed the marker and the `[Sim]`, S5 and telemetry lines began (0
+  `[Sim]` lines before, 61 while on, 0 after); `verbose` said on, a second `verbose on` said already on; `verbose
+  off` printed `Verbose logging off.` and they stopped; `verbose maybe` printed the usage. The run's finish path
+  printed `left (finished the level; 0 resyncs)` and `ended after 0m33s`; its load time read 0.3 s (a coordinated
+  run's boot takes no virtual time: 0.0 s).
+- A capture at both levels (`run_capture.sh`, `slqcap1`, a coordinated A0 arm with `--capture`, the server log
+  verbose): the server replayed by `capture_replay.py` (verbose) and by hand with `log_verbose: false` gave the
+  live journal back byte for byte both times (1 160 597 bytes). The verbose replay's log equals the live one but
+  for the port, the replay's own lines, and the values a replay of a coordinated capture already printed apart
+  (the S1 quorum's `seen-at`, the boot time: `world ready`, an unchanged line, reads 23 872 s there, so does the new load time); the quiet replay's
+  lines are the live log's but for the same.
+- The review's fixes (`.local-tools/work/SLQ/fix`: `run_slqf.sh`, `console_default.py`): one review, its defects
+  fixed - the `sessions` command's second line had become verbose (now through `describe`'s own output
+  callback); five world lines, the union guard and the cut resync state had become verbose-only (now `error`); the
+  marker check did not reach the fast-LBM judge and failed every server built before the step (both fixed, above);
+  the public-test analyzer missed the new end line; the members dropped for not reporting ready went unnamed; two
+  `NPLAYERS` waits and two `PERF` headers. Its points: the refused add's third line dropped, `--report-only`
+  checks the level too; the uncapped error lines and REJECTED Trafo left as they are (above). Fast LBM as shipped
+  (`slqf1`): 38/38 twins FINAL exact, the rows equal to `dclf1`'s (and so `slq1`'s); 140 clients, `mism` 0, rb
+  1 711, resim 37 377, every `mismatches=` 0, `scr=` 0 / 105, `sdiff=` 105/105/0/0 max 1, the differing status
+  fields only the 9 wall-clock / live-record ones; every client journal equal to `slq1`'s past the build id (the
+  same 12 Level 13 server journals differ); all 38 server logs' last marker `on`; the line kinds equal `slq1`'s
+  (13 034 -> 13 586 against `dclf1`); every summary's `server_log_level` empty. Two arms at the default level
+  (`slqfq`): 4/4 FINAL exact, client journals equal to `slqq`'s, logs of 45, 45, 46, 46 lines as `slqq`'s. A live
+  refusal (`console_default.py`, `slqf2`): a real-time A0 session against a server at the default level, the
+  harness without `--quiet-server-log`: its VERDICT `FAIL - the server log is not verbose ...`, the summary's
+  `server_log_level` set, and `lbm_fast_judge.py slqf2` printed `FINAL EXACT` with `FAIL (not counted exact)`,
+  `0 of 1 twins FINAL exact`, exit 1; the server log 59 lines, `sessions` typed twice printed both lines each time
+  (the only 2 `[Sim]` lines), `verbose` said off, no marker. The saved logs: a pre-step server's (`dclf1_a0_first`,
+  `pf_dclf1_1`) passes the check, `pf_slqq_1`, `slqq_a8_r1_on` and `slqc2` fail it, `slq1` / `pf_slq1_1` pass. The
+  analyzer: the 8 public-test logs give the same 30 sessions and end reasons as before the fix (29 by their
+  line), the 38 `slq1` logs 38 of 38 ended by the line (0 with the old pattern).
+- Gate on the final tree (`.local-tools/work/SLQ/gate/run_gate.sh`): x64 BUILD-OK, 859/859 tests; x86 client
+  CLIENT-BUILD-OK and the Arch server ARCH-BUILD-OK at `ballanced-690d1c23beac+bmmo-16412e11b2da-dirty` (the
+  retail servers' id matches); retail at K = 20 at human key rates, `slqg_l12_h_150_1` (L12) and
+  `slqg_ctl_h_150_1` (L11), against `r6on_*`: 0 mismatches (22 and 18 `mismatches=0` lines), FINAL rows
+  bit-equal (L12 ball 2/2, body 14/14 at 2 common ticks; L11 ball 2/2, body 23/23, piece 32/32 at 6), `refs=`
+  every fault 0 (L12 37 roots, 13 writes; L11 42 roots, 18 writes), `sdiff=` queued equal to classified on every
+  client; both retail server logs' last marker `on` (765 and 542 lines, 700 and 441 of them `[Sim]`): the Arch
+  starter's set-or-append ran for real, from no key in `maps/arena-test/wsl/config.yml` to one `log_verbose:
+  true`. The tree did not change during the gate.
+
+**Not exercised:** the 8845 package rebuild; a `reload` that flips the level; the `error` lines (no run hit an
+internal failure: the five world lines, the union guard, the cut resync state, the refused add); a member dropped
+for not reporting ready (its named line); `physics.debug_trace` / `arrival_trace` / the `BMMO_*` variables turning
+verbose on; a room kick and a room close by a host; `sessions` on a session with no world (`no such session`); the
+wire check (no wire change). A capture made by HEAD's binary replayed by this tree (`slqcap1` shows that the level
+moves no clock read; that the step adds none is by inspection: no clock read added, moved or removed). SimTool's
+stderr is the same by construction (its callbacks set only `log`; the new `warn` sites fall back to it), not
+compared. No unit test was added (the test executable does not link `misc.cpp`). The NPLAYERS and PERF scripts were
+edited, not run. The L6 re-drives (`pf_slq1_1`, `pf_slqq_1`), the capture replay (`slqcap1`) and the console
+toggle (`slqc2`) ran on the tree before the review's fixes and were not run again: the fixes change only the
+severity of failure-path lines, `describe`'s output and two `member_left` arguments. (`--report-only` on `slqf2_off`
+gave the same FAIL.) Open for the user: whether public tests run verbose (the analyzer reads verbose lines).

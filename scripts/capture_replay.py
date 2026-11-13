@@ -49,6 +49,9 @@ def replay_server(case, out, bindir, exe, timeout):
     journals.mkdir(parents=True, exist_ok=True)
     config = re.sub(r'^(\s*journal_dir:).*$', lambda m: '%s %s' % (m[1], journals.as_posix()),
                     (case / 'config.yml').read_text(), flags=re.M)
+    # Step SLQ: the replay's log verbose (a capture made before the key has none).
+    config = re.sub(r'^log_verbose:.*\n?', '', config, flags=re.M)
+    config = config.rstrip('\n') + '\nlog_verbose: true\n'
     (out / 'config.yml').write_text(config)
     if (case / 'login_data.yml').exists():
         (out / 'login_data.yml').write_bytes((case / 'login_data.yml').read_bytes())

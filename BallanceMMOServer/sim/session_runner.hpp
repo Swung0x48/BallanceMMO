@@ -297,6 +297,9 @@ namespace bmmo::sim {
         // thread feeds the runner, and its own clock is the mark.
         std::function<void()> request_poll;
         std::function<void(const std::string&)> log;
+        // Step SLQ: an internal failure's line (a journal, a boot, an add, an
+        // event or a tick that failed); log when unset (the tests, SimTool).
+        std::function<void(const std::string&)> warn;
     };
 
     class session_runner {
@@ -452,8 +455,9 @@ namespace bmmo::sim {
         // this runner sent that member last, plain otherwise.
         void request_resync_state(uint32_t session, uint32_t player, uint32_t base,
                                   bmmo::session::resync_ref_id claim = {});
-        // Diagnostics through the log callback.
-        void describe(uint32_t session);
+        // Diagnostics through `out` (from the runner's thread; the log
+        // callback when unset): the server's sessions command.
+        void describe(uint32_t session, std::function<void(const std::string&)> out = {});
         // A NOTE record in the session's journal at the tick it will simulate
         // next (from any thread; posted).  Step G5: the first BodyRevived a
         // member sent, dropped (the union, always on since step UOFF).
@@ -800,6 +804,7 @@ namespace bmmo::sim {
         void emit_snapshot(session_state& s, bool full, bool body_set = false);
         void emit_resync_states(session_state& s, uint32_t tick, bool recording);
         void log(const std::string& text);
+        void warn(const std::string& text);   // step SLQ: callbacks_.warn, else log
         void encode_resync_state(session_state& s, const bmmo::session::resync_ref_id& claim, resync_state_out& out);
         void publish_state(const session_state& s);
         // Starts the session's deadline schedule and publishes it to the

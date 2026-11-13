@@ -168,6 +168,8 @@ namespace bmmo::sim {
         std::function<void(CKContext*)> before_level_load;
         std::function<void(CKContext*)> before_anchor;
         std::function<void(const std::string&)> log;
+        // Step SLQ: an internal failure's line; log when unset (SimTool, the tests).
+        std::function<void(const std::string&)> warn;
         // Protocol 32 (step SPL): each boot phase as it begins - the boot, the
         // level request, the anchor (the session runner tells the room).
         std::function<void(bmmo::session::boot_phase)> progress;
@@ -380,6 +382,7 @@ namespace bmmo::sim {
         CKIpionManager* manager_for_debug() const;
         headless_engine& engine() { return *engine_; }
         void log(const std::string& text) const;
+        void warn(const std::string& text) const;   // step SLQ: options_.warn, else log
 
         // Parks the retail ball: its physics body is removed (a merely frozen
         // body is still counted by IVP's calm-check schedule and shifts the

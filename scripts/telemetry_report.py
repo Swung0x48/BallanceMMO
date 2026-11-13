@@ -6,7 +6,10 @@ usage: telemetry_report.py SERVER_LOG [--session N]
 Each line covers one member's last ~10 s.  Per (session, player): the windows, the frames, the frame interval's
 median p99 / worst p999 / worst max, the frames over 33 / 50 / 100 ms per minute, the core's own work p99 (median)
 and max, rewinds a second, replayed ticks per rewind, resyncs, holds, starved reports, the worst behind and the
-median ping."""
+median ping.
+
+The telemetry lines are verbose (step SLQ): the server writes them with log_verbose: true (or --verbose, or the
+console's "verbose on")."""
 import argparse
 import re
 import statistics

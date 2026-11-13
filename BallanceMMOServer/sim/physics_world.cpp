@@ -103,6 +103,11 @@ namespace bmmo::sim {
         if (options_.log) options_.log(text);
     }
 
+    void physics_world::warn(const std::string& text) const {
+        if (options_.warn) options_.warn(text);
+        else log(text);
+    }
+
     CKIpionManager* physics_world::physics() const {
         return engine_ ? engine_->physics() : nullptr;
     }
@@ -370,7 +375,7 @@ namespace bmmo::sim {
             if (held)
                 log("world: the level's checkpoint sector activation is held; update_sectors() alone runs the sector manager");
             else
-                log("world: the level's checkpoint sector activation was NOT held (" + hold_error
+                warn("world: the level's checkpoint sector activation was NOT held (" + hold_error
                     + "): a checkpoint a clone crosses activates a sector behind update_sectors()");
         }
         // N2 (step B2SW, game/sector_deactivate_pin.hpp): the held chains'
@@ -398,7 +403,7 @@ namespace bmmo::sim {
             if (trouble.empty())
                 log("world: the depth test runs as a rule at one tick in every world: " + depth_test_.where());
             else
-                log("world: the depth test was NOT pinned (" + trouble + "): the level's block removes a fallen prop here "
+                warn("world: the depth test was NOT pinned (" + trouble + "): the level's block removes a fallen prop here "
                     "at its own phase");
         } else {
             log("world: the depth test is NOT pinned (--depth-test-rule off)");
@@ -412,7 +417,7 @@ namespace bmmo::sim {
             if (trouble.empty())
                 log("world: the checkpoint chain's phase cell is split: " + checkpoint_phase_.describe());
             else
-                log("world: the checkpoint chain's phase cell was NOT split (" + trouble
+                warn("world: the checkpoint chain's phase cell was NOT split (" + trouble
                     + "): a clone's crossing 3 ticks after a sector pass can cancel that pass's module Physicalize");
         }
         // Step B2SX (game/sector_cell_split.hpp): the held chain's [0][1]
@@ -426,7 +431,7 @@ namespace bmmo::sim {
             if (trouble.empty())
                 log("world: the checkpoint chain's sector cell is split: " + sector_cell_.describe());
             else
-                log("world: the checkpoint chain's sector cell was NOT split (" + trouble
+                warn("world: the checkpoint chain's sector cell was NOT split (" + trouble
                     + "): a clone's crossing in the frame of a sector pass can make the manager activate the crossed sector");
         } else {
             log(std::string("world: the checkpoint chain's sector cell is NOT split (")
@@ -450,7 +455,7 @@ namespace bmmo::sim {
                 log("world: the Level 1 tutorial is switched off at frame " + std::to_string(options_.tutorial_exit_frame)
                     + " (world option session clock): " + tutorial_exit_.where);
             else
-                log("world: the Level 1 tutorial's exit was NOT found (" + trouble
+                warn("world: the Level 1 tutorial's exit was NOT found (" + trouble
                     + "): the tutorial freezes this world at its own moments");
             // Step RK3H (the user, 2026-10-29: 'Hold frame-9 write'): the
             // tutorial's first write (0, frame 9) held at the in-play factor
@@ -461,7 +466,7 @@ namespace bmmo::sim {
                 log("world: the Level 1 tutorial's frame-" + std::to_string(bmmo::session::SESSION_CLOCK_TUTORIAL_FREEZE_FRAME)
                     + " freeze is held: " + tutorial_hold_.where);
             else
-                log("world: the Level 1 tutorial's frame-" + std::to_string(bmmo::session::SESSION_CLOCK_TUTORIAL_FREEZE_FRAME)
+                warn("world: the Level 1 tutorial's frame-" + std::to_string(bmmo::session::SESSION_CLOCK_TUTORIAL_FREEZE_FRAME)
                     + " freeze was NOT held (" + hold_trouble + "): this world freezes from that frame until the exit takes");
         }
         {
@@ -508,7 +513,7 @@ namespace bmmo::sim {
         bmmo::physics::airship_zone_box box;
         std::string error;
         if (!bmmo::physics::airship_zone_set(physics(), true, "", box, error)) {
-            log("world: airship zone: " + error);
+            warn("world: airship zone: " + error);
             return;
         }
         if (!box.active) {
@@ -531,7 +536,7 @@ namespace bmmo::sim {
         std::string error;
         if (!bmmo::physics::spawn_ghost_set(physics(), true, bmmo::session::kSpawnGhostRespawns,
                                             bmmo::session::kSpawnGhostRadius, info, error)) {
-            log("world: spawn ghost: " + error);
+            warn("world: spawn ghost: " + error);
             return;
         }
         char text[160];
@@ -560,11 +565,11 @@ namespace bmmo::sim {
                     p.physicalized = false;
                 }
                 CK3dEntity* clone = clone_ball(p, static_cast<uint8_t>(type), error);
-                if (!clone) { log("world: auto clone failed: " + error); continue; }
+                if (!clone) { warn("world: auto clone failed: " + error); continue; }
                 clone->SetWorldMatrix(ball->GetWorldMatrix());
                 const bmmo_physics_ball_recipe recipe = retail_recipe(static_cast<uint8_t>(type));
                 if (!bmmo::physics::physicalize(manager, clone->GetName(), recipe, p.group.c_str(), error)) {
-                    log("world: auto clone physicalize failed: " + error);
+                    warn("world: auto clone physicalize failed: " + error);
                     continue;
                 }
                 p.ball = clone;
@@ -789,7 +794,7 @@ namespace bmmo::sim {
             // this is an invariant violation (a SimTool replay of an old
             // journal can still meet it).  Kept working, logged and counted.
             ++join_orders_taken_;
-            log("world: ERROR join order " + std::to_string(wanted) + " taken in the world (player " + std::to_string(id)
+            warn("world: ERROR join order " + std::to_string(wanted) + " taken in the world (player " + std::to_string(id)
                 + "): falling back to slot " + std::to_string(slot));
         }
         p.slot = slot;
@@ -1010,7 +1015,7 @@ namespace bmmo::sim {
                 std::string impulse_error;
                 if (!bmmo::physics::push_impulse(manager, clone->GetName(), bmmo::session::kSpawnDirectionTable[idx],
                             options_.spawn_impulse, 0, impulse_error))
-                    log("world: spawn impulse for player " + std::to_string(id) + " failed: " + impulse_error);
+                    warn("world: spawn impulse for player " + std::to_string(id) + " failed: " + impulse_error);
                 else {
                     char text[160];
                     std::snprintf(text, sizeof(text), "world: spawn impulse index=%u speed=%.3f for player %u at tick %u",
@@ -1119,7 +1124,7 @@ namespace bmmo::sim {
                     + std::to_string(static_cast<int64_t>(tick_) - first_step_tick_ + 1) + " (tick " + std::to_string(tick_)
                     + ")");
             else
-                log("world: the Level 1 tutorial's exit could not be activated: " + exit_error);
+                warn("world: the Level 1 tutorial's exit could not be activated: " + exit_error);
         }
         if (frame_hook_) frame_hook_();
         // Navigation edges and parking run from the PreSimulate pass (see
@@ -1304,7 +1309,7 @@ namespace bmmo::sim {
             if (!proximity_.restore(engine_->context(), state.proximity_hold.data(), state.proximity_hold.size(),
                                     hold_error)) {
                 ++proximity_hold_failures_;
-                log("world: proximity hold not restored: " + hold_error);
+                warn("world: proximity hold not restored: " + hold_error);
             }
         }
     }
@@ -1419,8 +1424,10 @@ namespace bmmo::sim {
         std::sort(trafo_points_.begin() + static_cast<std::ptrdiff_t>(placements), trafo_points_.end(),
                   [](const bmmo::session::trafo_point& a, const bmmo::session::trafo_point& b) { return a.name < b.name; });
         const auto quiesce = bmmo::game::quiesce_originals(context, trafo_hooks_);
-        log("world: " + quiesce.text() + (quiesce.bodies || quiesce.controllers || quiesce.scripts
-                                            ? " - NOT EXPECTED in the server's world (a bug)" : ""));
+        if (quiesce.bodies || quiesce.controllers || quiesce.scripts)
+            warn("world: " + quiesce.text() + " - NOT EXPECTED in the server's world (a bug)");
+        else
+            log("world: " + quiesce.text());
         trafo_hold_.arm(context, bmmo::session::TICK_DELTA_MS);
         if (!bmmo::physics::trafo_set_filter(manager, true, error)) {
             error = "trafo filter: " + error;
@@ -1480,7 +1487,7 @@ namespace bmmo::sim {
         const uint16_t life = life_of(id);
         if (!trafo_registry_.find(id, life)) {
             ++trafo_missing_sets_;
-            log("world: trafo " + std::string(bmmo::session::trafo_type_name(type)) + " input of player "
+            warn("world: trafo " + std::string(bmmo::session::trafo_type_name(type)) + " input of player "
                 + bmmo::session::trafo_life_label(id, life) + " at tick " + std::to_string(event.tick)
                 + ": no set held for that life - not run (" + std::to_string(trafo_missing_sets_) + " so far)");
             return true;
@@ -1527,14 +1534,14 @@ namespace bmmo::sim {
         for (const auto& r: trafo_hold_.poll(context, tick_, false)) {
             ++trafo_hold_reports_;
             if (trafo_hold_reports_ <= 20)
-                log("world: trafo hold FIRED at tick " + std::to_string(tick_) + ": " + bmmo::session::trafo_type_name(r.type)
+                warn("world: trafo hold FIRED at tick " + std::to_string(tick_) + ": " + bmmo::session::trafo_type_name(r.type)
                     + (bmmo::session::trafo_is_reset(r.flags) ? " reset" : " explosion") + " from " + r.source
                     + " cancelled - an own Trafo Manager acting on the parked ball (a bug)");
         }
         const auto effect = trafo_hold_.effect_check(context, trafo_hooks_);
         if (effect.leaks()) {
             trafo_leaks_ += static_cast<uint64_t>(effect.leaks());
-            log("world: trafo_original_leaks at tick " + std::to_string(tick_) + ": " + std::to_string(effect.bodies) + " bodies, "
+            warn("world: trafo_original_leaks at tick " + std::to_string(tick_) + ": " + std::to_string(effect.bodies) + " bodies, "
                 + std::to_string(effect.scripts) + " scripts, first " + effect.first);
         }
         for (const auto& [key, a]: trafo_applied_)

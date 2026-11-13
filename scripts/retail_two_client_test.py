@@ -108,7 +108,8 @@ def start(port, trace=False, client_trace=None, server_trace=None, remote=None):
               f'  enabled: true\n  game_root: {DATA}\n  snapshot_interval: 2\n  input_delay: 10\n'
               '  maximum_physics_rooms: 1\n  debug_trace: ' + ('true' if server_trace else 'false') + '\n  event_rate_limit: 100\n  spawn_impulse: 3\n'
               '  journal_dir: journals\n  journal_max_mb: 256\n  journal_checkpoint_ticks: 660\n  allowed_mods: {}\n'
-              'logging_level: important\nauto_flush_log: true\n')
+              'logging_level: important\nauto_flush_log: true\n'
+              'log_verbose: true\n')   # step SLQ: the session diagnostics in server.log
     (sdir / 'config.yml').write_text(config)
     # The server treats EOF on its console as "stop", so it must not inherit a
     # pipe this process closes: scripts/run_server.py keeps the pipe open for

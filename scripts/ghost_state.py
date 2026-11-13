@@ -13,6 +13,9 @@ checkpoints), and each side's log for its ghost transitions:
           at tick T" and "the own ball B is in the airship zone at tick T" for
           its own ball (the own id from "own id N").
 
+The server's lines are verbose (step SLQ): its log needs log_verbose: true (or
+--verbose, or the console's "verbose on").
+
 Prints one line per ball per common checkpoint tick:
 
   tick owner  server (x,y,z) state nearest | client (x,y,z) state nearest | dist agree

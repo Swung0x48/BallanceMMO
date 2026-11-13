@@ -15,6 +15,7 @@
 # include <unistd.h>
 #endif
 #include <replxx.hxx>
+#include <atomic>
 #include <mutex>
 #include <string>
 #include "session/io_queue.hpp"
@@ -62,6 +63,7 @@ namespace bmmo {
     namespace {
         FILE* log_file = nullptr;
         bool auto_flush = false;
+        std::atomic<int> log_threshold{static_cast<int>(bmmo::log_type::everything)};   // step SLQ
 
         // Step IOX (world-agreement-gaps-design.md, "As built (step IOX)"):
         // the server's log off its runner, main-loop and console threads.
@@ -198,8 +200,18 @@ namespace bmmo {
             text[el - text - 1] = '\0';
     }
  
+    void set_log_threshold(bmmo::log_type least_serious) {
+        log_threshold.store(static_cast<int>(least_serious), std::memory_order_relaxed);
+    }
+
+    bool log_passes(bmmo::log_type type) {
+        return type == bmmo::log_type::bug
+            || static_cast<int>(type) <= log_threshold.load(std::memory_order_relaxed);
+    }
+
     void DebugOutput(bmmo::log_type eType, const char* pszMsg, int ansiColor) {
         using namespace std;
+        if (!log_passes(eType)) return;   // step SLQ
         // bmmo::net::microseconds time = bmmo::net::process_timestamp() - init_timestamp_;
         auto time = chrono::system_clock::to_time_t(chrono::system_clock::now());
         char timeStr[15];
