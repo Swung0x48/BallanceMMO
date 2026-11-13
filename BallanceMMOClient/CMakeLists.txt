@@ -200,6 +200,9 @@ target_compile_definitions(BallanceMMOClient PRIVATE
         NOMINMAX
         _CRT_SECURE_NO_WARNINGS
         _CRT_NONSTDC_NO_WARNINGS)
+# core_host.cpp instantiates the whole session core for the retail host: past COFF's
+# 65 279 sections without /bigobj under some toolsets (C1128 on CI's VS 18).
+set_source_files_properties(session/core_host.cpp PROPERTIES COMPILE_OPTIONS /bigobj)
 if (NOT MSVC)
     target_compile_options(BallanceMMOClient PRIVATE -Wall -Wextra -Wno-unknown-pragmas)
 endif ()
