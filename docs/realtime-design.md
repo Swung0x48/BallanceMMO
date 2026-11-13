@@ -2929,3 +2929,211 @@ docs aside): x64 BUILD-OK and 854/854 again, x86 CLIENT-BUILD-OK (no C1128), the
 K = 20, L12 and L11 at human key rates (`lvg`): 0 mismatches, every `mismatches=` 0, FINAL rows bit-equal to the restore
 skip's sessions (`r6on`) with L11's 32 trafo pieces, every client `live=whole/10.5/0/0/0+0/0/0/0/0` (no frame eligible:
 the capability keeps retail whole).
+
+## Built (a replay restores the body-less references the proximity union reads, step OBJB, 2026-11-13)
+
+**The gap** (the LVR section's *Traced* paragraph; the census in `.local-tools/work/OBJB/`). A probe with no slot
+is placed on the ball nearest to its block's ObjectB, read with `object_b->GetPosition()` (`proximity_union.hpp`
+`place()`). Where that ObjectB is a module frame or a body-less child of one, it is a level entity whose pose no
+record carries and no restore writes. The sector manager moves it once: `Gameplay_SectorManager / Activate Sector
+/ activate Type 1 / Set World Matrix (Hierarchy=TRUE)` writes each PH row's matrix to the row's module frame, four
+ticks into the sector's activation (the delayed link `Deactivate Sector.Out 0 -> Set Cell.In`, delay 4), then
+shows the module and activates its script. So a rewind run after the move and anchored before it replays the
+ticks up to the move against the moved frame, and `place()` can choose another ball than the live run chose. In
+the fast LBM's a4_swing arms that is `P_Modul_25_MF`, `P_Modul_29_MF` and `P_Modul_30_MF` (moved in live tick
+1676, sector 2 stamped for 1672), the six float-only anchors of sparse verify at tick 1671 (`vrq`: hold frames
+9, 10 and 15). Harmless there - the frames are placed again every tick and the blocks run first at 1678 - but a
+reference moved while its probe is active, or moved back, would make a replay choose otherwise where the block
+reads the frame. The census (mechanism-class probes, placement clones on): 9 roots in the arena, 3-42 per stock
+level (16 on L6); with clones on each root moves exactly once (its sector's first activation + 4 ticks), always
+before the module's `Activate Script` - "once" rests on the union never being torn down inside a level, so a level
+restart is not covered (memory "level-reset joint rebuild"). No mechanism script has another Set World Matrix /
+Set Position on a frame; whether the module scripts' `TT Restore IC (Hierarchy?=TRUE)` on their False branch (and
+`Event_handler`'s three `restore Objects`) touch the frame is not known - the dumps do not print a block's target
+(the review's point). Modules 08, 17, 26 and 41 have body-less referential frames read when their joints are
+created, under roots no probe names and so not tracked: a forward move is safe, a move back is as at HEAD.
+
+**The rule.** The union's hold section (local, record v6 bit 2) carries, after the by-name copies, one generation
+per reference root - the topmost ancestor of a rewired probe's ObjectB - and a restore puts back the pose the
+record names. Layout (`session/proximity_hold.hpp`): `u16 roots, u8 flags, roots x u32 generation`, and with
+`flags & 1` (verify) `u16 references, references x f32 x, y, z` (each probe's ObjectB position). Each root has a
+history of the world matrices it was observed at (bit for bit, 16 floats) and the generation the world is at:
+an observation of the current pose changes nothing; of a later pose of the history advances to it (`remade`: a
+replay making the live move again); of another pose drops the poses after the current one and appends it
+(`moved` live, `truncated` when there was a tail) under a generation never given before for that root. So a
+generation names one pose for the life of the rewire: a record naming a pose a truncation dropped (one left past
+an anchor whose replay stopped early, or SimTool's pristine-engine copies) is refused rather than read as another
+pose, and a replay that moves a root elsewhere than the live run compares logical against the live record (the
+first cut reused the dropped number, so both of those passed silently: the review's first defect). Every record
+at or before a rewind's anchor names a pose the history still holds; the records after it are re-captured by the
+replay. The history keeps at least 1024 poses a root: once it holds 2048 the oldest 1024 go at once (amortized,
+where dropping one at a time would copy 64 KB an observation for a root that moves every tick).
+
+- *Capture* (`proximity_union::capture`): observes every root, then writes the tail - after the tick's step,
+  so a whole record holds the tick's end pose. Light records have no hold section; a rebase restores the whole
+  record before them.
+- *Restore* (`proximity_union::restore`): observes every root first - the replay since the last restore may
+  have re-made a move at a light tick no capture observed, and a stale index would leave the gap open (verify
+  mode, which captures every tick whole, would not show it) - then checks the section's shape (extent, root and
+  reference counts; another shape fails the restore, as a frame or copy count did at HEAD) before it writes
+  anything, and looks each root's generation up: an unknown one (dropped, or past the depth) is refused and that
+  root keeps its live pose, as at HEAD, and so does a root whose entity is gone - counted `refused=`, the first
+  named on the line, the rest of the section restored (the first cut failed the whole script restore there, after
+  the scripts, cells, trafo states and queue were written and before the membership fix-up: the review's second
+  defect). Then the frames and copies as before, then each root whose generation differs: `SetWorldMatrix(pose,
+  KeepChildren FALSE)`, so a body-less child follows through its local matrix, as the level's own Set World Matrix
+  moves it. A restore that finds a root behind its history (a move present that the world did not make again)
+  counts it `unmade` and names the first on the line: a replay that stopped early (`rollback.hpp`'s `break` on a
+  failed `world.step()` or `put_globals`, which leaves a written root at its old pose in the live run where HEAD
+  left it moved; the review's third defect, a failure path) or a writer outside the replay. It shows at the next
+  restore only, not at the stop itself; the gate reads it as a fault (below).
+- *Order*: `script_replay::restore` now calls the hold restore after its last step that can refuse (the
+  written cells, the trafo built states, the joint order, the PreSimulate queue), so a refused restore leaves no
+  root moved back under live scripts; nothing between the old place and the new reads a frame, a copy or a root.
+  So a restore refused by one of those steps no longer writes the frames and copies back either (it did before).
+  It is still inside `restore_scripts`, so before the window births are destroyed and put back (a local matrix
+  then lands relative to the restored frame), before the IVP savestate and before the replay's first `place`.
+- *Bodied*: at the first `place()` after a restore, a written root with a body anywhere under it is counted
+  (`bodied=`, the first name kept): an entity write of a body the anchor had would derive its local matrix from
+  the written root. Checked there, not at the write, because the window's births still have their bodies inside
+  `restore_scripts`. Not expected with clones on (a module's parts are physicalized after its frame moved).
+- *Resync*: `localize_hold` writes every root as `kReferenceKeep` (0xFFFFFFFF): the portable record and the wire
+  are unchanged, and an exact resync keeps the live poses for its re-step, as before. The keep-only tail does not
+  stay in the history: the anchor record is captured again after the resync restore (`rollback.hpp` ~2246,
+  `capture(world, *at)`), so the records from the resync tick S on carry the generations the world is at - the
+  behaviour is HEAD's, not wider. Not done (no wire change needed): splice the root tail of the client's own record
+  at S into `at->scripts = rs->scripts` (`rollback.hpp` ~1412), so a resync whose base lies before a move restores
+  it too.
+- *Compare*: in the record diff a root generation that differs is logical; the verify positions are not compared;
+  a frame stays float (a frame copies the position of the candidate `place()` chose, and a correction of that
+  ball moves it - the replay's own check compares against a live record made before the correction). The
+  hold's layout and its compare are `parse_hold` / `compare_hold`, which `script_replay` calls.
+- *Scope*: a union rewired in probe class `mechanism` (the retail and headless clients; a SimTool world rewired
+  in that class too, whose step-state restore then writes roots). The server's world (class `all`) tracks no
+  root: it rewinds no record. The roots of the unit (slot) probes are tracked too, and not only for the cost:
+  `place()` never reads their ObjectB, but the proximity block itself reads it when it runs in a replayed tick.
+- *Two reads of ObjectB*: the rewire takes `GetInputParameter(2)->GetRealSource()` without an update (as the
+  structural test reads it), `place()` takes `GetInputParameterObject(2)`. Were they to differ (an ObjectB fed by
+  a parameter operation), a root would be tracked that nothing reads and verify would still pass, since it
+  compares the tracked object. So verify also compares, at every `place()` of a probe with no slot, the id read
+  there with the tracked one (`misread=`, its own counter: `verified=` keeps counting positions only).
+- *A move and a move back between two observations* (a light tick, no capture) leaves the root at the pose the
+  history's current generation names, so nothing is recorded for it - right, since no whole record could name
+  the pose in between. A move back observed is a new pose under a new generation, not the older one.
+- *Children of a written root*: `SetWorldMatrix(root, FALSE)` re-derives each child's world matrix as root x
+  local, which is the child's live pre-move world matrix only if the child's local matrix did not change across
+  the move (the level's Set World Matrix with Hierarchy moves it so). The fast LBM's writes were all on
+  `P_Modul_25_MF`, `P_Modul_29_MF` and `P_Modul_30_MF`, whose ObjectB is the root itself; a body-less child ObjectB
+  (perhaps `P_Modul_29_Platte06`, its parenting not confirmed) is the only child verify may have compared. So
+  verify's position compares check mostly the generation bookkeeping, and the L6 re-drive's compares cover no
+  write at all (none there). Untried: a clone at its source's pose (not identity), a pooled frame with clones off,
+  a move back.
+
+**Switch.** `BMMO_REFERENCE_POSES` off | on | verify, on when unset. Off tracks no root (the tail says 0 roots)
+and restores none: HEAD's behaviour with three more bytes a record. Verify also carries every probe's ObjectB
+position and, after a restore's writes, compares the position of each body-less one with the record's
+(`verified=` / `differing=`; one with a body is the savestate's, written after), and compares the ObjectB each
+`place()` reads with the tracked one (`misread=`). Counters, on the union's lookups line: `refs=<mode>/<roots>
+moved= written= remade= truncated= unmade= bodied= verified= differing= refused= misread=`, then the first of the
+unmade / refused / misread faults in parentheses. `truncated`, `unmade`, `bodied`, `differing`, `refused` and
+`misread` are faults: a gate run passes only with all six 0 (`truncated` is not wrong in itself, but no run of
+the stock replay makes one, so one is worth a look).
+
+**C1128.** `proximity_union.hpp` is header code compiled into `core_host.cpp`, which sits at MSVC's section
+limit. A first cut with the history inline in the header took the x86 object to 0x10070 sections (limit 0xFEFF),
+so everything that is not a CK call lives in `BallanceMMOCommon/src/session/proximity_hold.cpp` (the history, the
+tail, the check, the counters and their line, the switch) and the union keeps the CK reads and writes; the file
+is a source of the client, of `BallanceMMOSim` and of the tests. `core_host.cpp` compiled with `/bigobj` alone to
+count: HEAD 0xFED4 sections, this step 0xFED5 (counted again after the review's fixes: 0xFED5), which leaves
+42 sections under the limit.
+
+**Cost.** Per whole capture of a client: one `GetWorldMatrix` and one 64-byte compare per root and 3 + 4 bytes a
+root (39 bytes in the arena, 67 on L6; verify adds 2 + 12 a probe). The tracker's share measured alone (g++ -O2,
+`.local-tools/work/OBJB/bench_observe.cpp`): 42-43 ns a record for 9 roots, 183-189 ns for 42. A restore writes
+only the roots whose generation differs (on the L6 re-drive none: its one move per client is before any anchor).
+
+**Tests** (`proximity_rules_test.cpp`, engine-free): a restore names the earlier pose (a record after the move
+writes nothing, one before it the old pose, an unknown generation is refused - nothing pending, the section still
+restores, `refused=1` - and a section of another extent fails; the history's trim keeps the newest poses and
+drops generation 0); a remade move keeps its generation, another move truncates under a new generation (2, not
+the dropped 1: the record naming the live move is then refused and compares logical against the replayed one),
+and a move re-made at a tick nobody observed is found by the restore's observation, so a rewind before it still
+writes; the hold's extent and compare (verify's positions not compared, a frame float, a generation or a copy
+logical).
+
+**Verified** (first round, labels `ob*`, on the first cut: generations reused after a truncation, a refused root
+failing the restore, no `misread=`):
+
+- builds: x64 BUILD-OK and the tests 857/857 (three new); the x86 client build CLIENT-BUILD-OK (no C1128).
+- fast LBM in verify (`obv`: `BMMO_LIVE_RECORD=verify BMMO_LIVE_RECORD_MS=0`, the seven verifies and
+  `BMMO_REFERENCE_POSES=verify`): 38 of 38 twins FINAL exact, every FINAL criteria row equal to `rz1`'s, every
+  `mismatches=` 0 (1 260 occurrences in the 140 client logs, 1 488 in every `.log` / `.out` / `.txt` / `.json` of
+  the prefix's arms), every `mism` 0; sparse verify 452 anchors compared, 0 differing, **0 float**
+  (`vrq`: 452 / 0 / 6), 0 stale; rewinds 1 711, replayed ticks 37 447, rebased 452 + 1 475 and light live
+  1 425 (12 verified, 0 differing) as in `vrq` (which ran without the five reuse verifies), reuse 6 730 792
+  verified, 0 mismatches.
+  `refs=verify/9` on all 140 client logs: moved 1 072, written 63, remade 63, truncated 0, unmade 0, bodied 0,
+  refused 0, verified 35 400, differing 0. Every write is in the a4_swing arms (9 a twin, 18 in seed 1 off: three
+  roots per rewind anchored before 1676 and run after it); every written move was re-made by the replay. The
+  anchors that wrote: 1671 (rebased to the whole record before it), 1664 and 1646 (before the activation of
+  1672, which the replay issued again); none inside the delayed link's four ticks (1672-1675).
+- the switch off (`obo`: the a4_swing seed 0 and seed 2 arms with `a0_first`, the same verifies,
+  `BMMO_REFERENCE_POSES=off`): 6 of 6 twins FINAL exact, 0 mismatches, `refs=off/0`, and the six float anchors
+  back - tick 1671, clients 1-3 of both `_off` twins, "proximity hold: frame 9 differs [float]", as in `vrq`.
+- fast LBM as shipped (`obn`, the variables unset): 38 of 38 twins FINAL exact, rows equal to `rz1`'s, every
+  `mismatches=` and `mism` 0, `refs=on/9` with the same 63 writes and 63 re-made moves; against `vrn2` past the
+  build id (`arm_journals.py`) every client journal of every arm equal, 166 of 178, the other 12 the Level 13
+  server journals of the six arms that differ between any two runs (the same 12 as `vrn` against `vrn2`). So the
+  replayed choice the fix changed reached no journal - it was read nowhere, as the trace found.
+- the switch alone in verify at the shipped capture cadence (`obp`: `a0_first` and the three a4_swing arms,
+  only `BMMO_REFERENCE_POSES=verify`, so light records and the restore's own observation): 8 of 8 twins FINAL
+  exact, 0 mismatches, the same 63 writes and 63 re-made moves as `obn`, 14 514 positions compared in its 32 client logs (13 140 of them in the a4_swing arms) 0 differing,
+  unmade 0; every journal equal to `obn`'s.
+- the L6 re-drive (13 clients, `run_pt.sh`): as shipped (`pf_obs_1`) every `mism` 0, every `mismatches=` 0, the
+  13 clients' and the server's journals equal `pf_vrs2_1`'s past the build id (14 of 14), rewinds 72 749,
+  `refs=on/16` with one move a client and no write; in verify (`pf_obv_1`, the six verifies,
+  `LIFETIME_LIGHT=verify`, `LIVE_RECORD=verify` at MS=0, `REFERENCE_POSES=verify`) every `mism` and `mismatches=`
+  0, sparse verify 59 184 / 0 / 0 / 54 and rewinds 72 749 / replayed ticks 677 038 as `pf_vrv2_1`, journals 14 of
+  14 equal to `pf_vrv2_1`'s, 23 934 421 reference positions compared 0 differing; with the switch off
+  (`pf_obf_1`) journals 14 of 14 equal to `pf_vrs2_1`'s. Client 0's frame times (not pinned, this machine): on
+  p99 8.8 / max 12.5 ms, off 9.3 / 17.4 - inside the run-to-run spread; the record cost is the bench's.
+
+**Verified again after the review** (labels `ob2*`, the tree as it stands: generations never reused, a refused
+root kept, `unmade` / `refused` / `misread` named; `.local-tools/work/OBJB/run_ob2.sh`, aggregated by `agg2.py`,
+which prints a FAULT line for any of the six fault counters or any nonzero `mismatches=` / `mism`):
+
+- builds: x64 BUILD-OK and the tests 857/857 (the three OBJB tests extended, none added); x86 CLIENT-BUILD-OK (no
+  C1128); `core_host.cpp` with `/bigobj` alone 0xFED5 sections, as in the first round.
+- fast LBM in verify (`ob2v`, the same variables as `obv`): 38 of 38 twins FINAL exact, the 38 criteria rows equal
+  to `rz1`'s; `mismatches=` 1 260 in the client logs and 1 488 in every file, all 0; `mism` 0 in all 140 logs;
+  sparse verify 452 / 0 / 0 float / 0 stale, rebased 452; `refs=verify/9` on all 140: moved 1 072, written 63
+  (9 a twin of the a4_swing arms, 18 in seed 1 off), remade 63, truncated / unmade / bodied / refused / misread 0,
+  verified 35 400, differing 0 - every count equal to `obv`'s; against `obv` every client journal of every arm
+  equal (166 of 178), the other 12 the Level 13 server journals of a10x, a5d_resync, a6_drop and a8_r1-r3, the
+  run-to-run set. A first move still takes generation 1, so by construction the exercised records are the first
+  cut's (the records themselves were not compared; the journals and every counter are equal).
+- fast LBM as shipped (`ob2n`): 38 of 38 FINAL exact, rows equal to `rz1`'s, every `mismatches=` and `mism` 0,
+  `refs=on/9` with the same 1 072 / 63 / 63 and every fault 0; against `obn` and against `vrn2` 166 of 178 journals
+  equal each, the other 12 the same Level 13 server journals.
+- the L6 re-drive as shipped (`pf_ob2s_1`): every `mismatches=` (117 in the client logs) and `mism` 0, rewinds
+  72 749, `refs=on/16`, one move a client, no write, every fault 0; the 14 journals equal to `pf_vrs2_1`'s and
+  to `pf_obs_1`'s. In verify (`pf_ob2v_1`): every `mismatches=` and `mism` 0, sparse verify 59 184 / 0 / 0 / 54,
+  rewinds 72 749, replayed ticks 677 038, 23 934 421 positions compared 0 differing, misread 0; the 14 journals
+  equal to `pf_vrv2_1`'s and to `pf_obv_1`'s. Both runs end in the harness's standing `VERDICT: FAIL - ...
+  resolved no mechanism bodies (16/0)`, as every run of this re-drive does (`pf_obs_1`, `pf_obv_1` and PERF's).
+- not repeated on this tree: the switch-off runs (`obo`, `pf_obf_1`), `obp` and `obq`.
+- the gate (`.local-tools/work/OBJB/gate/run_gate.sh`, the final tree but the docs): x64 BUILD-OK and 857/857,
+  x86 CLIENT-BUILD-OK (no C1128), the Arch server ARCH-BUILD-OK; retail at K = 20, L12 and L11 at human key rates
+  (`objg`): 0 mismatches, every `mismatches=` 0, FINAL rows bit-equal to the restore skip's sessions (`r6on`) with
+  L11's 32 trafo pieces. Retail writes roots: L12 `refs=on/37` moved 6, written 0 and 8; L11 `refs=on/42` moved 13,
+  written 13 and 5, remade equal to written, every fault 0 (no verify there).
+
+**Not exercised.** The review's three defect paths (a truncation, a refused root, a replay stopped early) outside
+the unit tests: every run's truncated, refused and unmade are 0. A root moved while its probe's block is active, or moved back (a sector deactivation, a level
+reset: memory "level-reset joint rebuild"); `truncated`, `unmade`, `bodied` and `refused` above 0 outside the
+unit tests; an anchor inside the delayed link's four ticks (no run had one; SimTool's `--late-sector-check`
+and `--savestate-check` were not run); the bodied check against a body the anchor had; an exact resync whose base lies before a move this
+client already ran (it keeps the live pose, as before: the same gap as at HEAD); clones-off servers (a pooled
+frame moves at every later sector); retail in verify; the wire check; `--compare-scripts` dumps of older runs,
+which do not parse the new hold. Left out of the design: the `hold_choice` counter of sparse verify (the float
+count it would split is 0 now).

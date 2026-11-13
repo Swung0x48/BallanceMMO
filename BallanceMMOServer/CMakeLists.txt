@@ -134,6 +134,7 @@ if (BMMO_BUILD_SIM)
             "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/src/physics/ball_navigation.cpp"
             sim/physics_world.cpp sim/physics_world.hpp
             sim/session_runner.cpp sim/session_runner.hpp
+            "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/src/session/proximity_hold.cpp"
             "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/src/physics/physics_state.cpp"
             "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/src/physics/physics_savestate_common.cpp"
             "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/src/physics/physics_savestate_capture.cpp"
@@ -301,7 +302,8 @@ if (BUILD_SERVER_TESTS)
     enable_testing()
     add_executable(BallanceMMOMessageTests tests/message_layer_tests.cpp tests/room_manager_test.cpp tests/session_messages_test.cpp tests/session_logic_test.cpp tests/session_lifecycle_test.cpp tests/rollback_engine_test.cpp tests/rollback_binding_test.cpp tests/input_relay_test.cpp tests/spawn_impulse_test.cpp tests/session_journal_test.cpp tests/correction_thresholds_test.cpp tests/sector_pacer_test.cpp tests/sector_union_test.cpp tests/placement_plan_test.cpp tests/world_hash_test.cpp tests/written_cells_memo_test.cpp tests/script_record_reuse_test.cpp tests/lateness_test.cpp tests/patience_test.cpp tests/lead_test.cpp tests/session_client_core_test.cpp tests/trafo_input_test.cpp tests/proximity_rules_test.cpp tests/collectible_rules_test.cpp tests/net_transport_test.cpp
             ${BMMO_SESSION_CORE_SRC})
-    target_sources(BallanceMMOMessageTests PRIVATE tests/script_slots_test.cpp tests/stall_policy_test.cpp)
+    target_sources(BallanceMMOMessageTests PRIVATE tests/script_slots_test.cpp tests/stall_policy_test.cpp
+            ../BallanceMMOCommon/src/session/proximity_hold.cpp)
     target_link_libraries(BallanceMMOMessageTests PRIVATE GTest::gtest_main ${BMMO_GNS_LIB} bmmo_zstd)
     if (WIN32)
         target_compile_definitions(BallanceMMOMessageTests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)

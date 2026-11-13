@@ -12,6 +12,7 @@
 
 #include <gtest/gtest.h>
 
+#include <session/proximity_hold.hpp>
 #include <session/proximity_rules.hpp>
 
 namespace {
@@ -330,4 +331,131 @@ TEST(MechanismUnits, TheJoinOrderCapAndK) {
     std::set<uint8_t> held;
     for (int i = 0; i < 64; ++i) held.insert(static_cast<uint8_t>(i));
     EXPECT_EQ(join_order_verdict::refuse, capped_join_order(held, {}, mu::mechanism_slot_count(100, 64)).verdict);
+}
+
+// Step OBJB (docs/realtime-design.md): the reference roots and the hold
+// section's tail, session/proximity_hold.hpp.
+namespace {
+    using bmmo::session::reference_tracker;
+
+    struct pose {
+        float m[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        explicit pose(float x) { m[12] = x; }
+    };
+
+    // A hold section with no frame and no copy, then the tracker's tail.
+    std::vector<uint8_t> record_of(const reference_tracker& t) {
+        std::vector<uint8_t> out{0, 0, 0, 0};
+        t.append(out);
+        return out;
+    }
+
+    // One root (a module frame at the origin), observed at the sector's move.
+    void moved_once(reference_tracker& t, std::vector<uint8_t>& before, std::vector<uint8_t>& after) {
+        t.clear();
+        t.add(17, 9, pose(0.0f).m);
+        before = record_of(t);
+        t.observe(0, pose(320.0f).m);
+        after = record_of(t);
+    }
+}
+
+TEST(ReferencePoses, ARestoreNamesTheEarlierPose) {
+    reference_tracker t;
+    std::vector<uint8_t> before, after;
+    moved_once(t, before, after);
+    ASSERT_EQ(1u, t.roots());
+    EXPECT_EQ(1u, t.generation(0));
+    std::string error;
+    // A rewind to after the move writes nothing; to before it the old pose.
+    ASSERT_TRUE(t.check(after.data(), after.size(), error)) << error;
+    EXPECT_EQ(nullptr, t.pending(0));
+    ASSERT_TRUE(t.check(before.data(), before.size(), error)) << error;
+    ASSERT_NE(nullptr, t.pending(0));
+    EXPECT_EQ(0, std::memcmp(t.pending(0), pose(0.0f).m, sizeof(pose::m)));
+    t.wrote(0);
+    EXPECT_EQ(0u, t.generation(0));
+    // A generation the history does not know is refused: the root keeps its
+    // live pose, the section restores.  Another shape fails.
+    std::vector<uint8_t> unknown = after;
+    unknown.back() = 0x7f;
+    EXPECT_TRUE(t.check(unknown.data(), unknown.size(), error));
+    EXPECT_EQ(nullptr, t.pending(0));
+    EXPECT_NE(std::string::npos, t.line().find("refused=1"));
+    EXPECT_FALSE(t.check(unknown.data(), unknown.size() - 1, error));
+    // The history drops its oldest kDepth poses once it holds 2 kDepth.
+    for (size_t i = 1; i < 2 * reference_tracker::kDepth; ++i) t.observe(0, pose(1000.0f + float(i)).m);
+    EXPECT_EQ(2 * reference_tracker::kDepth, t.generation(0)) << "every move a new generation";
+    ASSERT_TRUE(t.check(before.data(), before.size(), error));
+    EXPECT_EQ(nullptr, t.pending(0)) << "generation 0 is gone";
+    std::vector<uint8_t> kept = before;
+    const uint32_t g = 2 * reference_tracker::kDepth - 5;
+    for (int b = 0; b < 4; ++b) kept[kept.size() - 4 + b] = uint8_t(g >> (8 * b));
+    ASSERT_TRUE(t.check(kept.data(), kept.size(), error));
+    ASSERT_NE(nullptr, t.pending(0));
+    EXPECT_EQ(1000.0f + float(g - 1), t.pending(0)[12]);
+}
+
+TEST(ReferencePoses, ARemadeMoveKeepsItsGenerationAnotherTruncates) {
+    reference_tracker t;
+    std::vector<uint8_t> before, after;
+    moved_once(t, before, after);
+    std::string error;
+    ASSERT_TRUE(t.check(before.data(), before.size(), error));
+    t.wrote(0);
+    // The replay re-makes the move at a tick no record observed; the next
+    // rewind's observation finds it, so a restore to before it still writes.
+    t.observe(0, pose(320.0f).m);
+    EXPECT_EQ(1u, t.generation(0));
+    EXPECT_EQ(after, record_of(t)) << "the remade move is the live move";
+    ASSERT_TRUE(t.check(before.data(), before.size(), error));
+    EXPECT_NE(nullptr, t.pending(0));
+    t.wrote(0);
+    // A replay making another move: the live one is gone, the new one takes
+    // a generation never given, so a record left naming the live move is
+    // refused and a replayed record differs from the live one.
+    t.observe(0, pose(400.0f).m);
+    EXPECT_EQ(2u, t.generation(0));
+    const std::vector<uint8_t> other = record_of(t);
+    std::string what;
+    EXPECT_EQ(bmmo::session::hold_difference::logical,
+              bmmo::session::compare_hold(after.data(), after.size(), other.data(), other.size(), what));
+    ASSERT_TRUE(t.check(after.data(), after.size(), error));
+    EXPECT_EQ(nullptr, t.pending(0)) << "the live move's generation is gone";
+    ASSERT_TRUE(t.check(before.data(), before.size(), error));
+    t.wrote(0);
+    t.observe(0, pose(400.0f).m);
+    EXPECT_EQ(2u, t.generation(0)) << "remade against the new history";
+    EXPECT_NE(std::string::npos, t.line().find("moved=1 written=3 remade=2 truncated=1 unmade=0"));
+    EXPECT_NE(std::string::npos, t.line().find("refused=1"));
+}
+
+TEST(ReferencePoses, TheHoldExtentAndItsCompare) {
+    // 1 frame, 1 by-name copy, 2 roots, verify's 1 reference position.
+    const auto section = [](float frame_x, uint32_t held, uint32_t generation, float reference_x) {
+        std::vector<uint8_t> out;
+        const auto u16 = [&out](uint16_t v) { out.push_back(uint8_t(v)); out.push_back(uint8_t(v >> 8)); };
+        const auto u32 = [&out](uint32_t v) { for (int s = 0; s < 32; s += 8) out.push_back(uint8_t(v >> s)); };
+        u16(1); u32(bits(frame_x)); u32(0); u32(0);
+        u16(1); u32(held);
+        u16(2); out.push_back(bmmo::session::kHoldReferencePositions); u32(0); u32(generation);
+        u16(1); u32(bits(reference_x)); u32(0); u32(0);
+        return out;
+    };
+    const std::vector<uint8_t> a = section(1.0f, 7, 1, 320.0f);
+    bmmo::session::hold_layout h;
+    ASSERT_TRUE(bmmo::session::parse_hold(a.data(), a.size(), h));
+    EXPECT_EQ(a.size(), h.end);
+    EXPECT_EQ(2u, h.roots);
+    EXPECT_EQ(1u, h.references);
+    EXPECT_FALSE(bmmo::session::parse_hold(a.data(), a.size() - 1, h));
+    using bmmo::session::hold_difference;
+    const auto compare = [&a](const std::vector<uint8_t>& b) {
+        std::string what;
+        return bmmo::session::compare_hold(a.data(), a.size(), b.data(), b.size(), what);
+    };
+    EXPECT_EQ(hold_difference::none, compare(section(1.0f, 7, 1, 0.0f))) << "verify's positions are not compared";
+    EXPECT_EQ(hold_difference::float_only, compare(section(1.5f, 7, 1, 320.0f)));
+    EXPECT_EQ(hold_difference::logical, compare(section(1.5f, 7, 0, 320.0f))) << "another generation is another pose";
+    EXPECT_EQ(hold_difference::logical, compare(section(1.0f, 8, 1, 320.0f)));
 }

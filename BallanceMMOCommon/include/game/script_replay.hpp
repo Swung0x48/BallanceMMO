@@ -75,6 +75,7 @@
 #include <game/script_record_reuse.hpp>
 #include <game/script_slots.hpp>
 #include <physics/callback_queue_plan.hpp>
+#include <session/proximity_hold.hpp>
 #include <session/resync_rules.hpp>
 #include <session/trafo_input.hpp>
 
@@ -193,7 +194,8 @@ namespace bmmo::game {
         // then the v2 body byte for byte, then each section present in that
         // order.  The hold section (game/proximity_union.hpp capture):
         //   u16 frames, per frame f32 x, y, z; u16 by-name copies, per copy
-        //   u32 the held entity's id (this process's).
+        //   u32 the held entity's id (this process's); the reference roots'
+        //   generations (step OBJB, session/proximity_hold.hpp).
         // Written only when the binding passes the hold hooks (a world
         // under WORLD_PROXIMITY_UNION), so every other record stays v2-v5
         // byte for byte.  A v6 word with an unknown bit is refused.
@@ -251,11 +253,9 @@ namespace bmmo::game {
         }
         // The hold section's extent (its counts say how long it is).
         static bool skip_hold(const std::vector<uint8_t>& in, size_t& pos) {
-            uint16_t frames = 0, names = 0;
-            if (!get_u16(in, pos, frames) || pos + static_cast<size_t>(frames) * 12 > in.size()) return false;
-            pos += static_cast<size_t>(frames) * 12;
-            if (!get_u16(in, pos, names) || pos + static_cast<size_t>(names) * 4 > in.size()) return false;
-            pos += static_cast<size_t>(names) * 4;
+            bmmo::session::hold_layout h;
+            if (pos > in.size() || !bmmo::session::parse_hold(in.data() + pos, in.size() - pos, h)) return false;
+            pos += h.end;
             return true;
         }
         // The written-cell section in this process (step RK2), diagnostic
@@ -2248,13 +2248,6 @@ namespace bmmo::game {
             const size_t written_at = pos;
             if ((sections & kSectionCells) && !skip_written(in, pos)) return fail(error, "truncated written-cell section");
             if (pos != in.size()) return fail(error, "trailing bytes");
-            // The frames and the by-name cells back at the anchor (design
-            // 4.2): a tick of the window without a candidate reads the hold.
-            if ((sections & kSectionHold) && hold && hold->restore) {
-                std::string why;
-                if (!hold->restore(in.data() + hold_at, hold_end - hold_at, why))
-                    return fail(error, ("proximity hold: " + why).c_str());
-            }
             if ((sections & kSectionCells) && replay_activation && !restore_written(context, in, written_at, pos))
                 return fail(error, "written-cell section");
             if (trafo && !trafo->empty()) {
@@ -2346,6 +2339,17 @@ namespace bmmo::game {
                 }
                 queue_stats().removed += static_cast<uint64_t>(removed);
                 queue_stats().rebuilt += target.size();
+            }
+            // The frames, the by-name cells and the reference roots back at
+            // the anchor (design 4.2): a tick of the window without a
+            // candidate reads the hold.  After every step above that can
+            // refuse (step OBJB): a refused restore leaves no root moved back
+            // under live scripts.  Nothing above reads a frame, a copy or a
+            // root.
+            if ((sections & kSectionHold) && hold && hold->restore) {
+                std::string why;
+                if (!hold->restore(in.data() + hold_at, hold_end - hold_at, why))
+                    return fail(error, ("proximity hold: " + why).c_str());
             }
             // G1 (live_membership): what the restore made active runs in the
             // live frames after the replay too.  Step RLM: an earlier
@@ -2699,39 +2703,21 @@ namespace bmmo::game {
             if (sa & kSectionHold) {
                 // Step G3 (design 4.2): a held by-name entity (or a count)
                 // that differs is a candidate-set difference - logical.  A
-                // frame's position is a copy of its candidate's position, so
-                // any correction of that ball moves it: float, like the
-                // sensors' arithmetic (WG3's review; the design's "logical"
-                // for frames made every correcting rollback count one).
+                // frame copies the position of the candidate place() chose; a
+                // correction of that ball moves it: float, like the sensors'
+                // arithmetic (WG3's review; the design's "logical" for frames
+                // made every correcting rollback count one).  Its other
+                // source, a choice made against a body-less ObjectB at a pose
+                // the record did not carry, is closed by the references'
+                // generations (step OBJB, compared as logical;
+                // session/proximity_hold.hpp compare_hold).
                 const size_t ha = pa, hb = pb;
                 if (!skip_hold(a, pa) || !skip_hold(b, pb)) return d;
-                if (pa - ha != pb - hb || !std::equal(a.begin() + static_cast<std::ptrdiff_t>(ha),
-                                                      a.begin() + static_cast<std::ptrdiff_t>(pa),
-                                                      b.begin() + static_cast<std::ptrdiff_t>(hb))) {
-                    const size_t frames = static_cast<size_t>(a[ha] | (a[ha + 1] << 8));
-                    const size_t names_at = 2 + frames * 12;   // the copies' u16 count, from the section start
-                    std::string what;
-                    bool logical = pa - ha != pb - hb;
-                    const size_t n = std::min(pa - ha, pb - hb);
-                    for (size_t i = 0; i < n; ++i) {
-                        if (a[ha + i] == b[hb + i]) continue;
-                        if (i < 2 || (i >= names_at && i < names_at + 2)) {
-                            logical = true;
-                            what = "proximity hold: the counts differ";
-                        } else if (i < names_at) {
-                            if (what.empty()) what = "proximity hold: frame " + std::to_string((i - 2) / 12) + " differs [float]";
-                            continue;
-                        } else {
-                            logical = true;
-                            what = "proximity hold: by-name copy " + std::to_string((i - names_at - 2) / 4) + " differs";
-                        }
-                        break;
-                    }
-                    if (what.empty()) what = "proximity hold: the counts differ";
-                    if (logical) { d.logical = true; ++d.logical_count; d.note(what); }
-                    else ++d.float_count;
-                    if (d.where.empty()) d.where = what;
-                }
+                std::string what;
+                const auto kind = bmmo::session::compare_hold(a.data() + ha, pa - ha, b.data() + hb, pb - hb, what);
+                if (kind == bmmo::session::hold_difference::logical) { d.logical = true; ++d.logical_count; d.note(what); }
+                else if (kind == bmmo::session::hold_difference::float_only) ++d.float_count;
+                if (kind != bmmo::session::hold_difference::none && d.where.empty()) d.where = what;
             }
             // Step RK2: the written-cell section is skipped, never compared
             // (decision Q4: "no check compares it").

@@ -58,6 +58,7 @@
 #include "CKAll.h"
 
 #include <session/mechanism_units.hpp>
+#include <session/proximity_hold.hpp>
 #include <session/proximity_rules.hpp>
 #include <session/resync_rules.hpp>
 
@@ -214,6 +215,21 @@ namespace bmmo::game {
                         if (auto* array = CKDataArray::Cast(context->GetObject(r.array)))
                             array->SetElementObject(0, r.column, context->GetObject(no_ball_));
             order();
+            // Step OBJB: each probe's ObjectB (read without update, as the
+            // structural test reads it) and its root with the root's pose.
+            // The clients' class only: the server's world rewinds no record.
+            if (error.empty() && which_ == probe_class::mechanism)
+                for (size_t i: probe_order_) {
+                    probes_[i].reference = refs_.objects();
+                    auto* block = CKBehavior::Cast(context->GetObject(probes_[i].block));
+                    CKObject* b = block && block->GetInputParameterCount() > 2
+                                      ? object_of(context, block->GetInputParameter(2)->GetRealSource()) : nullptr;
+                    CK3dEntity* root = b ? CK3dEntity::Cast(b) : nullptr;
+                    const CK_ID object = root ? root->GetID() : 0;
+                    while (root && root->GetParent()) root = root->GetParent();
+                    refs_.add(object, root ? root->GetID() : 0,
+                              root ? reinterpret_cast<const float*>(&root->GetWorldMatrix()) : nullptr);
+                }
             classify(sel);
             if (!error.empty()) {
                 release(context);
@@ -287,6 +303,15 @@ namespace bmmo::game {
         // the previous tick, §2.2), in player id order.
         void place(CKContext* context, const std::vector<probe_candidate>& candidates) {
             if (!context) return;
+            // Step OBJB: a body under a root the last restore wrote, now that
+            // the restore is over (its window's births destroyed): the entity
+            // write of a body the anchor had would derive its local matrix
+            // from the written root.  Not expected with placement clones (a
+            // module's parts are physicalized after its frame moved).
+            for (size_t r = 0; r < refs_.roots(); ++r)
+                if (refs_.take_written(r))
+                    if (auto* root = CK3dEntity::Cast(context->GetObject(refs_.root(r))))
+                        if (const char* name = body_under(root)) refs_.bodied(name);
             std::vector<probe_candidate> sorted(candidates);
             std::stable_sort(sorted.begin(), sorted.end(),
                              [](const probe_candidate& a, const probe_candidate& b) { return a.player < b.player; });
@@ -348,6 +373,8 @@ namespace bmmo::game {
                 auto* block = CKBehavior::Cast(context->GetObject(p.block));
                 auto* frame = CK3dEntity::Cast(context->GetObject(p.frame));
                 auto* object_b = block ? CK3dEntity::Cast(block->GetInputParameterObject(2)) : nullptr;
+                // Step OBJB verify: the rewire tracked the ObjectB read here.
+                if (refs_.positions()) refs_.read_object(p.reference, object_b ? object_b->GetID() : 0u);
                 if (!frame || !object_b) continue;
                 VxVector r;
                 object_b->GetPosition(&r);
@@ -525,7 +552,8 @@ namespace bmmo::game {
                  + " verified=" + std::to_string(cells_verified_) + " mismatches=" + std::to_string(cells_mismatches_)
                  + "; relatch: reads targeted=" + std::to_string(relatch_ids_targeted_) + " global="
                  + std::to_string(relatch_ids_global_) + " relatches targeted=" + std::to_string(relatches_targeted_) + " global="
-                 + std::to_string(relatches_global_) + (relatch_reason_ ? std::string(" (") + relatch_reason_ + ")" : std::string());
+                 + std::to_string(relatches_global_) + (relatch_reason_ ? std::string(" (") + relatch_reason_ + ")" : std::string())
+                 + "; " + refs_.line();   // step OBJB (session/proximity_hold.hpp)
         }
 
         // The hold section of the script record (§4.2): u16 frames, each
@@ -564,6 +592,19 @@ namespace bmmo::game {
                     held = array->GetElementObject(0, identities_[i].column);
                 u32(held ? static_cast<uint32_t>(held->GetID()) : 0u);
             }
+            // Step OBJB: the roots' generations as of this tick's end; in
+            // verify each probe's ObjectB position too.
+            observe_roots();
+            refs_.append(out);
+            if (refs_.positions())
+                for (size_t i = 0; i < refs_.objects(); ++i) {
+                    VxVector v(0.0f, 0.0f, 0.0f);
+                    if (auto* object = context ? CK3dEntity::Cast(context->GetObject(refs_.object(i))) : nullptr)
+                        object->GetPosition(&v);
+                    f32(v.x);
+                    f32(v.y);
+                    f32(v.z);
+                }
         }
 
         // The portable hold section (design 4.2 / 4.4, the portable record's
@@ -677,6 +718,7 @@ namespace bmmo::game {
                 }
                 for (int s = 0; s < 32; s += 8) out.push_back(static_cast<uint8_t>(id >> s));
             }
+            refs_.append_keep(out);   // step OBJB: no root in the portable record; a resync keeps the live poses
             return true;
         }
 
@@ -712,11 +754,18 @@ namespace bmmo::game {
             }
             const std::vector<size_t> by_name = held_identities();
             const uint16_t names = u16();
-            if (names != by_name.size() || !need(static_cast<size_t>(names) * 4) || at + names * 4u != size) {
+            if (names != by_name.size() || !need(static_cast<size_t>(names) * 4)) {
                 error = "proximity hold section: " + std::to_string(names) + " by-name copies, this world has "
                         + std::to_string(by_name.size());
                 return false;
             }
+            // Step OBJB: the roots' generations, the section's shape checked
+            // before anything is written, against the history as the world is
+            // now (a replay may have re-made a move at a tick no whole record
+            // observed).  A root refused (an unknown generation, its entity
+            // gone) keeps its live pose, as at HEAD; the rest is restored.
+            observe_roots();
+            if (!refs_.check(data, size, error)) return false;
             for (uint16_t f = 0; f < frames; ++f) {
                 probe& held = probes_[held_frames[f]];
                 if (auto* frame = CK3dEntity::Cast(context->GetObject(held.frame))) {
@@ -738,6 +787,32 @@ namespace bmmo::game {
                 if (auto* array = CKDataArray::Cast(context->GetObject(r.array)))
                     array->SetElementObject(0, r.column, held ? context->GetObject(held) : nullptr);
                 r.held = held;
+            }
+            // The roots at another pose than the record's, with their
+            // children (KeepChildren FALSE: a child follows through its local
+            // matrix, as the level's Set World Matrix moves it).  Verify then
+            // compares every body-less ObjectB with the record's position
+            // (one with a body is the savestate's, written after this).
+            for (size_t r = 0; r < refs_.roots(); ++r)
+                if (const float* pose = refs_.pending(r)) {
+                    auto* root = CK3dEntity::Cast(context->GetObject(refs_.root(r)));
+                    if (!root) {
+                        refs_.refuse_missing(r);
+                        continue;
+                    }
+                    VxMatrix m;
+                    std::memcpy(&m, pose, sizeof(m));
+                    root->SetWorldMatrix(m, FALSE);
+                    refs_.wrote(r);
+                }
+            uint32_t carried[3];
+            for (size_t i = 0; i < refs_.objects() && refs_.carried(i, carried); ++i) {
+                auto* object = CK3dEntity::Cast(context->GetObject(refs_.object(i)));
+                if (!object || (has_body && has_body(object))) continue;
+                VxVector v;
+                object->GetPosition(&v);
+                const float now[3] = {v.x, v.y, v.z};
+                refs_.compared(std::memcmp(now, carried, sizeof(carried)) == 0);
             }
             return true;
         }
@@ -952,6 +1027,7 @@ namespace bmmo::game {
             bool mechanism = false;
             int slot = -1;   // step Q7: a unit's probe: its slot (walk = the original's pre-copy position)
             bool at_anchor = true;
+            size_t reference = static_cast<size_t>(-1);   // step OBJB: its ObjectB's index in refs_
         };
         struct identity {
             CK_ID block = 0, array = 0, parameter = 0, root = 0;
@@ -1025,6 +1101,7 @@ namespace bmmo::game {
             slots_ = 0;
             slots_hooked_ = false;
             copy_record_bytes_ = 0;
+            refs_.clear();
         }
 
         static CKBehavior* root_of(CKBehavior* block) {
@@ -1449,6 +1526,29 @@ namespace bmmo::game {
         bool slots_hooked_ = false;   // step RELATCH: hooked_slots
         uint64_t unslotted_ = 0;
         size_t copy_record_bytes_ = 0;
+
+        // ---- step OBJB: the reference roots (session/proximity_hold.hpp) ----
+        // A probe's ObjectB that has no body is a level entity no record
+        // carries; its topmost ancestor (a module frame) moves when the
+        // sector manager's Set World Matrix places the module, four ticks
+        // into the sector's activation.  The hold section names each root's
+        // pose by a generation, so a rewind to before such a move puts the
+        // pose back and its replay chooses against what the live run read.
+        // Mutable: a capture observes the roots (capture is const).
+        mutable session::reference_tracker refs_;
+        static_assert(sizeof(VxMatrix) == 16 * sizeof(float), "a world matrix is 16 floats");
+        void observe_roots() const {
+            for (size_t r = 0; r < refs_.roots(); ++r)
+                if (auto* root = context_ ? CK3dEntity::Cast(context_->GetObject(refs_.root(r))) : nullptr)
+                    refs_.observe(r, reinterpret_cast<const float*>(&root->GetWorldMatrix()));
+        }
+        const char* body_under(CK3dEntity* entity) const {
+            if (has_body && has_body(entity)) return entity->GetName() ? entity->GetName() : "?";
+            for (int i = 0; i < entity->GetChildrenCount(); ++i)
+                if (CK3dEntity* child = entity->GetChild(i))
+                    if (const char* name = body_under(child)) return name;
+            return nullptr;
+        }
 
         // The by-name copies with a hold entry (§4.2): a slot's by-name cell
         // has none (§2.10: it is BMMO_NoBall or the candidate's type, a

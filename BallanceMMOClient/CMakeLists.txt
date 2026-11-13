@@ -140,6 +140,7 @@ set(BMMO_CLIENT_SRC
         physics/physics_view.cpp
         session/room_client.cpp
         session/core_host.cpp
+        ../BallanceMMOCommon/src/session/proximity_hold.cpp
 )
 
 # MinHook (BSD-2-Clause) for the CKInputManager::PreProcess hook used by
