@@ -974,6 +974,14 @@ namespace bmmo::session {
         // session with the world option refuses this client.  The headless
         // host computes it from step S6, the retail core host from S10.
         bool placement = false;
+        // Step LVR: the host's live step of T runs between pre_step and
+        // post_step(T) in one host pass (the headless frame), so the span
+        // from pre_step's entry to the live amend is that frame's work and a
+        // heavy frame may record its live tick light (BMMO_LIVE_RECORD).
+        // Without it every live record is whole and the gate reads no clock:
+        // retail steps T + 1 after the OnProcess that ran pre_step(T + 1), so
+        // the span would hold the render and the frame's wait.
+        bool live_step_in_frame = false;
     };
 
     // (legacy_calls, design 6.1 "Linking while the core is incomplete", was

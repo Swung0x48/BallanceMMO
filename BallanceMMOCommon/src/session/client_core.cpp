@@ -75,6 +75,39 @@ namespace bmmo::session {
             }();
             return on;
         }
+        // Step LVR: BMMO_LIVE_RECORD = whole | light | verify, read once per
+        // process (light when unset or unknown): the live tick's record of a
+        // heavy frame - one that replayed and whose work at the live capture,
+        // on steady_clock since pre_step's entry, is at least
+        // BMMO_LIVE_RECORD_MS (default 10.5) - is light where the engine's
+        // rule allows it (rollback_engine::set_live_record_light); whole
+        // keeps every live record whole and still counts the heavy frames.
+        // verify records it light and turns sparse capture's verify on with
+        // it: the record is captured whole all the same, every decision is
+        // the light one, and every rebased rewind's anchor is compared.  Only
+        // a host whose live step runs inside the frame reads it
+        // (session_capabilities::live_step_in_frame); retail is whole.
+        enum class live_record_mode : uint8_t { whole, light, verify };
+        live_record_mode live_record_from_env() {
+            static const live_record_mode mode = [] {
+                const char* text = std::getenv("BMMO_LIVE_RECORD");
+                if (text && !std::strcmp(text, "whole")) return live_record_mode::whole;
+                if (text && !std::strcmp(text, "verify")) return live_record_mode::verify;
+                return live_record_mode::light;
+            }();
+            return mode;
+        }
+        // Text that is not a number keeps the default (atof would read 0,
+        // every frame that replayed heavy).
+        double live_record_ms_from_env() {
+            static const double ms = [] {
+                const char* text = std::getenv("BMMO_LIVE_RECORD_MS");
+                char* end = nullptr;
+                const double value = text ? std::strtod(text, &end) : 0.0;
+                return text && end != text ? value : 10.5;
+            }();
+            return ms;
+        }
     }
 
     session_client_core::session_client_core(session_platform platform, session_capabilities caps)
@@ -466,11 +499,15 @@ namespace bmmo::session {
         // on the records of their ticks (review finding 3).
         const replay_last_mode last = replay_last_from_env();
         const lifetime_light_mode life = lifetime_light_from_env();
+        // Step LVR: a host without live_step_in_frame records every live tick whole.
+        const live_record_mode live = caps_.live_step_in_frame ? live_record_from_env() : live_record_mode::whole;
         s.rollback_.set_sparse_capture(snapshots_run() || config.body_set_corrections ? 1u : config.sparse_capture,
                                        config.sparse_capture_verify || last == replay_last_mode::verify
-                                           || life == lifetime_light_mode::verify);
+                                           || life == lifetime_light_mode::verify || live == live_record_mode::verify);
         s.rollback_.set_replay_last_light(last != replay_last_mode::whole);
         s.rollback_.set_lifetime_light(life != lifetime_light_mode::off);   // step LFL
+        s.rollback_.set_live_record_light(live != live_record_mode::whole);   // step LVR
+        s.live_record_ms_ = live_record_ms_from_env();
         s.merge_input_ = merge_input_from_env();   // step MRG
         s.input_delay_ = msg.input_delay;
         s.sector_lead_ = msg.sector_lead;

@@ -438,6 +438,10 @@ namespace bmmo::session {
         // exact resync's base, without a whole record to restore from, a
         // step after the flush with work to do).
         bool merge_input_ = true;
+        // Step LVR: the work a frame that replayed must have done by its
+        // live capture for its live record to be light (BMMO_LIVE_RECORD_MS,
+        // latched at the session start; the switch is the engine's).
+        double live_record_ms_ = 10.5;
         uint64_t input_merged_ = 0, merge_not_older_ = 0, merge_unrecorded_ = 0, merge_resync_base_ = 0;
         uint64_t merge_refused_ = 0, merge_excluded_ = 0;
         // Sector rewinds made and missed (a resync each), and the live passes
@@ -2295,6 +2299,11 @@ namespace bmmo::session {
             // Step K8: this tick's frame came from the own-input source.
             bool injected = false;
             bmmo::session::input_frame injected_frame;
+            // Step LVR: pre_step's entry on steady_clock (read only with
+            // live_step_in_frame) and the engine's replayed ticks then
+            // (post_step's heavy-frame gate).
+            std::chrono::steady_clock::time_point started{};
+            uint64_t resim_before = 0;
         } frame_;
         own_input_source own_input_source_;
         uint64_t own_inputs_injected_ = 0;

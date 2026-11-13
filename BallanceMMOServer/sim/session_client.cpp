@@ -2514,6 +2514,8 @@ namespace {
             // placement signature at every anchor and builds the copies when
             // the session's world option says so (place_sectors).
             caps.placement = true;
+            // Step LVR: the engine's tick runs between pre_step and post_step.
+            caps.live_step_in_frame = true;
             return caps;
         }
         // The core's configuration from the arguments (design 1.2).

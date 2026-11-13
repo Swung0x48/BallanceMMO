@@ -2681,3 +2681,251 @@ unkept; 440 rebased anchors compared in `lgv`, 0 differing, 0 stale (born 96, en
 K = 20, L12 and L11 at human key rates, as shipped (`lrs`): 0 mismatches, FINAL rows bit-equal to the restore skip's
 sessions with L11's 32 trafo pieces; 7-37 lifetime records a client, 0 unkept, 0 reappeared, the mech class crossed
 by 3 rebased rewinds on L11 (the retail sessions take no verify).
+
+## Built (a heavy frame records its live tick light, step LVR, 2026-11-13)
+
+**What it costs today.** Every frame recorded its live tick whole: the deferred live record, captured in
+`rollback_engine::amend_record` after the frame's corrections. In the opening of the public L6 record the frames
+over the 15.15 ms budget on the 8845HS are frames that replayed, and in them the live capture is 0.9-1.9 ms of
+the frame. The offline model (`.local-tools/work/LIFE/anchor_model.py`, over the session log's rollback lines)
+found that such a heavy frame's live record is re-recorded by a later replay before any rollback bases there: a
+whole live record of a heavy frame pays for a base nobody restores. The spike's A/B on the 8845HS (the slow and
+hooks diagnostics build, client 0 pinned, two interleaved pairs, `BMMO_LIVE_RECORD` whole / light at 10.5 ms;
+`.local-tools/work/LIVE/lv_compare.txt`): frames over 15.15 ms 4 -> 1 and 4 -> 1 of 33 232, max 17.0 -> 16.3 and
+17.5 -> 16.6 ms, p999 12.4 -> 12.0 and 12.4 -> 12.1 ms, p99 unchanged (10.2-10.3); 41 and 46 light live records on
+client 0; the light frame's live capture 1.07 and 1.18 ms cheaper (mean; 0.66-1.89); the frame after it +0.16
+and -0.30 ms on average, its tail up to +2.2 ms in frames far under the budget (8.00 -> 10.19, 2.86 -> 4.58 ms), none
+of them over it. The one frame over the budget in the second light run (16.55 ms) is a light frame itself, its
+replay's whole records 1.1-1.6 ms dearer than in the other runs.
+
+**The rule.** On a host whose live step runs between `pre_step` and `post_step` in one pass
+(`session_capabilities::live_step_in_frame`, declared by the headless client only; retail is whole, below), a heavy
+frame - it replayed (the engine's `resim_ticks` moved since `pre_step`'s entry), its work
+since `pre_step`'s entry is at least `BMMO_LIVE_RECORD_MS` (default 10.5) when `post_step` reaches the live
+capture, and no resync is pending, in flight or holding its state - passes `heavy` to `amend_record`. The engine
+records the tick light (`full = false`, `tick_state::live_light`) where the replayed ticks' rule would: sparse
+capture on, not a grid tick, no rows, a record of t - 1 with the same tracked set and generations
+(`live_light_before`; a lifetime change keeps the live tick whole: it keeps no births) and the same body names
+after the capture (`same_body_names`, now also SRT4's body-set test in `capture_replayed`; a light capture that
+finds another body set is captured whole again). Only the record's one capture (the awaiting branch): a second
+amend of the tick, a record captured at `record()` (the headless dump and compare hooks) and a resync anchor stay
+whole. `capture()` clears `live_light`, so a later replay's re-record decides the tick anew by its own rule. Code:
+`client_core_frame.cpp` `post_step` (the gate) and `pre_step` (`frame_.started`, `frame_.resim_before`);
+`rollback.hpp` `amend_record`, `set_live_record_light`, `live_light_before`, `same_body_names`.
+
+**Each reader, and its answer.**
+- *The restore base* (`restore_base`, `rewindable`, `restorable`): skips a light live record as any light record;
+  a rewind anchored at or after it rebases to the whole record before. The grid ticks stay whole, so a rebase is
+  still at most `sparse=8` - 1 ticks deeper and `kSparseCaptureMax` and the reach edge are unchanged; an anchor
+  deeper than the standard reach that loses its only whole base is refused as `sparse_unanchored` (0 in every run
+  below; the deepest added rebase 7 ticks).
+- *The capture cache and the script reuse source of the next live capture* (`capture`'s record of t - 1): need a
+  whole t - 1. After a light live tick the next live capture has neither: it reads every extra and contact and
+  its script capture copies from the kept source (`keep_source` runs only in a whole script capture, so the kept
+  source is the last whole one) where the ledger, which a light capture observes (`observe_scripts`), says a root
+  stayed quiet. A relatch's mark waits through the light tick as through any light record. The next replay's
+  records start at a whole base, as before. This is the path only a light run exercises (verify captures the
+  tick whole and keeps the source): `pf_vro1_1` below, every reused copy verified.
+- *Birth reads* (`birth_record`, `moved_birth_record`, the remade life's `find_const(remade_at)`): a live tick is
+  light only with the tracked set, generations and body names of t - 1, so no lifetime begins there. A record
+  becomes a birth record later only if `move_birth` erases the name from the records before it (an applied tick
+  on a light live record), as for any light record of SRT4's; such a read is counted by `note_birth_read`
+  (`lifetime_birth_reads`, a fault in `lifetime_birth_unkept`, logged): 0 unkept in every run below.
+- *Resync*: the anchor S is the first record of a new history (`anchor_resync`'s `record()`, captured at once, no
+  record of t - 1), never light; the gate excludes a frame with a resync pending, in flight or holding its state.
+  An exact resync's base and its `recorded_scripts(S)` are that record.
+- *Snapshots*: `on_snapshot` refuses a light record; a session with snapshots runs `sparse=1`, where
+  `live_light_before` refuses every tick.
+- *The core's uses of the base* (`merges_input_replay`, the sector re-derive in `rewind_for_sectors`, the held
+  and trafo reach checks, the calibration rewind): read the deeper base as for any light anchor. On the L6
+  re-drive the rewinds are 72 749 in every run below, light or whole.
+- *The replay's own check against the live record* (the scripts and the blob of `current_tick`, kept aside before
+  the replay): needs a whole live record, so after a light live tick it does not run (as after RLL's light last
+  tick); a diagnostic no gate reads. Verify captures the record whole and keeps it.
+- *`restore_candidates`, `generation_now`, `recorded_body`, `recorded_input`, `recorded_globals` (RK3's log line
+  right after the amend), the retire observer and the journal*: read bodies, navigation, the clock, the globals,
+  tracked sets and inputs, which a light record keeps.
+- *The dump and compare tools*: the headless client forces `sparse_capture = 1` with `--dump-savestate` or
+  `--compare-scripts` (`session_client.cpp`) and captures the live record at `record()` there, so neither sees a
+  light live record; SimTool's engines run without sparse capture and never pass `heavy`.
+- *The retail host* (`core_host.cpp`): records every live tick whole. One OnProcess runs `post_step(T)`, the
+  mailbox and `pre_step(T + 1)`, and the engine steps T + 1 after it, with the render and the frame's pacing wait;
+  the amend of T + 1 is in the next OnProcess. The span from `pre_step(T + 1)`'s entry to that amend is about a
+  frame period, so at any threshold under one frame every retail frame that replayed would be heavy (the
+  review's D1), and the light record would save time in the OnProcess after the replay, not in the one that
+  replayed. The span also read `steady_clock`, outside the K7 capture's clock sites, while the decision moves the
+  replayed ticks the cost meter divides the captured `rewind_*` reads by, and the cap from it the reach: a strict
+  K7 replay run at another frame rate could choose otherwise and diverge (D2). Retail does not declare
+  `live_step_in_frame`, so the core reads `BMMO_LIVE_RECORD` as `whole` there, the gate reads no clock and counts
+  nothing, and the status line says `live=whole/.../0/0/...`. Nothing in `core_host.cpp` changed, no clock site
+  was added and the K7 captures replay as before. The follow-up, once retail is measured: a host measure of the
+  core's own work for the tick (`pre_step(T + 1)`'s duration plus `post_step(T + 1)`'s up to the amend), read at
+  a new recorded clock site through `platform_.now` (appended before `count_`, not free in `retail_capture.hpp`,
+  no read with `whole`, so older captures replay with it), with a retail threshold of its own.
+
+**The clock.** The gate reads `std::chrono::steady_clock` (the C++ standard library, as the engine's capture
+timers do), not `platform_.now`: in the coordinated headless runs - the L6 re-drive, the fast LBM, the 8845HS A/B -
+`platform_.now` is the coordinator's virtual clock, which does not advance while a frame works, so no frame would
+be heavy there. The decision is therefore not deterministic and not in any capture. It decides no record that a
+rewind restores, but it decides what stands at a light live tick that a later rebased replay crosses: the live
+state where the live record would have been restored, or the replay's. The two are equal in every byte but where
+the live tick and its replay differ in float only - the fast LBM's `a4_swing` tick 1671 below, three proximity
+hold frames that a replay run after a module frame moved places otherwise (traced below; at HEAD too, gone at the
+next tick, never read). So the wall clock chooses between the live and the replayed value of those frames; the
+journals below are equal with it light and whole. A strict replay can see the decision through what the deeper rebases
+change: the replayed ticks the rewind cost meter divides the captured `rewind_*` clock reads by, and a rewind a
+deeper replay makes unnecessary (one LFL saw); a replay whose cost cap does not bind and whose rewinds are the
+capture's keeps its journal. The headless `--replay-inbound` has `--replay-free-cost-clock` for that. With
+`BMMO_LIVE_RECORD_MS=0` the decision is a function of the session alone (a frame that replayed, no resync under
+way), the same in a capture and its replay: a headless capture meant for a strict replay can be taken with it, or
+with `BMMO_LIVE_RECORD=whole`. One message carries a count the decision moves: the A6 telemetry's `replayed` (the
+headless client with `--telemetry`), beside its frame times, which are wall-clock reads already; the reach
+(`max_resim_ticks`) follows the cost meter.
+
+**The switch and the counters.** `BMMO_LIVE_RECORD` = `whole` | `light` | `verify`, read once per process
+(`client_core.cpp` `live_record_from_env`, beside `lifetime_light_from_env`), light when unset;
+`BMMO_LIVE_RECORD_MS` the threshold, latched at the session start (`strtod`; text that is not a number keeps 10.5,
+where `atof` read 0 and made every frame that replayed heavy). `whole` keeps every live record whole and
+still counts the heavy frames the rule allows. `verify` records the tick light and turns sparse capture's verify
+on: the record is captured whole all the same and still marked light, so every decision is the light one, and
+`verify_sparse_anchor` compares every rebased anchor. The engine's `set_live_record_light` is off by default (the
+tools and the unit tests' engines). The status line's sparse section (retail reads the same line, with `live=whole`) ends with
+` live=whole|light/ms/eligible/light/rebased+extra/max/deep/verified/differing`: the heavy frames' live records the
+rule allowed light, those made light, the rebased rewinds whose (base, anchor] held a light live record, the ticks
+they added (the base a whole live record would have given less the base taken), the most, those that added 4 or
+more, and sparse verify's compares of an anchor that was a light live record with their differences. The
+crossings and their ticks are a lower bound of the cost: a replay's re-record of the tick clears its mark, and
+records it light by the replayed ticks' rule, so a later rewind anchored at or after it is rebased deeper again
+uncounted, where a whole live record would still have been its base; the runs' deltas are the cost. The light
+count counts a record made light even when a second amend of the tick later captures it whole. Sparse verify's
+float-only differences of a light live anchor are not in `live=`'s last number (it counts only real
+differences): they are in `verify=`'s third field, which a gate reads with it. Verify shows as `live=light` with
+`sparse=8v`.
+
+**The runs** (the L6 re-drive, dev machine, 13 clients, one binary; totals over the 13 clients):
+
+| | live eligible / light | rebased + extra ticks | replayed ticks | whole / light replayed | rewinds |
+|---|---|---|---|---|---|
+| whole (`pf_vrx1_1`) | 360 / 0 | 56 858 + 212 939 | 663 877 | 56 023 / 607 854 | 72 749 |
+| as shipped (`pf_vrs1_1`) | 218 / 218 | 56 859 + 212 945 | 663 883 | 56 023 / 607 860 | 72 749 |
+| whole, MS=0 (`pf_vrw1_1`) | 63 055 / 0 | 56 858 + 212 939 | 663 877 | 56 023 / 607 854 | 72 749 |
+| light, MS=0 (`pf_vro1_1`) | 63 055 / 63 055 | 59 238 + 226 100 | 677 038 | 56 023 / 621 015 | 72 749 |
+
+As shipped on the dev machine 218 frames (17 a client) were heavy at 10.5 ms; one rebased rewind crossed a light
+live record, 6 ticks deeper. With the threshold at 0 every frame that replayed records light where the rule
+allows (63 055 of them, 4 850 a client): against the whole run at MS=0, 2 380 more rebased rewinds and 13 161
+more rebased ticks, replayed ticks +13 161 (+2.0 %), 63 055 fewer whole live captures; the rewinds are the same
+72 749. The `live=` field counts the first crossings of 2 064 of them, 7 892 ticks, at most 7, 1 071 of 4 or more. In verify with MS=0 and the six verifies
+(`pf_vrv1_1`: `BMMO_LIVE_RECORD=verify`, `BMMO_SCRIPT_REUSE`, `SLOT_MEMO`, `RESTORE_PLAN`, `TRAFO_HELD`,
+`SLOT_CELLS`, `REPLAY_LAST`, `LIFETIME_LIGHT` = verify): every `mismatches=` 0, sparse verify 59 184 anchors
+compared, 0 differing, 0 float, 54 stale (LFL's verify run: 56 804 / 54); 2 064 light live anchors compared, 0
+differing; its decisions are `pf_vro1_1`'s (every counter in the table equal). The script reuse with the five
+reuse verifies, light (`pf_vro1_1`) against whole (`pf_vrw1_1`), both at MS=0: captures 190 985 / 254 040 (63 055
+fewer whole live captures), with record t - 1 87 619 / 125 255, roots reused 4 201 332 / 5 588 542, walked 1 717 643
+/ 2 285 124 (22.0 reused and 9.0 walked a capture in both), every reused root verified equal to a walk (0
+mismatches in both). The captures with no record of t - 1 whose source was the kept one (`kept:`, by who kept it:
+a capture 35 908 / 56 023, a restore 67 445 / 72 749) and those with record t - 1 account for the 63 055 captures
+not made: 37 636 + 20 115 + 5 304 (the counts are of captures, so a capture not made takes its count with it;
+as shipped, `pf_vrs1_1`, the restore-kept one is 72 747 against 72 749, two of its 218). In the whole runs the
+restore-kept count equals the rewinds, 72 749. Roots copied from the kept source 2 273 766 /
+2 832 984, refused 0 / 0; the relatch marks walked 1 157 / 1 171, unsourced 0, previous and kept 0/0, raw 25/1 132
+/ 25/1 146, restored 127 / 97. Lifetime records 3 299 / 3 228, 1 749 birth reads, 0 unkept, 0 reappeared;
+`unanch=` 0 everywhere. Every session's `mism` 0 in all five runs. Journals: the 13 clients' and the server's of
+`pf_vrx1_1` equal HEAD's shipped run (`pf_lfs2_1`) past the build id; those of `pf_vrs1_1`, `pf_vrv1_1`,
+`pf_vro1_1` and `pf_vrw1_1` equal `pf_vrx1_1`'s. `pf_vrx1_1`'s counters are `pf_lfs2_1`'s.
+
+**The fast LBM** (38 twins, the coordinator's virtual time, so the threshold reads the dev machine's wall clock).
+As shipped (`vrn`): 38 of 38 twins FINAL exact, every FINAL criteria row equal to the resync cut's run (`rz1`);
+108 light live records over the 140 sessions, crossed by no rebased rewind, so this run proves no rebase across
+one; every other replay counter equal to LFL's as-shipped run `lgn` (rewinds 1 711, replayed ticks 37 377,
+rebased 440 + 1 405), its script captures 108 fewer. In verify at MS=0 (`vrq`, `BMMO_LIVE_RECORD=verify
+BMMO_LIVE_RECORD_MS=0`, `sparse=8v` in every session): 38 of 38 FINAL exact, the rows equal to `rz1`'s, 0
+mismatches; 1 425 light live records, 12 rebased rewinds crossed one (70 ticks, at most 7), rebased 452 + 1 475,
+replayed ticks 37 447; sparse verify 452 anchors compared, 0 differing, 0 stale, and **6 float**: the 12 light live
+anchors compared include 6 that differ from their record in a float script parameter only, which sparse verify
+counts apart and not as a difference (as the replay's own check does, `script_float_mismatches`). LFL's verify run
+`lgv` had 0 float, and so have the L6 runs here (2 064 light live anchors). All six are one tick: the live record of
+1671 in `a4_swing` seed 0 and seed 2, the off twins, clients 1-3 each, rebased from 1664 by the rewind of the input
+correction at 1672; the difference is `proximity hold: frame 9 differs [float] (0 logical, 1 float)` - one probe
+frame's position in the proximity union's hold section; bodies, the blob and every logical script byte equal. In
+that live frame a remote's spawn ghost turned solid (`spawn_ghost_frame` logs it; it reads the state and writes
+the display only). The replay's own check of a live record against the re-executed scripts reports
+float-only differences of the same kind in these arms without this step (`script replay: the scripts re-executed
+to tick N differ in float parameters only: proximity hold: frame K differs [float]`: LFL's `lgn`, 25 such lines,
+and `vrn` alike), so the live record's hold frames are sometimes not what a replay of the tick leaves, in float
+only. Those lines in `lgn`'s two arms (read in the review round) are at the ticks a replay ended on and was
+checked: seed 0 off 272, 928, 1088, 1168; seed 2 off 928, 1088, 1128 - none at 1671 and none at a tick where a
+ghost turned solid (seed 0: 353, 680, 682, 701, 770, 1174, 1191, 1194, 1201, 1671; seed 2: 353, 680, 682, 701,
+770, 781, 1174, 1190, 1194, 1198, 1671). No baseline replay was checked at a ghost-to-solid tick, so this says
+nothing either way about 1671: inconclusive. Earlier verify runs of the arm (`kvg`, `lfw`, `lgv`, `mlv`, `rlv`)
+read 0 in `verify=`'s third field only because none compared a light anchor at 1671.
+
+*Traced* (one diagnosis, logging-only builds; runs `vfa` whole, `vfb` verify, `vfc` verify with the probes'
+references logged, all at MS=0). A probe with no slot is placed on the ball nearest to its block's ObjectB, read
+with `object_b->GetPosition()` (`proximity_union.hpp` `place()`). For three probes that reference is a module frame
+of sector 2 (`P_Modul_25_MF`, `P_Modul_29_MF`, `P_Modul_30_MF`), a level entity with no body, whose position no
+record carries and no restore writes. In the live run those frames sit at the origin up to `place(1676)` and at
+their level positions from `place(1677)` on (moved in live tick 1676, four ticks after sector 2's activation stamped
+for 1672; the block that moves them was not traced). A rewind run after 1676 and anchored in [1664, 1675] replays
+ticks before 1677 against the moved frames, and `place()` picks the own ball where the live run picked the mirror:
+frames 9, 10 and 15 of the hold section (the verify line names the first), the per-slot copies of each ball equal,
+so the balls' positions are equal and only the choice differs. The ghost turning solid at 1671 is a coincidence,
+and neither the capture's phase (the capture equals `place()`'s output at every tick, live and replayed), a stale
+ghost pose (the four candidate bodies bit-equal) nor a relatch writes them. It is at HEAD without this step: in
+whole mode (`vfa`) the rewind at 1713 restores 1671, its `place` line for 1672 is byte-equal to the live one, and
+its record of 1672 differs from the live record of 1672 in the same hold bytes; HEAD never compares those ticks.
+It is gone at the next tick and never read here: `place()` rewrites a no-slot frame on every tick with a
+candidate, the three probes' block and root script were inactive at every place from 1640 to 1677, live and
+replayed, and run first at 1678 with the same choice in both; from 1672 on `vfa` and `vfb` are equal for clients
+1-3 (the hold captures of the 1713 replay at 1672, 1680, 1688, 1696 and all 58 replayed place lines with the
+bodies' bits, 1672-1700); the journals of `vrn2` and `vzl` (light at MS=0), `vfa` and `vfb` are equal, every twin
+FINAL exact. So a light live record only lets a rebased replay cross 1671 where HEAD restored it; the default
+(light, headless) stands. The gap itself - a body-less reference that a replay reads at its moved position - is
+its own correctness item: a reference moved back while its probe is active (a sector deactivation, a level reset)
+could make a replay choose otherwise where the block reads it. Its fix is client-local: the record carries, and the
+restore puts back, the positions of the body-less ObjectB references the union reads. The `live=`
+field's last number counts only differences; the float-only ones are in `verify=`'s third field.
+
+**The review round** (one review: no exactness defect; two gate defects, both retail, fixed by the capability
+above; the float anchors traced after it, above). D1 (on retail the threshold did nothing) and D2 (the gate's clock
+reads outside the K7 clock sites) are closed by `session_capabilities::live_step_in_frame`: the headless client
+declares it (`session_client.cpp` `make_capabilities`); without it the core reads `BMMO_LIVE_RECORD` as `whole`
+and the gate reads no clock. The headless rule is unchanged: the five L6 runs again on the fixed tree, with new
+labels, give every counter of the first round's at MS=0 - `pf_vrv2_1` (verify, the six verifies), `pf_vro2_1`
+(light, the five reuse verifies) and `pf_vrw2_1` (whole, the same) equal `pf_vrv1_1`, `pf_vro1_1` and
+`pf_vrw1_1` in every count of the status and reuse lines (sparse verify 59 184 / 0 / 0 / 54, 63 055 light, 2 064
+crossings + 7 892 ticks, replayed ticks 677 038 / 663 877, rewinds 72 749, reuse 0 mismatches) - and the
+wall-clock runs differ only where the wall clock reads: as shipped (`pf_vrs2_1`) 324 eligible / 324 light (218 in
+`pf_vrs1_1`), 7 rebased rewinds crossed one (29 ticks, at most 7, 5 of 4 or more), rebased 56 865 + 212 982,
+replayed ticks 663 920, rewinds 72 749; whole (`pf_vrx2_1`) 263 eligible / 0 light, every other counter
+`pf_vrx1_1`'s. Every session's `mism` 0 and every `mismatches=` 0 in all five; the 13 clients' and the server's
+journals of `pf_vrx2_1` equal past the build id to `pf_vrx1_1`'s, `pf_lfs2_1`'s and those of `pf_vrs2_1`,
+`pf_vrv2_1`, `pf_vro2_1` and `pf_vrw2_1`, 14 of 14 each. The fast LBM as shipped again (`vrn2`): 38 of 38 twins
+FINAL exact, every FINAL criteria row equal to `rz1`'s, 0 mismatches; 178 light live records (108 in `vrn`), and
+this time one rebased rewind crossed one (`a10x` off, client 0, 2 ticks); rebased 441 + 1 407, replayed ticks
+37 379, rewinds 1 711, 0 unkept; the clients' journals of every arm equal `vrn`'s past the build id (located per
+file: the 12 hex digits after `+bmmo-`, byte 91 in these arms' compressed headers and 92 on L6), 166 of 178, the
+other 12 the Level 13 server journals, which differ between any two runs of the fast LBM (`lgn` against `lgv`
+too). The rest of the review is in the paragraphs above: the clock comment reworded (the wall clock chooses
+between the live and the replayed value of a held float), `BMMO_LIVE_RECORD_MS` parsed with `strtod`, and the
+counters' notes (lower bounds, a light count kept through a later whole amend, `verify=`'s third field).
+
+**Not exercised**: a live tick refused for another body set alone (not counted on L6; the unit test only), a birth
+read from a light live record (move_birth's applied tick on one), an anchor refused at the reach edge, a strict
+replay of a headless capture made with the step on, the block that moves the module frames, the retail
+host after the capability (built, not run: whole by construction), the 8845HS timing of the product build (the A/B
+above is the spike's, with the same rule), the wire check.
+
+**Gate.** 854/854 (two new tests: `RollbackEngine.AHeavyFramesLiveRecordIsLightAndNeverABase`, a rewind anchored
+at and after a light live record rebased to the whole record before and arriving at the all-whole engine's world,
+whole / light / verify, verify keeping the bytes and comparing the anchor;
+`RollbackEngine.AHeavyLiveTickWithALifetimeChangeOrAnotherBodySetStaysWhole`, a mechanism added, a grid tick and
+another body set kept whole, every tick whole without sparse capture); x64 BUILD-OK, x86 CLIENT-BUILD-OK; the L6
+re-drive whole (`pf_vrx2_1`), as shipped (`pf_vrs2_1`), whole and light at MS=0 with the five reuse verifies
+(`pf_vrw2_1`, `pf_vro2_1`) and in verify at MS=0 with the six verifies (`pf_vrv2_1`), as above; the fast LBM as
+shipped (`vrn2`), 38/38 twins FINAL exact, every criteria row equal to the resync cut's run; the first round's runs
+(`*1`, `vrn`, `vrq`) were on the tree before the capability, with the same headless code. On the final tree (the
+docs aside): x64 BUILD-OK and 854/854 again, x86 CLIENT-BUILD-OK (no C1128), the Arch server ARCH-BUILD-OK; retail at
+K = 20, L12 and L11 at human key rates (`lvg`): 0 mismatches, every `mismatches=` 0, FINAL rows bit-equal to the restore
+skip's sessions (`r6on`) with L11's 32 trafo pieces, every client `live=whole/10.5/0/0/0+0/0/0/0/0` (no frame eligible:
+the capability keeps retail whole).

@@ -977,6 +977,15 @@ namespace bmmo::session {
         uint64_t lifetime_light = 0, lifetime_light_us = 0, lifetime_births_kept = 0, lifetime_reappeared = 0;
         uint64_t lifetime_birth_reads = 0, lifetime_birth_unkept = 0;
         uint64_t lifetime_records[6] = {}, lifetime_rebased[6] = {}, lifetime_compared[6] = {}, lifetime_stale[6] = {};
+        // Step LVR: live records of a heavy frame the engine's rule allowed
+        // light (counted with the switch off too), those made light, the
+        // rebased rewinds that crossed a light live record in (base, anchor],
+        // the ticks the light live records added to them (the base a whole
+        // live record would have given minus the base taken), the most, those
+        // that added 4 or more, and sparse verify's compares of an anchor
+        // that was a light live record, with their differences.
+        uint64_t live_light_eligible = 0, live_light = 0, live_light_rebased = 0, live_light_extra_ticks = 0;
+        uint64_t live_light_extra_max = 0, live_light_deep = 0, live_light_verified = 0, live_light_verify_mismatches = 0;
         uint64_t unmatched = 0;        // snapshot tick not in the history
         uint64_t captures_never_made = 0;   // a deferred record (capture_now false) no amend_record captured
         uint64_t too_far = 0;          // a snapshot or a rewind deeper than max_resim_ticks: refused, nothing written
@@ -1137,7 +1146,15 @@ namespace bmmo::session {
         // history.  Keeps the tick's inputs and tracked set.  Returns false
         // when the tick is no longer recorded (evicted, invalidated or never
         // recorded), so the caller must not treat the amendment as applied.
-        bool amend_record(const rollback_world& world, uint32_t tick) {
+        // Step LVR: `heavy` - the caller's frame replayed and its work is
+        // high - makes the record's one capture (the awaiting branch) light
+        // under set_live_record_light where the replayed ticks' rule would:
+        // sparse capture on, not a grid tick, no rows, a record of t - 1
+        // with the same tracked set and generations (no lifetime change) and
+        // the same body names after the capture; else whole.  A second
+        // amend of the tick, a record captured at record() and a resync
+        // anchor stay whole.
+        bool amend_record(const rollback_world& world, uint32_t tick, bool heavy = false) {
             tick_state* at = find(tick);
             if (!at) return false;
             if (awaiting_capture_ && awaiting_tick_ == tick) {
@@ -1145,7 +1162,20 @@ namespace bmmo::session {
                 // timed as the record's.
                 awaiting_capture_ = false;
                 const auto started = std::chrono::steady_clock::now();
-                capture(world, *at);
+                const tick_state* before = heavy ? live_light_before(*at) : nullptr;
+                const bool light = live_record_light_ && before;
+                capture(world, *at, !light || sparse_verify_);
+                if (before && !same_body_names(*at, *before)) {
+                    if (light && !sparse_verify_) capture(world, *at, true);
+                    at->full = true;
+                } else if (before) {
+                    ++stats_.live_light_eligible;
+                    if (light) {
+                        at->full = false;
+                        at->live_light = true;
+                        ++stats_.live_light;
+                    }
+                }
                 const uint64_t took = static_cast<uint64_t>(
                     std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count());
                 stats_.capture_us += took;
@@ -2686,7 +2716,14 @@ namespace bmmo::session {
                 if (verify_pending_ && t == verify_anchor_) {
                     verify_pending_ = false;
                     if (recorded && verify_stale_) ++stats_.sparse_verify_stale;
-                    else if (recorded) verify_sparse_anchor(world, *recorded, state);
+                    else if (recorded) {
+                        const uint64_t mismatches = stats_.sparse_verify_mismatches;
+                        verify_sparse_anchor(world, *recorded, state);
+                        if (recorded->live_light) {   // step LVR
+                            ++stats_.live_light_verified;
+                            stats_.live_light_verify_mismatches += stats_.sparse_verify_mismatches - mismatches;
+                        }
+                    }
                     // Step LFL: by the lifetime classes the replay crossed.
                     for (size_t c = 0; recorded && c < kLifetimeClasses; ++c)
                         if (verify_lifetime_ & (1u << c)) ++(verify_stale_ ? stats_.lifetime_stale : stats_.lifetime_compared)[c];
@@ -2927,7 +2964,8 @@ namespace bmmo::session {
         // re-poses the body with; light with those extras under step LFL's
         // set_lifetime_light) and one that carries snapshot rows; the
         // others light (tick_state::full).  A
-        // live record is always whole.  `verify`: the light ticks are
+        // live record is whole, but for a heavy frame's under step LVR's
+        // set_live_record_light.  `verify`: the light ticks are
         // captured whole all the same (still marked light, so every
         // decision is the sparse one), and a rebased rewind compares the
         // anchor it re-simulated with that record (sparse_verified /
@@ -2969,6 +3007,17 @@ namespace bmmo::session {
         // default (the tools and the unit tests' engines): off is SRT4's rule.
         void set_lifetime_light(bool light) { lifetime_light_ = light; }
         bool lifetime_light() const { return lifetime_light_; }
+        // Step LVR: a heavy frame's live record (amend_record's `heavy`)
+        // recorded light by the replayed ticks' rule, where SRT4 recorded
+        // every live tick whole.  Never a base, a cache or reuse source, a
+        // snapshot or resync anchor (tick_state::full); a later replay that
+        // re-records the tick decides it anew.  With sparse capture's verify
+        // on, the record is captured whole and still marked light.  Off by
+        // default (the tools and the unit tests' engines): every live record
+        // whole, the heavy frames the rule allows still counted
+        // (live_light_eligible).
+        void set_live_record_light(bool light) { live_record_light_ = light; }
+        bool live_record_light() const { return live_record_light_; }
         // The lifetime classes of tick_state::lifetime, in its bit order.
         static constexpr uint8_t kLifetimeBorn = 1, kLifetimeEnded = 2, kLifetimeOrder = 4, kLifetimeOwn = 8,
                                  kLifetimeMech = 16, kLifetimeBodySet = 32;
@@ -3273,9 +3322,24 @@ namespace bmmo::session {
                 // lifetime change used to keep whole - read before the
                 // replay re-records them.
                 verify_lifetime_ = 0;
+                // Step LVR: the base a whole live record would have given
+                // (the newest record in (base, anchor] that is whole or a
+                // light live one).
+                bool crossed_live = false;
+                uint32_t would = base;
                 for (const tick_state& state: history_)
-                    if (static_cast<int32_t>(state.tick - base) > 0 && static_cast<int32_t>(state.tick - anchor) <= 0)
+                    if (static_cast<int32_t>(state.tick - base) > 0 && static_cast<int32_t>(state.tick - anchor) <= 0) {
                         verify_lifetime_ |= state.lifetime;
+                        if (state.live_light) crossed_live = true;
+                        if (state.live_light || state.full) would = state.tick;
+                    }
+                if (crossed_live) {
+                    const uint64_t extra = would - base;
+                    ++stats_.live_light_rebased;
+                    stats_.live_light_extra_ticks += extra;
+                    stats_.live_light_extra_max = std::max(stats_.live_light_extra_max, extra);
+                    if (extra >= 4) ++stats_.live_light_deep;
+                }
                 for (size_t c = 0; c < kLifetimeClasses; ++c)
                     if (verify_lifetime_ & (1u << c)) ++stats_.lifetime_rebased[c];
             }
@@ -3438,6 +3502,10 @@ namespace bmmo::session {
             // memory only.
             uint8_t lifetime = 0;
             std::vector<std::string> births;
+            // Step LVR: a live tick's record made light (amend_record's
+            // `heavy`); capture() clears it, so a replay's re-record of the
+            // tick has none.  In memory only.
+            bool live_light = false;
         };
 
 
@@ -3826,10 +3894,7 @@ namespace bmmo::session {
             // body appeared or went without a lifetime change), and under
             // step LFL no name may reappear at t in a lifetime an earlier
             // record carries (reappears): whole, as under SRT4's rule.
-            bool same_set = state.bodies.size() == before->bodies.size();
-            auto b = before->bodies.cbegin();
-            for (auto a = state.bodies.cbegin(); same_set && a != state.bodies.cend(); ++a, ++b)
-                same_set = a->first == b->first;
+            const bool same_set = same_body_names(state, *before);
             const bool reappeared = lifetime && reappears(state, *before);
             if ((!same_set && !lifetime) || reappeared) {
                 if (!sparse_verify_) capture(world, state, true);
@@ -3855,6 +3920,31 @@ namespace bmmo::session {
                 std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count());
             stats_.sparse_light_us += took;
             if (classes) stats_.lifetime_light_us += took;
+        }
+
+        // Step LVR: the record of t - 1 when the live record `state` may be
+        // light by the replayed ticks' rule - sparse capture on, not a grid
+        // tick, no rows, a record of t - 1 with the same tracked set and
+        // generations (a lifetime change keeps a live tick whole: it has no
+        // births kept) - else null.  The body set is compared after the
+        // capture (same_body_names).
+        const tick_state* live_light_before(const tick_state& state) const {
+            if (sparse_every_ <= 1 || state.tick % sparse_every_ == 0 || !state.rows.empty()) return nullptr;
+            const tick_state* before = find_const(state.tick - 1);
+            if (!before || before == &state) return nullptr;
+            const rollback_tracked& x = before->tracked;
+            const rollback_tracked& y = state.tracked;
+            if (x.own_entity != y.own_entity || x.remote_entities != y.remote_entities || x.mechanisms != y.mechanisms
+                    || x.generations != y.generations)
+                return nullptr;
+            return before;
+        }
+        static bool same_body_names(const tick_state& a, const tick_state& b) {
+            if (a.bodies.size() != b.bodies.size()) return false;
+            auto y = b.bodies.cbegin();
+            for (auto x = a.bodies.cbegin(); x != a.bodies.cend(); ++x, ++y)
+                if (x->first != y->first) return false;
+            return true;
         }
 
         // Step LFL: the classes of the lifetime change between the records
@@ -4037,6 +4127,7 @@ namespace bmmo::session {
             state.full = whole;
             state.lifetime = 0;   // step LFL: capture_replayed sets them for a lifetime tick
             state.births.clear();
+            state.live_light = false;   // step LVR: amend_record sets it
             // RC2 (b) (step RCB; rewind-cost design, "As built (step B5RX)",
             // item RC2S option (b)): the record of the tick before is the
             // cache's source - the previous tick's capture, live or replayed
@@ -4331,6 +4422,7 @@ namespace bmmo::session {
         bool sparse_verify_ = false;
         bool replay_last_light_ = false;   // step RLL
         bool lifetime_light_ = false;      // step LFL
+        bool live_record_light_ = false;   // step LVR
         uint32_t lifetime_logs_ = 0;       // step LFL: unkept birth reads logged (capped)
         uint32_t sparse_logs_ = 0;
         // Verify mode: the light anchor of the rebased rewind under way,

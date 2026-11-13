@@ -605,6 +605,8 @@ namespace bmmo::session {
     // (session_runner::step).
     void session_client_core::pre_step() {
         const auto rewinds_before = s.rollback_.stats().rewinds;
+        if (caps_.live_step_in_frame) frame_.started = std::chrono::steady_clock::now();   // step LVR
+        frame_.resim_before = s.rollback_.stats().resim_ticks;
         frame_.prepared = true;
         s.spawn_forget_cursor_valid_ = false;   // FULL step GHF: a replay from here on begins at its restore
         frame_.f = s.frames_since_anchor_ + 1;
@@ -1141,7 +1143,22 @@ namespace bmmo::session {
         // lose the correction on the first re-simulated tick.  Re-capture
         // it now, exactly like the retail mod (design 9.25 item 4 of
         // findings/A5 section 3.1: the headless client never did).
-        if (config.rollback && !s.rollback_.amend_record(world(), tick)) {
+        // Step LVR: a heavy frame - it replayed, its work since pre_step's
+        // entry is at least BMMO_LIVE_RECORD_MS, no resync pending, in
+        // flight or holding its state - may record its live tick light; the
+        // engine's rule decides (amend_record).  A light record is never a
+        // base: a later rewind anchored at or after it rebases to the whole
+        // record before and replays across the tick.  So the wall clock
+        // chooses whether the tick's live state or its replay stands there -
+        // equal in every byte but a proximity hold's float frame where the
+        // two differ (the fast LBM's a4_swing, tick 1671).  Only a host whose
+        // live step runs inside the frame (live_step_in_frame): on retail the
+        // span would hold the render and the frame's wait.
+        const bool heavy = caps_.live_step_in_frame && config.rollback && s.rollback_.stats().resim_ticks != frame_.resim_before
+                        && !s.resync_pending_ && !s.resync_in_flight_ && !s.have_resync_state_
+                        && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frame_.started).count()
+                               >= s.live_record_ms_;
+        if (config.rollback && !s.rollback_.amend_record(world(), tick, heavy)) {
             if (s.amend_failures_++ == 0)
                 logf("amend_record found no history entry for tick %u (the tick was dropped)", tick);
         }

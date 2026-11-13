@@ -393,7 +393,8 @@ namespace bmmo::session {
                            static_cast<unsigned long long>(rs.lifetime_compared[c]), static_cast<unsigned long long>(rs.lifetime_stale[c]));
         const std::string sparse = s.rollback_.sparse_capture() <= 1 ? std::string() : textf(
             " sparse=%u%s light=%llu/%.0f whole=%llu/%.0f rebased=%llu+%llu unanch=%llu verify=%llu/%llu/%llu/%llu"
-            " replay_last=%s/%llu lifetime=%s/%llu/%.0f/%llu/%llu/%llu/%llu cross=%s",
+            " replay_last=%s/%llu lifetime=%s/%llu/%.0f/%llu/%llu/%llu/%llu cross=%s"
+            " live=%s/%.1f/%llu/%llu/%llu+%llu/%llu/%llu/%llu/%llu",
             s.rollback_.sparse_capture(), s.rollback_.sparse_capture_verify() ? "v" : "",
             static_cast<unsigned long long>(rs.sparse_light), static_cast<double>(rs.sparse_light_us) / 1000.0,
             static_cast<unsigned long long>(rs.replay_whole), static_cast<double>(rs.replay_whole_us) / 1000.0,
@@ -405,7 +406,14 @@ namespace bmmo::session {
             s.rollback_.lifetime_light() ? "on" : "off", static_cast<unsigned long long>(rs.lifetime_light),
             static_cast<double>(rs.lifetime_light_us) / 1000.0, static_cast<unsigned long long>(rs.lifetime_births_kept),
             static_cast<unsigned long long>(rs.lifetime_birth_reads), static_cast<unsigned long long>(rs.lifetime_birth_unkept),
-            static_cast<unsigned long long>(rs.lifetime_reappeared), cross.c_str());
+            static_cast<unsigned long long>(rs.lifetime_reappeared), cross.c_str(),
+            // Step LVR: live=whole|light/ms/eligible/made light/rebased rewinds that crossed one+the ticks they
+            // added/the most/those adding 4 or more/sparse verify's compares of a light live anchor/differing
+            s.rollback_.live_record_light() ? "light" : "whole", s.live_record_ms_, static_cast<unsigned long long>(rs.live_light_eligible),
+            static_cast<unsigned long long>(rs.live_light), static_cast<unsigned long long>(rs.live_light_rebased),
+            static_cast<unsigned long long>(rs.live_light_extra_ticks), static_cast<unsigned long long>(rs.live_light_extra_max),
+            static_cast<unsigned long long>(rs.live_light_deep), static_cast<unsigned long long>(rs.live_light_verified),
+            static_cast<unsigned long long>(rs.live_light_verify_mismatches));
         return textf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu piggy=%llu/%llu/%llu/%zu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu/%llu/%llu odm=%llu/%llu/%llu/%llu overtaken=%llu superseded=%llu/%llu remake=%llu/%llu mlives=%llu/%llu/%llu/%llu/%llu olives=%llu/%llu/%llu/%llu/%llu snapshots=%llu/%llu/%llu "
                      "life=%llu/%llu inrew=%llu/%llu bodiless=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu/%llu lag=%u/%u subst=%llu/%llu/%llu/%llu/%llu/%llu subst_skip=%llu/%llu/%llu subst_missed=%llu subst_coalesce=%llu/%llu/%llu/%llu acked=%u held_total=%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
                      "lead_adj=%llu lead_offset=%d slew=%d lead_forced=%llu lead_skip=%llu/%llu/%llu "

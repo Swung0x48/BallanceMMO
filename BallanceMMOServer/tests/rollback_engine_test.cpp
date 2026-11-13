@@ -6638,3 +6638,115 @@ TEST(RollbackEngine, ABirthReadFromALightRecordThatDidNotKeepItIsCounted) {
     EXPECT_EQ(engine.stats().lifetime_birth_unkept, 1u);
     EXPECT_EQ(world.count("log lifetime light: the birth of Plate is read from the record of tick 7"), 1);
 }
+
+// Step LVR: a heavy frame's live record (amend_record's `heavy`) is light
+// under set_live_record_light and is never a base: a rewind anchored at it
+// (13) or after it (14) rebases to the whole record before (12) and arrives
+// at the world an engine with every live record whole has.  Verify captures
+// the live record whole all the same, still marked light, and compares the
+// rebased anchor.
+TEST(RollbackEngine, AHeavyFramesLiveRecordIsLightAndNeverABase) {
+    enum class mode { whole, light, verify };
+    const auto live = [](mode m, fake_world& world, rollback_engine& engine) {
+        world.savestates = true;
+        world.bodies["Own"].linear[0] = 1.0f;
+        world.bodies["Plate"].position[0] = 40.0;
+        world.bodies["Plate"].linear[1] = -0.5f;
+        engine.set_sparse_capture(4, m == mode::verify);
+        engine.set_live_record_light(m != mode::whole);
+        rollback_tracked tracked;
+        tracked.own_entity = "Own";
+        tracked.mechanisms = {"Plate"};
+        auto w = world.adapter();
+        for (uint32_t tick = 1; tick <= 15; ++tick) {
+            w.step();
+            engine.record(w, tick, tracked, {}, false);
+            EXPECT_TRUE(engine.amend_record(w, tick, tick == 13 || tick == 14));   // two heavy frames
+        }
+    };
+    for (const uint32_t anchor: {13u, 14u}) {
+        fake_world control_world;
+        rollback_engine control;
+        live(mode::whole, control_world, control);
+        EXPECT_TRUE(control.restorable(13)) << "whole: every live record whole";
+        EXPECT_EQ(control.stats().live_light_eligible, 2u) << "...and the heavy frames counted";
+        EXPECT_EQ(control.stats().live_light, 0u);
+        auto cw = control_world.adapter();
+        uint32_t restored = 0;
+        ASSERT_TRUE(control.rewind_to(cw, anchor, 15, no_input, "control", 0, &restored));
+        EXPECT_EQ(restored, anchor);
+
+        fake_world world;
+        rollback_engine engine;
+        live(mode::light, world, engine);
+        EXPECT_FALSE(engine.restorable(13));
+        EXPECT_FALSE(engine.restorable(14));
+        EXPECT_TRUE(engine.restorable(15)) << "a frame that is not heavy records whole";
+        EXPECT_EQ(engine.recorded_savestate(13), nullptr) << "a light record takes no blob";
+        EXPECT_EQ(engine.stats().live_light, 2u);
+        auto w = world.adapter();
+        ASSERT_TRUE(engine.rewind_to(w, anchor, 15, no_input, "light", 0, &restored));
+        EXPECT_EQ(restored, 12u) << anchor;
+        EXPECT_EQ(engine.stats().live_light_rebased, 1u);
+        EXPECT_EQ(engine.stats().live_light_extra_ticks, anchor - 12) << "the ticks a whole live record would have saved";
+        EXPECT_EQ(world.serialize(), control_world.serialize()) << anchor;
+
+        fake_world verified_world;
+        rollback_engine verified;
+        live(mode::verify, verified_world, verified);
+        EXPECT_FALSE(verified.restorable(13)) << "verify decides as light does";
+        EXPECT_NE(verified.recorded_savestate(13), nullptr) << "...and keeps the bytes";
+        auto vw = verified_world.adapter();
+        ASSERT_TRUE(verified.rewind_to(vw, anchor, 15, no_input, "verify", 0, &restored));
+        EXPECT_EQ(restored, 12u);
+        EXPECT_EQ(verified.stats().live_light_verified, 1u) << "the light live anchor compared";
+        EXPECT_EQ(verified.stats().live_light_verify_mismatches, 0u);
+        EXPECT_EQ(verified.stats().sparse_verify_mismatches, 0u);
+        EXPECT_EQ(verified_world.serialize(), control_world.serialize()) << anchor;
+    }
+}
+
+// Step LVR: a heavy frame's live tick stays whole where the replayed ticks'
+// rule keeps it whole: a lifetime change (a mechanism added at 6), a grid
+// tick (8) and another body set than t - 1's (the plate gone at 9 while
+// still tracked); and so does every live tick without sparse capture.
+TEST(RollbackEngine, AHeavyLiveTickWithALifetimeChangeOrAnotherBodySetStaysWhole) {
+    for (const uint32_t every: {4u, 1u}) {
+        fake_world world;
+        world.savestates = true;
+        world.bodies["Own"].linear[0] = 1.0f;
+        world.bodies["Plate"].position[0] = 40.0;
+        rollback_engine engine;
+        engine.set_sparse_capture(every, false);
+        engine.set_live_record_light(true);
+        auto w = world.adapter();
+        for (uint32_t tick = 1; tick <= 10; ++tick) {
+            rollback_tracked tracked;
+            tracked.own_entity = "Own";
+            tracked.mechanisms = {"Plate"};
+            if (tick == 6) world.bodies["Beam"].position[0] = 20.0;
+            if (tick >= 6) {
+                tracked.mechanisms.push_back("Beam");
+                tracked.generations = {{"Beam", 1u}};
+            }
+            if (tick == 9) world.bodies.erase("Plate");
+            w.step();
+            engine.record(w, tick, tracked, {}, false);
+            EXPECT_TRUE(engine.amend_record(w, tick, tick >= 5));
+        }
+        if (every == 1) {
+            for (uint32_t tick = 1; tick <= 10; ++tick) EXPECT_TRUE(engine.restorable(tick)) << tick;
+            EXPECT_EQ(engine.stats().live_light_eligible, 0u);
+            continue;
+        }
+        EXPECT_FALSE(engine.restorable(5));
+        EXPECT_TRUE(engine.restorable(6)) << "a lifetime change";
+        EXPECT_FALSE(engine.restorable(7));
+        EXPECT_TRUE(engine.restorable(8)) << "a grid tick";
+        EXPECT_TRUE(engine.restorable(9)) << "another body set";
+        EXPECT_NE(engine.recorded_savestate(9), nullptr) << "captured whole again";
+        EXPECT_FALSE(engine.restorable(10));
+        EXPECT_EQ(engine.stats().live_light, 3u);
+        EXPECT_EQ(engine.stats().live_light_eligible, 3u);
+    }
+}
