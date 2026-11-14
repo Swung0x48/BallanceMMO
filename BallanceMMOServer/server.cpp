@@ -1514,7 +1514,18 @@ public:
         }
         room_session_.erase(s.room);
         rooms_.reset_session(s.room);
-        if (runner_) runner_->destroy_session(session, reason);
+        if (runner_) {
+            // Step JNL2: the end line's counters, posted ahead of the destroy
+            // that closes the journal.
+            runner_->journal_clock(session, bmmo::session::stat_kind::session_end,
+                                   {stat_int(s.ran ? s.last_tick - s.first_tick + 1 : 0),
+                                    stat_int(static_cast<int64_t>(s.lives.size())), stat_int(s.resyncs),
+                                    stat_int(static_cast<int64_t>(s.flagged_events)),
+                                    stat_int(static_cast<int64_t>(s.rejected_events)),
+                                    stat_int(static_cast<int64_t>(s.restamped_events)),
+                                    stat_int(static_cast<int64_t>(s.superseded_births))});
+            runner_->destroy_session(session, reason);
+        }
         broadcast_room_states();
         const uint32_t seconds = s.ran ? static_cast<uint32_t>((s.last_tick - s.first_tick + 1) / bmmo::session::TICK_RATE) : 0;
         Printf("Physics session %u (room %u, level %d) ended after %um%02us: %s (%zu player%s, %u resync%s, %llu event%s "
@@ -1658,7 +1669,7 @@ public:
         const bool same_life = lives.count(member) && lives.at(member) == c.life;
         if (cs != client_session_.end() && cs->second == c.session && same_life) {
             send_session_end(c.session, member, "could not be added to the world: " + error);
-            physics_session_member_left(member, nullptr);   // the line above says who and why
+            physics_session_member_left(member, nullptr, {}, "not added");   // the line above says who and why
         }
         if (auto again = physics_sessions_.find(c.session); again != physics_sessions_.end()) {
             again->second.retiring_orders.erase({member, c.life});
@@ -1736,6 +1747,10 @@ public:
         // earlier stamps).
         s.start_deadline = info.ready_at + bmmo::sim::kStartBarrierTimeout;
         s.load_seconds = std::chrono::duration<double>(info.ready_at - s.boot_requested).count();
+        runner_->journal_clock(s.id, bmmo::session::stat_kind::boot,
+                               {stat_int(std::chrono::duration_cast<std::chrono::microseconds>(
+                                        info.ready_at - s.boot_requested).count()),
+                                stat_int(static_cast<int64_t>(s.members.size()))});
         Printf(kVerbose, "Physics session %u: world ready %.3f s after the boot request (anchor %016llx, placement %016llx), "
                "SessionStart sent to %zu players.", s.id,
                std::chrono::duration<double>(info.ready_at - s.boot_requested).count(),
@@ -2154,8 +2169,10 @@ public:
 
     // `why` and `name` for the operator's line (step SLQ; none when the caller
     // logged why already): a disconnected client's name is gone from clients_
-    // by now.
-    void physics_session_member_left(bmmo::net::connection c, const char* why, const std::string& name = {}) {
+    // by now.  `recorded`: the leave record's why when the caller logged its
+    // own line (step JNL2).
+    void physics_session_member_left(bmmo::net::connection c, const char* why, const std::string& name = {},
+                                     const char* recorded = "") {
         auto cs = client_session_.find(c);
         if (cs == client_session_.end()) return;
         const uint32_t session = cs->second;
@@ -2179,11 +2196,17 @@ public:
             s.start_waiting.erase(w);
             return;
         }
-        if (why) {
-            const auto r = s.member_resyncs.find(c);
-            const uint32_t resyncs = r != s.member_resyncs.end() ? r->second : 0;
+        const auto r = s.member_resyncs.find(c);
+        const uint32_t resyncs = r != s.member_resyncs.end() ? r->second : 0;
+        if (why)
             Printf("Physics session %u: %s left (%s; %u resync%s).", s.id, name.empty() ? get_client_name(c) : name,
                    why, resyncs, resyncs == 1 ? "" : "s");
+        if (runner_) {
+            bmmo::session::journal_stat_value text;
+            text.type = 's';
+            text.s = why ? why : recorded;
+            runner_->journal_clock(s.id, bmmo::session::stat_kind::leave,
+                                   {stat_int(static_cast<int64_t>(c)), text, stat_int(resyncs)});
         }
         s.member_resyncs.erase(c);
         s.members.erase(std::remove(s.members.begin(), s.members.end(), c), s.members.end());
@@ -2741,7 +2764,7 @@ public:
                    get_client_name(m));
             send_session_end(session, m, "refused: this client did not confirm the session start in time (its start "
                                          "handshake ended: a message lost, or its anchor hold gave up first)");
-            physics_session_member_left(m, nullptr);
+            physics_session_member_left(m, nullptr, {}, "refused");
         }
     }
 
@@ -2793,7 +2816,7 @@ public:
             Printf("Physics session %u: %s refused: start %u (base %u) was %u ticks late.", s.id,
                    get_client_name(c), msg.seq, msg.first_tick, msg.late_ticks);
             send_session_end(s.id, c, "The connection was lost for too long while the session was starting.");
-            physics_session_member_left(c, nullptr);
+            physics_session_member_left(c, nullptr, {}, "start too late");
             return;
         }
         const auto arrival = arrival_of(received);
@@ -2836,6 +2859,10 @@ public:
         s.corrected[c] = msg.first_tick;
         send_start_at(s, c, msg.first_tick, 0, bmmo::session::START_AT_FLAG_CORRECTION, sent->second,
                       e->arrival_local(sent->second));
+        runner_->journal_clock(s.id, bmmo::session::stat_kind::base_due,
+                               {stat_int(static_cast<int64_t>(c)), stat_int(msg.first_tick),
+                                stat_int(e->arrival_local(sent->second)), stat_int(static_cast<int64_t>(e->best.rtt_us)),
+                                stat_int(static_cast<int64_t>(e->best.offset_us))});
         Printf(kVerbose, "Physics session %u: %s's base %u was due at its +%lld us (rtt %.1f ms, offset %+lld us): correction sent.",
                s.id, get_client_name(c), msg.first_tick, static_cast<long long>(e->arrival_local(sent->second)),
                e->best.rtt_us / 1000.0, static_cast<long long>(e->best.offset_us));
@@ -2935,7 +2962,7 @@ public:
                    static_cast<long long>(bmmo::sim::kStallRemoveTimeout.count()));
             send_session_end(session, m, "no input from this client for "
                              + std::to_string(bmmo::sim::kStallRemoveTimeout.count()) + " s (the game stopped responding)");
-            physics_session_member_left(m, nullptr);
+            physics_session_member_left(m, nullptr, {}, "stalled");
         }
     }
 
@@ -3024,7 +3051,7 @@ public:
                    client_it->second.name, what, msg.caps, s.world_options);
             const uint32_t session = s.id;
             send_session_end(session, c, reason ? reason : bmmo::session::ready_refusal_reason(refusal));
-            physics_session_member_left(c, nullptr);
+            physics_session_member_left(c, nullptr, {}, "refused");
         };
         // Step B9DX (the user, 2026-10-28: refuse it outright, no more
         // compatibility): a client without the session core (no CAP_PLACEMENT:

@@ -874,6 +874,23 @@ comparison). It is a fast check between real-time gates, not the gate: the full 
     twins' rows always failed the same way, except A8's late-ball rewinds, which the off twin passes.
   - On HEAD 0b944ed7 the twins took 1354 s and the on runs 675 s. Each on run's journals and event report equal
     its twin's on run, and every criterion that differs reads the control.
+- **Rows carry their values (step JNL2, 2026-11-14, the user: "记下吧"):** a count per run hid a row that went
+  fail to fail, and the rows with no control (a0_first, the A4 swing arms) or no off twin recorded nothing. The
+  rows file (`--rows-out`, `maps/arena-test/PREFIX-lbm-rows.txt`) now holds, per run, its verdict line (as
+  before), one `crit` line per criterion (who | criterion | STATUS | the whole detail), one `value` line per
+  measured value of the event report every criterion reads (each client's phase figures - own / mechanism /
+  other error, rollbacks and their ticks per class, late-ball rewinds, relay lag, relay_late, resyncs, lead_adj,
+  moved - and its row fields - substituted ticks and runs, resync bases, own error after T_off, echoes, deaths,
+  moves, leads, input delays - the server's tick gaps, late events, S5 delays, the S1 meter's decisions,
+  lateness and quorum lines; at full precision, a value over 2 000 characters as its length and sha256: the
+  relay samples, raw windows and 30-tick errors), and journal_judge's FINAL lines. The values come from the event
+  report, which reads the journals (`CRITERIA_SOURCE` journal). Under the coordinator's virtual time all of it
+  is the same run to run, so `ROWS_REF` compares it exactly: any moved value fails, in a failing or n/a row too.
+  Left out of the compare: the S1 quorum's `seen-at` and `step-lag-ms` (steady-clock reads, class 2) and the
+  server journal's path. A client's status values come from its session end's status line only (the one written
+  with the logical `status` record; the periodic ones are timed by the wall clock, so a client that ends without
+  its end status has none, the same every run). The rule: a step changes the reference only with a step that changes a value, and says
+  which values moved.
 
 #### T3: capture replay (2026-11-05)
 

@@ -15,8 +15,10 @@ tick's ms), founding members (N0) and the peak, the input delay, the worst
 round trip it was sized from (rtt), player-hours, resyncs (states sent) and
 the tight ones (the same player again within 198 ticks), resync MB on the
 wire, substituted ticks (S2: a member's INPUT without FRESH) and their runs
-of 132 ticks or more, the step time p50/p99/max (us), lead raises, the end
-reason.  Python 3.8+, journal_trace.py and session_facts.py beside it.
+of 132 ticks or more, the step time p50/p99/max (us), lead raises, the world's
+boot time (s, its ready instant from the boot request: step JNL2's boot record),
+the events flagged / rejected (the end line's: its session_end record), the end
+reason; under the totals the members' leaves by reason (the leave records).  Python 3.8+, journal_trace.py and session_facts.py beside it.
 """
 import argparse
 import collections
@@ -227,6 +229,11 @@ def summarize(s):
     row['raises'] = sum(1 for r in lateness if r['values']['raise']) if typed and lateness is not None else \
         len(s['raises']) + sum(1 for _, k in s['leads'] if k > 0)
     row['end'] = end_category(s['ends'][-1]) if s['ends'] else 'no end note (the server stopped first)'
+    boot = stats.get('boot')
+    row['boot_s'] = boot[-1]['values']['ready_us'] / 1e6 if boot else None
+    end = stats.get('session_end')
+    row['flagged'] = '%d/%d' % (end[-1]['values']['flagged'], end[-1]['values']['rejected']) if end else None
+    row['leaves'] = collections.Counter(r['values']['why'] or 'other' for r in stats.get('leave', []))
     row['resync_players'] = collections.Counter(p for p, _ in resynced)
     return row
 
@@ -253,32 +260,36 @@ def main(argv=None):
     out = open(args.out, 'w', encoding='utf-8') if args.out else sys.stdout
     P = lambda *a: print(*a, file=out)  # noqa: E731
     P('SESSIONS (from the server journals; start UTC)')
-    P('%3s %3s %14s %6s %4s %5s %4s %4s %6s %6s %5s %6s %6s %8s %13s %7s %5s %s' % (
+    P('%3s %3s %14s %6s %4s %5s %4s %4s %6s %6s %5s %6s %6s %8s %13s %7s %5s %5s %7s %s' % (
         'sid', 'lvl', 'start', 'min', 'N0', 'peak', 'dly', 'rtt', 'pl-h', 'resync', 'tight', 'MB', 'subst', 'run>=132',
-        'stp50/99', 'stpmax', 'raise', 'end'))
-    tot = collections.Counter()
+        'stp50/99', 'stpmax', 'raise', 'boot', 'flg/rej', 'end'))
+    tot, tot_leaves = collections.Counter(), collections.Counter()
     for r in rows:
         stp = r['step']
-        P('%3d %3d %14s %6.1f %4d %5d %4d %4s %6.2f %6d %5d %6s %6s %8s %13s %7s %5d %s%s' % (
+        P('%3d %3d %14s %6.1f %4d %5d %4d %4s %6.2f %6d %5d %6s %6s %8s %13s %7s %5d %5s %7s %s%s' % (
             r['session'], r['level'], r['start'], r['minutes'], r['n0'], r['peak'], r['delay'], fmt(r['rtt']),
             r['player_hours'], r['resyncs'], r['tight'], fmt(r['wire_mb'], '%.1f'),
             ('<=%d' if r['subst_bound'] else '%d') % r['subst'], ('<=%d' if r['subst_bound'] else '%d') % r['runs132'],
-            '%s/%s' % stp[:2] if stp else '-', fmt(stp[2] if stp else None), r['raises'], r['end'],
+            '%s/%s' % stp[:2] if stp else '-', fmt(stp[2] if stp else None), r['raises'], fmt(r['boot_s'], '%.1f'),
+            fmt(r['flagged']), r['end'],
             ' (capped)' if r['capped'] else ''))
         for key in ('minutes', 'player_hours', 'resyncs', 'tight', 'subst', 'runs132'):
             tot[key] += r[key]
         tot['wire_mb'] += r['wire_mb'] or 0.0
+        tot_leaves.update(r['leaves'])
     runs = [n for r in rows for n in r['run_lengths']]
     P('TOTAL sessions=%d minutes=%.1f player-hours=%.2f resyncs=%d tight=%d MB=%s subst_ticks=%d runs>=132=%d' % (
         len(rows), tot['minutes'], tot['player_hours'], tot['resyncs'], tot['tight'],
         '%.1f' % tot['wire_mb'] if any(r['wire_mb'] is not None for r in rows) else '-', tot['subst'], tot['runs132']))
+    if tot_leaves:
+        P('leaves by reason: %s' % ', '.join('%s %d' % kv for kv in sorted(tot_leaves.items())))
     if runs:
         P('substitution run length (merged) n=%d p50=%s p90=%s p99=%s max=%s; >=66: %d; >=300: %d' % (
             len(runs), pct(runs, 50), pct(runs, 90), pct(runs, 99), max(runs), sum(1 for x in runs if x >= 66),
             sum(1 for x in runs if x >= 300)))
     untyped = sum(1 for r in rows if not r['typed'])
-    P('legend: rtt, MB and stp* are recorded from step JNL on (link, resync_wire, step); %d of %d journals predate it '
-      '(-). raise: the lateness records, or (before) the lead notes with +k and the observe-only lateness notes. '
+    P('legend: rtt, MB and stp* are recorded from step JNL on (link, resync_wire, step), boot and flg/rej from step '
+      'JNL2 on (boot, session_end); %d of %d journals predate JNL (-). raise: the lateness records, or (before) the lead notes with +k and the observe-only lateness notes. '
       'subst / run>=132 "<=": a journal before the step cannot tell the ticks a resync leaves unnumbered (between '
       'the request and the new base, resync_request records them from the step on), so it counts them too: an '
       'upper bound. N0: the ready record, or (before) the founding PLAYER records. end: the reason\'s category '

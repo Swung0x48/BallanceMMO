@@ -77,6 +77,12 @@ namespace bmmo::session {
         own_death,           // client: what became of an own death the server applied late (its line)
         rewind_base,         // client: the base a rewind restored and the ticks it re-simulated (after its rewind)
         s1_quorum,           // server: an S1 quorum summary or arrival line (clock-derived quantiles)
+        // Step JNL2 (server only: the client's table, and so every client
+        // journal's SCHEMA, is unchanged).
+        boot,                // server: the world's ready instant from the boot request (the load time)
+        leave,               // server: a member out of the session, and why
+        session_end,         // server: the session's end counters (the end line's)
+        base_due,            // server: a late joiner's start correction (when its base was due)
         count
     };
 
@@ -147,6 +153,21 @@ namespace bmmo::session {
                                                  {"counted_through", 'i'}, {"why", 's'}, {"state", 'i'}};
         constexpr stat_field ghost[] = {{"player", 'i'}, {"tick", 'i'}, {"solid", 'i'}};
         constexpr stat_field own_death[] = {{"origin", 'i'}, {"applied", 'i'}, {"at", 'i'}, {"line", 's'}};
+        // Microseconds from the boot request (server_boot_requested) to the
+        // world being ready (runner_world_ready): the log's load time.  The
+        // phases' starts are not recorded: the boot blocks the runner, whose
+        // instant() does not move inside it, so a phase's time would need a
+        // new clock read.
+        constexpr stat_field boot[] = {{"ready_us", 'i'}, {"players", 'i'}};
+        // `why`: the operator line's reason ("left the room", "disconnected",
+        // "kicked from the room", "finished the level", "did not report
+        // ready") or, where the caller printed its own line, its category
+        // ("refused", "start too late", "stalled", "not added").
+        constexpr stat_field leave[] = {{"player", 'i'}, {"why", 's'}, {"resyncs", 'i'}};
+        constexpr stat_field session_end[] = {{"ticks", 'i'}, {"lives", 'i'}, {"resyncs", 'i'}, {"flagged", 'i'},
+                                              {"rejected", 'i'}, {"restamped", 'i'}, {"superseded", 'i'}};
+        constexpr stat_field base_due[] = {{"player", 'i'}, {"base", 'i'}, {"due_us", 'i'}, {"rtt_us", 'i'},
+                                           {"offset_us", 'i'}};
     }
 
 #define BMMO_STAT_KIND(name, klass, side) \
@@ -187,6 +208,14 @@ namespace bmmo::session {
         BMMO_STAT_KIND(own_death, logical, STAT_CLIENT),
         BMMO_STAT_KIND(rewind_base, raw, STAT_CLIENT),
         BMMO_STAT_KIND(s1_quorum, raw, STAT_SERVER),
+        // Two clock sites' difference, written at world ready on the runner.
+        BMMO_STAT_KIND(boot, clock_site, STAT_SERVER),
+        // Written on the runner (every network handler runs there, through
+        // post_input, since K4b-iii) at the tick it simulates next: raw, since
+        // a handler's tick follows when its message arrived.
+        BMMO_STAT_KIND(leave, raw, STAT_SERVER),
+        BMMO_STAT_KIND(session_end, raw, STAT_SERVER),
+        BMMO_STAT_KIND(base_due, raw, STAT_SERVER),
     };
 #undef BMMO_STAT_KIND
     static_assert(sizeof(kStatKinds) / sizeof(kStatKinds[0]) == static_cast<size_t>(stat_kind::count),
@@ -195,7 +224,8 @@ namespace bmmo::session {
     inline const stat_kind_info& stat_info(stat_kind kind) { return kStatKinds[static_cast<size_t>(kind)]; }
 
     // rewind `cause` (the record's code; the log line's reason text is built
-    // only while a host's log is open, step DCL).
+    // only while a host's log is open, step DCL).  scripts/classify_rollbacks.py
+    // CAUSES names these codes in this order: change both together.
     enum class rewind_cause : uint8_t {
         input = 0,          // a remote's relayed frame corrected (body: the first corrected ball)
         own_input = 1,      // our own frame the server substituted

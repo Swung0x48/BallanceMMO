@@ -147,7 +147,7 @@ def client_record_lines(log_path):
             k += 1
         facts = [session_facts.Facts(p) for p in paths if p.exists()]
         if facts and all(f.schema is not None for f in facts):
-            return [line for f in facts for line in session_facts.client_lines(f)]
+            return [line for f in facts for line in session_facts.client_lines(f, final_status=True)]
     if not log_path.exists():
         return []
     return log_path.read_text(errors='replace').replace('\x00', '').splitlines()

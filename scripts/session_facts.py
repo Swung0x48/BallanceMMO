@@ -118,9 +118,12 @@ _OWN_REWOUND = re.compile(r'^own (?:birth|beam) moved (\d+) -> (\d+|never): rewo
 _OWN_RESYNC = re.compile(r'^(own (?:birth|beam) moved \S+ -> \S+(?: \(.*\))?): (.+), resync$')
 
 
-def client_lines(facts):
-    """The lines arena_map_test.read_client_log and status_metrics read, from a client journal."""
+def client_lines(facts, final_status=False):
+    """The lines arena_map_test.read_client_log and status_metrics read, from a client journal.  final_status
+    (step JNL2): of the status lines only the session end's (the status_clock after the logical status record);
+    the periodic ones are timed by the wall clock, so which one comes last is not the same run to run."""
     h = facts.header
+    final_at = None     # the tick of the status record just seen
     lines = ['own id %d' % h['own_player'],
              'session %d starting: input delay %d' % (h['session'], h['input_delay'])]
     held = {}   # stamp -> [(type, held at)] in the order held (a pair holds two of one stamp)
@@ -130,8 +133,12 @@ def client_lines(facts):
             v = r['values']
             if r['name'] == 'window':
                 lines.append(window_line(v))
+            elif r['name'] == 'status':
+                final_at = r['tick']
             elif r['name'] == 'status_clock':
-                lines.append(v['text'])
+                if not final_status or final_at == r['tick']:
+                    lines.append(v['text'])
+                final_at = None
             elif r['name'] == 'own_death':
                 lines.append(v['line'])
             elif r['name'] == 'stall':
@@ -182,7 +189,8 @@ def rewinds(facts):
     """Each rewind: what was asked (the rewind record: anchor, at, cause, body) with the base its restore was and
     the ticks it re-simulated (the rewind_base record after it: base, depth; raw, step LVR's wall-clock gate)."""
     asked, done = facts.stats('rewind'), facts.stats('rewind_base')
-    if len(asked) != len(done):
+    # A journal its cap cut can end between a rewind and its base: the pairs up to there.
+    if len(asked) != len(done) and not facts.truncated:
         raise ValueError('%s: %d rewind records but %d rewind_base records' % (facts.path, len(asked), len(done)))
     return [dict(a['values'], base=d['values']['base'], depth=d['values']['depth']) for a, d in zip(asked, done)]
 

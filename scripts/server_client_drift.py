@@ -28,12 +28,13 @@ def main():
     args = ap.parse_args()
     server = fd.worlds(jt.read_journal(args.server), want_local=False)
     for path in args.clients:
-        client = fd.worlds(jt.read_journal(path), want_local=True)
+        journal = jt.read_journal(path)
+        client = fd.worlds(journal, want_local=True)
         shared = sorted(set(server) & set(client))
         if not shared:
             print('%s: no tick in common with the server' % path)
             continue
-        own = own_id(path)
+        own = journal.header['own_player']   # the journal's own id (step JNL2: no log)
         print('%s: %d ticks in common (%d..%d)%s' % (pathlib.Path(path).name, len(shared), shared[0], shared[-1],
                                                      ', own ball %u' % own if own else ''))
         print('  %-12s %12s %-28s %12s %12s %12s' % ('ticks', 'max err (m)', 'on', 'mean own', 'mean others', 'mean mech'))
@@ -46,7 +47,7 @@ def main():
                 if tick < start or tick >= end:
                     continue
                 a, b = server[tick], client[tick]
-                for key in set(a) & set(b):
+                for key in sorted(set(a) & set(b)):   # sorted: a tie names the same body every run
                     err = max(abs(x - y) for x, y in zip(a[key], b[key]))
                     if key[0] == 'ball':
                         (owns if key[1] == own else others).append(err)
@@ -59,19 +60,6 @@ def main():
                 print('  %-12s %12.4f %-28s %12.4f %12.4f %12.4f' % (
                     '%d-%d' % (start, end - 1), worst, worst_name, mean(owns), mean(others), mean(mechs)))
             start = end
-
-
-def own_id(journal_path):
-    """The client's own player id, from the log the harness writes next to its journal."""
-    log = pathlib.Path(journal_path).with_suffix('.log')
-    if not log.exists():
-        return 0
-    import re
-    for line in open(log, encoding='utf8', errors='replace'):
-        m = re.search(r'own id (\d+)', line)
-        if m:
-            return int(m.group(1))
-    return 0
 
 
 if __name__ == '__main__':

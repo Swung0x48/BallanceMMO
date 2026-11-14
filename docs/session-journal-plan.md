@@ -126,7 +126,10 @@ resets, lead acks, patience, clock skew - as their key=value text; class 1), `s1
 arrival lines, whose quantiles are raw clock reads; raw), `step` (step time p50 / p99 / max per 660 ticks; raw),
 `link` (each member's round trip at the start, the worst, the input delay; raw), `telemetry` (a member's
 SessionTelemetry as received; raw), `s5` (an event's intake-to-send delay, written on the runner's thread as it is
-relayed; class 1), `ghost` (a ball's spawn ghost made / solid). Client kinds: `rewind` (what a rewind was asked:
+relayed; class 1), `ghost` (a ball's spawn ghost made / solid); from step JNL2: `boot` (us from the boot
+request to world ready, the members; class 1), `leave` (a member out of the session: player, why, resyncs; raw),
+`session_end` (the end line's ticks, lives, resyncs, events flagged / rejected / re-stamped, births superseded;
+raw), `base_due` (a late joiner's start correction: base, due instant, rtt, offset; raw). Client kinds: `rewind` (what a rewind was asked:
 anchor, tick, cause code, the ball an input correction names), `rewind_base` (right after it: the base its restore
 was and the ticks it re-simulated; raw - step LVR's wall-clock gate can restore a light anchor's whole record
 before the one asked), `window` (the 60-tick window line's numbers and its per-player tails), `status` (the status

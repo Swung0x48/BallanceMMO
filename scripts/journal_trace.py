@@ -1115,6 +1115,11 @@ def canonical(path, mode="run", checkpoint_sets=False):
             schema = parse_schema(payload)
             if mode == "legacy":
                 continue
+            # Step JNL2: the SCHEMA as the kinds this mode compares (run: class 0, replay: 0 and 1), so a kind the
+            # mode skips - a new CLOCK kind among them - leaves two files of one tree and of the tree before equal.
+            payload = (_U32.unpack_from(payload, 0)[0],
+                       tuple((i, k["name"], k["class"], tuple(k["fields"])) for i, k in sorted(schema.items())
+                             if k["class"] == STAT_LOGICAL or (mode == "replay" and k["class"] == STAT_CLOCK_SITE)))
         elif tag in (TAG_STAT, TAG_CLOCK):
             kind = schema.get(_U16.unpack_from(payload, 4)[0]) if len(payload) >= 6 else None
             name = kind["name"] if kind else "?"

@@ -1,10 +1,14 @@
 """Per-body error of a client against the server BEFORE the client's first rollback.
 
-usage: python scripts/pre_rollback_error.py <server.bmjr> <client.bmjr> [client.log]
+usage: python scripts/pre_rollback_error.py <server.bmjs> <client.bmjc>
 
-The first rollback comes from the client journal's CORRECTION records (kind 1),
-which the headless and the retail client both write; the log is only a fallback
-for a journal without them.
+The first rollback comes from the client journal: its CORRECTION records (kind
+1), which the headless and the retail client both write, and from step JNL on
+its rewind records (every rewind, a remote birth's too: the base each restored,
+the tick the log's 'rollback to tick' line printed).  A journal from before
+step JNL has no rewind record: its window is the CORRECTION records' alone (said,
+on stderr), which a remote birth's rewind can make too long.  A third argument
+(the client log, read before step JNL2) is ignored: logs are for people.
 
 The window a mechanism measurement is clean in: after the first rollback the
 client's bodies carry the restore's own residual (docs/lockstep-without-snapshots.md),
@@ -15,12 +19,12 @@ side first checkpoints a mechanism (a P_ body), which is where the activation
 tick shows up.
 """
 import pathlib
-import re
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import journal_trace as jt
 import first_divergence as fd
+import session_facts as sf
 
 
 def first_seen(world):
@@ -40,12 +44,15 @@ def main():
     client_journal = jt.read_journal(sys.argv[2])
     client = fd.worlds(client_journal, want_local=True)
     # A rewind the engine takes for an event (a remote birth) is not a
-    # CORRECTION record, so the log, when given, can only make the window
-    # shorter: the earliest of both.
+    # CORRECTION record; the rewind records (step JNL) have every one, so they
+    # can only make the window shorter: the earliest of both.
     rollbacks = [c['tick'] for c in client_journal.corrections() if c['kind'] == 1]
-    if len(sys.argv) > 3:
-        log = pathlib.Path(sys.argv[3]).read_text(encoding='utf8', errors='replace')
-        rollbacks += [int(m) for m in re.findall(r'rollback to tick (\d+)', log)]
+    facts = sf.Facts(sys.argv[2])
+    if facts.recorded('rewind'):
+        rollbacks += [r['base'] for r in sf.rewinds(facts)]
+    else:
+        print('warning: %s has no rewind records (a journal from before step JNL): the window from its CORRECTION '
+              'records only' % sys.argv[2], file=sys.stderr)
     first_rb = min(rollbacks) if rollbacks else None
     limit = first_rb if first_rb is not None else (max(client) + 1 if client else 0)
     shared = [t for t in sorted(set(server) & set(client)) if t < limit]

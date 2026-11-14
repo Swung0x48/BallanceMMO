@@ -4080,3 +4080,154 @@ change are equal by reading only; Exit Level's "Get Profiler Values" running und
 an arm, a replay or a retail run reaches it); `CKBaseManager::StartProfile` callers (the collision and floor
 managers: not in a sample); the server binary and the live server on the 8845; the L6 re-drive; L7 / L8 sampled
 profiles; the K7 capture replay; the wire check (no wire change).
+
+## Built (the journal carries the rest, step JNL2, 2026-11-14)
+
+**Why.** The user, 2026-11-14, on the on-only fast LBM (b06b60db: 196 rows n/a, 100 rows without a control, 54
+band rows that now always fail, and rows files that held only each run's pass / fail / n/a counts, so a row going
+fail to fail was invisible): "记下吧，而且反正有journal？如果jnl2要做这些的话正好顺手做掉" - the rows record what
+they measured, read from the journals; and JNL's leftovers (the scripts still on logs, the kinds not recorded) are
+done here. Work, runs and proofs: `.local-tools/work/JN2`.
+
+**Rows with values** (`scripts/lbm_fast_judge.py`; the rule in `docs/canned-tests-plan.md` LF 'Rows carry their
+values'). Per run, its verdict line as before, then a `crit` line per criterion (who | criterion | STATUS | the
+whole detail, no cut), a `value` line per value of the event report the criteria read (`value_lines`: every client
+row's fields and its B / D / A figures, the server's, the S1 meter's lines one by one; `json.dumps` at full
+precision, sorted keys; a value over 2 000 characters as its length and sha256 - the relay samples, raw windows
+and 30-tick errors), and journal_judge's FINAL lines. The event report reads the journals (JNL's
+`CRITERIA_SOURCE`), so the values are the journals'. Left out (`RAW_KEYS`): the S1 quorum's `seen-at` and
+`step-lag-ms` (session_runner.cpp's `arrival_queue` / `step_lag_ms`, steady-clock reads; the quorum line is a
+class-2 `s1_quorum` record) and the server journal's path; nothing else differed run to run. Kept, though read
+from a class-2 record: the status line's values the report parses from `status_clock.text` (`status_lead`, the
+client's lead in ticks: no wall-clock read; equal in `fuh1` / `lbt1` and in `jn2a` / `jn2b`) - from the session
+end's line only (`session_facts.client_lines(final_status=True)`: the `status_clock` written with the logical
+`status` record). The periodic status lines are timed by the wall clock, so with them a client that ended without
+its end status would carry whichever report came last; now it carries none, the same every run (70 of 70 `lbo1`
+client journals: the last status line is the end's, so no value moves). `--rows-ref` compares
+line for line and prints the differing lines (`difflib`, up to 60); `--json-out` (the judged runs' JSON, default
+as before). `.local-tools/full_gate.sh` (untracked) copies the judge's rows file instead of grepping the log's
+verdict lines, and its first references were `.local-tools/work/JN2/rows_lbo1_values.txt` (on-only) and
+`rows_lbt1_values.txt` (TWINS=1): b06b60db's saved runs `lbo1` / `lbt1` judged again by this judge (read-only:
+`--json-out` elsewhere), the one text b06b60db's harness changed after those runs applied ('n/a: no off twin of this
+arm among the controls (--twins gives one); ' lost its parenthesis: 192 `crit` lines each). Its L6 part reads the
+journals too: the rewinds from the rewind records (`session_facts.py --gate`: 72 749 on `pf_dwbr1_1`, the log's
+count), the placement signature from the journals' headers (`anchor_placement`). The copies count the log line
+carried is not in a journal and need not be: the signature hashes every placed PH row's object name and its
+hierarchy (`placement_plan.hpp` `placement_signature`), so a different copy set moves it; the run-mode compare
+covers the header too.
+
+**Proof.** Two runs of the same twins on two trees, `fuh1` and `lbt1` (both saved): 12 725 lines each, every
+verdict, value and FINAL line equal; the only differing lines are the 192 `crit` lines of that harness text. This
+tree, ARMS="a0_first:A0 a6b:A6B a4_swing_seed0:A4 a8_r1:A8" on-only twice (`jn2a`, `jn2b`): 4 of 4 FINAL exact
+each, the two rows files (1 474 lines) byte-identical, and equal to `rows_lbo1_values.txt`'s lines of those four
+runs (the journals of the server and the clients equal to `lbo1`'s in run mode). The judge alone over `jn2b` with
+`--rows-ref`: `jn2a`'s file passes (rc 0); a copy with one FAIL row's measured value moved (a8_r1 client0 'input
+rollback ticks in D within control: 61' -> 62) fails (rc 1, the line pair printed), and so does a copy with one
+value of a run that has no control moved (a0_first client0 `phases.D` `inrew_late` 0 -> 1, a run whose band
+criteria are one n/a row).
+
+**The scripts.** Moved to the journals, each run old (HEAD's, on the logs: `work/JN2/old`) and new over `lbo1`'s 19
+runs (`work/JN2/moved_proof.py`, `moved_proof_lbo1.txt`): `pre_rollback_error.py` and `ghost_state.py` 70 of 70
+clients' outputs equal, `server_client_drift.py` 70 of 70 with one hash seed for both (`drift_proof.txt`: it
+iterated a set, so a tie named another body in each process; it iterates the keys sorted now),
+`moved_own_sector.py` 18 of 19 runs' S5 counts and verdict equal - in the 19th (`a6m_superseded`) the log reader
+counted the one superseded Physicalize as moved: the S5 line has gone on past its flag (`to=1 superseded
+margin=-19 slack=-3.56`) since the reader's `endswith(' superseded')` was written; the record's `flag` field is the
+reader's own rule; `classify_rollbacks.py`: 0 snapshot correction lines in the 70 logs (the old reader's input),
+the 853 rewind records one for one with the logs' 'rollback to tick' lines, each reason shape one cause (622 input,
+195 lifecycle, 19 own input, 9 resync, 5 sector, 3 own move), the ball column equal to the logs' '<ball> input
+corrected' lines in 70 of 70.
+- `moved_own_sector.py`: the server journals' `s5` records (origin, applied, flag) instead of the server log's S5
+  lines, and the clients' echo counters from their `status` records instead of the own-echo log lines (all types
+  together: the record has no type; the moved-Sector verdict was always the server's). NONE needs a server
+  journal that records `s5`: none read (no server journal, an older `.bmjr` - scanned too, told apart by the
+  header's kind - or a SCHEMA without `s5`) prints `MOVED-OWN-SECTOR: UNKNOWN (no s5 records)`, exit 1.
+- `server_client_drift.py`: the own id from the client journal's header (`own_player`), not the log's 'own id'.
+- `pre_rollback_error.py`: the first rollback from the CORRECTION records and the rewind records' bases (the
+  tick the log's 'rollback to tick' line printed); the log argument is ignored. A journal from before step JNL
+  gets the CORRECTION records' window with a warning; a journal its cap cut pairs its rewind / rewind_base
+  records up to the shorter list (`session_facts.rewinds`, which still refuses an uncut journal whose counts
+  differ).
+- `classify_rollbacks.py`: the rewind records' cause and body. It read the snapshot correction lines
+  ('rollback to tick T (B off by E m)'), which no run with snapshots off prints; now ball / mechanism by the body,
+  forced by the cause, and every cause counted (its `CAUSES` names `journal_stats.hpp`'s `rewind_cause` codes in
+  order; a comment at the enum says so).
+- `ghost_state.py`: the server's transitions from its journal (the `ghost` records and the airship notes,
+  rendered by `session_facts.server_lines`); `--server-log` stays for a journal from before step JNL.
+Stay on the logs, and why: `ghost_state.py`'s client half (a client journal records no ghost transition; a client
+record would change every client journal, and s18's strict replay, for a diagnostic no gate reads - SPX's tool);
+`recipe_run.anchored` (the recipe calibration's reading of the headless client's `--ready-at-ms` test hook, the
+instant a life anchored on the client: a client-side datum of a test option, run by hand when a recipe is made
+again; no gate runs it); `.local-tools/work/SRTJ/srtj_judge.py` (step SRTJ's own judge, history: no gate calls it);
+the harness's join cue (a live trigger: the journal is written in compressed chunks after the fact, so it cannot
+cue a join; its line is a verbose [Sim] one, which the harness's verbose server log has).
+
+**The kinds** (server only: the client table, every client journal's SCHEMA and s18's replays are unchanged).
+`boot` (class 1: two recorded clock sites' difference): us from the boot request (`server_boot_requested`) to the
+world being ready (`runner_world_ready`, the log's load time), and the members; written at world ready on the
+runner. The boot phases' starts are not recorded: the boot blocks the runner, and on the runner `instant()` is
+the runner's logical now, which does not move inside the boot, so the verbose log's phase times are 0 too (a
+first version recorded them: 0, 0, 0 and ready 2 024 us on `jn2a_a8_r1_on`); real phase times need a new clock
+read inside the boot. `leave` (raw): the member, why - the operator line's reason, or for the callers that print their
+own line its category (`refused`, `start too late`, `stalled`, `not added`) - and its resyncs. `session_end`
+(raw): the end line's ticks, lives, resyncs, events flagged / rejected / re-stamped, births superseded, posted ahead
+of `destroy_session`, so it lands before the `end:` note. `base_due` (raw): a late joiner's start correction (its
+base, the instant it was due on its clock, the estimate's rtt and offset). The three raw ones are written on the runner -
+every network handler runs there through `post_input` since K4b-iii - at the tick it simulates next, which follows
+when the handler's message arrived: raw. (Logical would be the better class under virtual time, but it changes the
+server journals' run-mode compare against `lbo1` and `pf_dwbr1_1`.) The start ping is JNL's `link` and the
+resync wire bytes its `resync_wire`. `scripts/pubtest_report.py` reads them: `boot` (s) and `flg/rej` columns, and
+the members' leaves by reason under the totals. Cost: one record a boot, a session end, a member's leave and a late
+joiner's correction, written on the runner (JNL's bench: 0.18-0.50 us a record). Gaps: a boot that fails gets
+neither `boot` nor `session_end` (the runner closes its journal before `on_world_ready` would run); the members
+still in the session at its end get no `leave` (the end erases them; `session_end` carries the lives), so 'leaves
+by reason' counts the members who left during the session.
+
+**Compares.** `journal_trace.canonical` compares a SCHEMA as the kinds its mode compares (run: class 0, replay:
+classes 0 and 1), so a new CLOCK kind leaves a file of this tree equal to one of the tree before: `jn2a`'s server
+journals against `lbo1`'s under `run` equal (HEAD's compare stops at the SCHEMA record), their client journals
+equal under both. A kind of a class the mode compares still differs, as it must.
+
+**Review.** One review: three defects fixed - the `boot` record's phase fields (always 0: dropped, above),
+`moved_own_sector.py` printing NONE when it had read no `s5` record (UNKNOWN now), the raw kinds' stated thread
+(the runner, not the network thread: the comment and this section) - and four points taken: the status values
+from the session end's line only, `pre_rollback_error.py` on a pre-JNL or a capped journal, the `CAUSES` /
+`rewind_cause` note, the gaps above. Not taken: the placement copies count as a journal datum (the signature
+covers it, by the code above; on this gate's L6 run the 13 clients' log lines read '25 copies ... signature
+51c8b1bba2f16934', as `pf_dwbr1_1`'s). The scripts' proof run again on the final scripts
+(`work/JN2/moved_proof_lbo1_final.txt`): the same 70 / 70 / 18 of 19 / 853 paired as above
+(`server_client_drift.py`'s old version still names a tie's body by hash seed: 28 of 70 equal unseeded,
+`drift_proof.txt`'s 70 of 70 with one seed).
+
+**Gate** (`.local-tools/full_gate.sh jn2g`, the final tree, id `ballanced-5ca003726dc5+bmmo-b06b60dbcc3f-dirty`):
+FULL-GATE: PASS in 1 197 s. Fast part 365 s: x64 / x86 / Arch builds, 861 / 861 unit tests, core_ref_s18 strict
+replay (12 arms, 57 captures, 58 journals ALL SAME) and wire check (57 sends and 58 journals, 0 skipped, ALL SAME)
+- the client SCHEMA and records are unchanged, so s18 needs no re-record for this step. Fast LBM on-only 683 s:
+19 of 19 on runs FINAL exact, the rows (6 524 lines) equal to `rows_lbo1_values.txt` - byte-equal - and the 89
+journals equal to `lbo1`'s in run mode (id masked). L6 re-drive 104 s: 13 clients rc 0, mism 0 x 13, 14 / 14
+journals equal to `pf_dwbr1_1`'s, placement equal, rewinds 72 749 (journals) on both. Retail L12 + L11 (K = 20,
+human key rates) 243 s: PASS, mismatches 0, FINAL rows bit-equal to the references with L11's 32 / 32 trafo
+pieces, placement equal. Then TWINS=1 on the same binaries (`jn2t`, ~1 360 s): 38 of 38 twins FINAL exact, the
+rows (12 725 lines) byte-equal to `rows_lbt1_values.txt`, 178 / 178 journals equal to `lbt1`'s. The references from
+here: `.local-tools/work/JN2/rows_jn2g_values.txt` (on-only, LBM_REF `jn2g`) and `rows_jn2t_values.txt` (TWINS=1,
+LBM_REF `jn2t`), `full_gate.sh`'s defaults. On `jn2g_a8_r1_on`'s server journal: `boot` {ready_us 2 024 (virtual
+time), players 3} at tick 28, four `leave` (disconnected), `session_end` {ticks 4 070, lives 4, 0 ...} at 4 098,
+`base_due` for the joiner at 1 628 (`base_due` in 6 of the 19 on runs' server journals: a10x 4, a5d_resync,
+a6_drop, a8_r1 / r2 / r3 one each); `pubtest_report.py` reads them (boot 0.0 s, flg/rej 0/0, leaves disconnected 4).
+The retail sessions' server journals (the Arch server, real clock): `boot` ready 4.65 s (L12) / 4.89 s (L11), 2
+players; `session_end` 1 541 / 4 323 ticks, L11 one event flagged; no `leave` (both members were in at the end:
+the gap above); `pubtest_report.py` prints boot 4.7 / 4.9, flg/rej 0/0 and 1/0, end 'room closed'. The L6 part's
+`'mism': 0` rows come from arena_map_test's status metrics, which read the journals (the session end's status).
+
+**Not done:** the criteria still parse the status line's text (`status_clock.text`, the end's only) rather than
+the `status` record's fields; the band criteria of a run with no control are still one n/a row (their measured
+values are in the `value` lines); `.local-tools/gate_retail.sh` still reads the retail logs (the ModLoader /
+server logs' `mismatches=` and placement lines) - a gate datum on a log, outside this step's list.
+
+**Not exercised:** a `leave` with a refused / stalled / start-too-late / not-added category (the runs' leaves are
+all `disconnected`), a boot failure's records, a capture replay
+with the `boot` record (class 1: its sites are recorded; no gate replays a server journal - s18 is client-only),
+`pubtest_report.py` on a real session with leaves (the retail ones end with every member in; the public test's
+journals predate the kinds: '-'),
+`moved_own_sector.py` on a run with a moved own Sector, `pre_rollback_error.py` on a capped journal, the 8845, the
+wire check beyond s18's (no wire change).

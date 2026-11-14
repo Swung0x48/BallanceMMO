@@ -4,8 +4,9 @@
   ghost_state.py SERVER.bmjr CLIENT.bmjr [--server-log S] [--client-log C]
                  [--from T] [--to T] [--every N] [--contacts-only] [--selftest]
 
-Reads the server journal (FULL checkpoints) and one client journal (LOCAL
-checkpoints), and each side's log for its ghost transitions:
+Reads the server journal (FULL checkpoints, and from step JNL its ghost
+records and airship notes: the server's transitions, step JNL2) and one client
+journal (LOCAL checkpoints) with the client's log for its transitions:
 
   server  "player P's ball B is a spawn ghost|solid at tick T",
           "player P's ball B is in the airship zone at tick T"
@@ -13,8 +14,11 @@ checkpoints), and each side's log for its ghost transitions:
           at tick T" and "the own ball B is in the airship zone at tick T" for
           its own ball (the own id from "own id N").
 
-The server's lines are verbose (step SLQ): its log needs log_verbose: true (or
---verbose, or the console's "verbose on").
+--server-log reads the server's transitions from its verbose log instead (a
+journal from before step JNL has no ghost record).  The client's stay on its
+log: a client journal records no ghost transition, and this is a diagnostic
+(SPX's), not an analysis a gate reads - a client record would change every
+client journal for it.
 
 Prints one line per ball per common checkpoint tick:
 
@@ -42,6 +46,7 @@ import sys
 
 sys.path.insert(0, __import__('os').path.dirname(__import__('os').path.abspath(__file__)))
 import journal_trace as jt  # noqa: E402
+import session_facts as sf  # noqa: E402
 
 DIAMETER = 4.0
 RE_PLAYER = re.compile(r"player (\d+)'s ball \S+ is (a spawn ghost|solid|in the airship zone) at tick (\d+)")
@@ -185,6 +190,11 @@ def main():
     sj, cj = jt.read_journal(args.server), jt.read_journal(args.client)
     own = cj.header.get('own_player', 0)
     stext, ctext = read_text(args.server_log), read_text(args.client_log)
+    if not args.server_log:
+        facts = sf.Facts(args.server)
+        if not facts.recorded('ghost'):
+            ap.error('%s has no ghost records (a journal from before step JNL): give --server-log' % args.server)
+        stext = '\n'.join(sf.server_lines(facts))
     m = RE_OWN_ID.search(ctext)
     if m:
         own = int(m.group(1))
