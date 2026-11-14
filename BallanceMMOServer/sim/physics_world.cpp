@@ -1194,12 +1194,15 @@ namespace bmmo::sim {
         // Step SPGH: each clone's spawn ghost transitions, logged.
         for (auto& [id, p]: players_) {
             const int ghost = p.physicalized && p.ball ? bmmo::physics::spawn_ghost_state(manager, p.ball->GetName()) : -1;
-            if (ghost == 1 && !p.spawn_ghost)
+            if (ghost == 1 && !p.spawn_ghost) {
                 log("world: spawn ghost: player " + std::to_string(id) + "'s ball " + p.ball->GetName()
                     + " is a spawn ghost at tick " + std::to_string(tick_));
-            else if (ghost == 0 && p.spawn_ghost)
+                spawn_ghost_changes_.push_back({id, tick_, false});
+            } else if (ghost == 0 && p.spawn_ghost) {
                 log("world: spawn ghost: player " + std::to_string(id) + "'s ball " + p.ball->GetName() + " is solid at tick "
                     + std::to_string(tick_));
+                spawn_ghost_changes_.push_back({id, tick_, true});
+            }
             p.spawn_ghost = ghost == 1;
         }
         bmmo::physics::entity_lookup_scope_end(manager);

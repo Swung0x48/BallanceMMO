@@ -79,9 +79,16 @@ TAG_NOTE = 6
 TAG_CORRECTION = 7
 TAG_RESYNC = 8      # version 4: a client's resync state applied as tick S (resync design 5, step A3)
 TAG_WAIT = 9        # version 7: the server's wait in a player's relay header from a tick on (late-player step R12)
+# Step JNL (version 10 still): the typed kinds a file records (journal_stats.hpp), a typed record of a logical
+# kind, and one of a clock or link kind (what a run-to-run compare skips).
+TAG_SCHEMA = 10
+TAG_STAT = 11
+TAG_CLOCK = 12
 TAG_NAMES = {TAG_HEADER: "HEADER", TAG_PLAYER: "PLAYER", TAG_INPUT: "INPUT", TAG_EVENT: "EVENT",
              TAG_TICK: "TICK", TAG_CHECKPOINT: "CHECKPOINT", TAG_NOTE: "NOTE", TAG_CORRECTION: "CORRECTION",
-             TAG_RESYNC: "RESYNC", TAG_WAIT: "WAIT"}
+             TAG_RESYNC: "RESYNC", TAG_WAIT: "WAIT", TAG_SCHEMA: "SCHEMA", TAG_STAT: "STAT", TAG_CLOCK: "CLOCK"}
+# A SCHEMA kind's class: 0 logical, 1 a clock read at a recorded clock site, 2 a raw clock read or a link's status.
+STAT_LOGICAL, STAT_CLOCK_SITE, STAT_RAW = 0, 1, 2
 
 KIND_SERVER = 0
 KIND_CLIENT = 1
@@ -90,6 +97,8 @@ KIND_CLIENT = 1
 # allocate.  MAX_PAYLOAD is our own guard - no legal record comes close (the
 # biggest is a 4096-body checkpoint, under a megabyte).
 MAX_STR = 4096
+# Step JNL: a STAT / CLOCK text value's limit (journal.hpp kJournalMaxText); one of exactly this size was cut.
+MAX_TEXT = 0xffff
 MAX_CHECKPOINT_BODIES = 4096
 MAX_CONVEX = 8
 MAX_BALLS = 4
@@ -174,6 +183,18 @@ class _Cursor(object):
     def u64(self):
         return _U64.unpack_from(self.data, self._take(8))[0]
 
+    def varint(self):
+        """A STAT integer (step JNL): zigzag LEB128."""
+        z = shift = 0
+        while True:
+            b = self.u8()
+            z |= (b & 0x7F) << shift
+            if not b & 0x80:
+                return (z >> 1) ^ -(z & 1)
+            shift += 7
+            if shift >= 64:
+                raise _Invalid("varint over 64 bits")
+
     def f32(self):
         return _F32.unpack_from(self.data, self._take(4))[0]
 
@@ -191,10 +212,10 @@ class _Cursor(object):
     def f64v(self, count):
         return tuple(self.f64() for _ in range(count))
 
-    def string(self):
+    def string(self, limit=MAX_STR):
         size = self.u16()
-        if size > MAX_STR:
-            raise _Invalid("string of %d bytes over the %d limit" % (size, MAX_STR))
+        if size > limit:
+            raise _Invalid("string of %d bytes over the %d limit" % (size, limit))
         raw = self.data[self._take(size):self.off]
         # The writer turns fixed-size char arrays into strings; never trust a
         # terminator, but do not carry padding NULs into the output either.
@@ -462,7 +483,7 @@ class JournalTick(object):
     """Every record of one tick; a group exists when the tick has any record."""
 
     __slots__ = ("tick", "players", "inputs", "events", "has_tick", "record",
-                 "checkpoints", "notes", "corrections", "resyncs", "waits")
+                 "checkpoints", "notes", "corrections", "resyncs", "waits", "stats")
 
     def __init__(self, tick):
         self.tick = tick
@@ -476,6 +497,7 @@ class JournalTick(object):
         self.corrections = []
         self.resyncs = []
         self.waits = []
+        self.stats = []
 
     def bare(self):
         """Only a TICK record: nothing a triage pass wants to look at."""
@@ -497,6 +519,10 @@ class Journal(object):
         self.by_tick = {}
         self.tick_ids = {}          # summary mode: tick -> has a TICK record
         self.notes = []
+        # Step JNL: the file's SCHEMA (id -> {'name', 'class', 'fields': [(name, type)]}); None: written before
+        # the step, nothing recorded as a typed kind.  stats: every STAT / CLOCK record in file order.
+        self.schema = None
+        self.stats = []
         self.records = 0
         self.tick_record_count = 0
         self.input_count = 0
@@ -748,6 +774,15 @@ class JournalReader(object):
         elif tag == TAG_WAIT:
             record = self._wait(cursor)
             journal.group(record["tick"]).waits.append(record)
+        elif tag == TAG_SCHEMA:
+            journal.schema = parse_schema(payload)
+            cursor.off = len(payload)
+        elif tag in (TAG_STAT, TAG_CLOCK):
+            record = parse_stat(payload, journal.schema or {}, tag == TAG_CLOCK)
+            cursor.off = len(payload)
+            journal.stats.append(record)
+            if not journal.summary:
+                journal.group(record["tick"]).stats.append(record)
         journal.trailing_bytes += cursor.remaining()
 
     @staticmethod
@@ -988,6 +1023,128 @@ def read_journal(path, summary=False):
             return JournalReader(mapped, path, summary).read()
         finally:
             mapped.close()
+
+
+# --------------------------------------------------------------------------
+# Step JNL: SCHEMA / STAT / CLOCK, the record walk and the canonical form the compares use
+
+def parse_schema(payload):
+    """A SCHEMA payload -> {id: {'name', 'class', 'fields': [(name, type)]}}."""
+    cursor = _Cursor(payload)
+    cursor.u32()   # first_tick
+    out = {}
+    for _ in range(cursor.u16()):
+        kind_id = cursor.u16()
+        name = cursor.string()
+        klass = cursor.u8()
+        fields = []
+        for _ in range(cursor.u8()):
+            field = cursor.string()
+            kind = chr(cursor.u8())
+            if kind not in "ifs":
+                raise _Invalid("field type %r" % kind)
+            fields.append((field, kind))
+        out[kind_id] = {"name": name, "class": klass, "fields": fields}
+    return out
+
+
+def parse_stat(payload, schema, clock):
+    """A STAT / CLOCK payload -> {'tick', 'kind', 'name', 'clock', 'class', 'values': {field: value}, 'cut': [field]}
+    ('cut': the text fields the writer cut at MAX_TEXT bytes)."""
+    cursor = _Cursor(payload)
+    tick = cursor.u32()
+    kind_id = cursor.u16()
+    kind = schema.get(kind_id)
+    if kind is None:
+        raise _Invalid("kind %d is not in the file's SCHEMA" % kind_id)
+    values, cut = {}, []
+    for field, kind_type in kind["fields"]:
+        if kind_type == "s":
+            at = cursor.off
+            values[field] = cursor.string(MAX_TEXT)
+            if cursor.off - at - 2 == MAX_TEXT:
+                cut.append(field)
+        else:
+            values[field] = cursor.varint() if kind_type == "i" else cursor.f64()
+    return {"tick": tick, "kind": kind_id, "name": kind["name"], "clock": clock, "class": kind["class"],
+            "values": values, "cut": cut}
+
+
+def records(path):
+    """(tag, payload) of every whole record after the magic and version, the header first; a cut tail ends it."""
+    data = read_journal_bytes(path)
+    if data[:len(MAGIC)] != MAGIC:
+        raise JournalError("not a BMMO journal (bad magic)")
+    off = len(MAGIC) + 4
+    while off + 5 <= len(data):
+        tag = data[off]
+        size = _U32.unpack_from(data, off + 1)[0]
+        if size > MAX_PAYLOAD or off + 5 + size > len(data):
+            return
+        yield tag, bytes(data[off + 5:off + 5 + size])
+        off += 5 + size
+
+
+# The server's resync note before step JNL carried the capture and coding times (raw clock reads): a compare
+# drops them, so a pre-step file compares with a new one, whose note has the numbers only.
+_RESYNC_NOTE_TIMES = re.compile(rb", captured in \d+ us, coded in \d+ us")
+# The build id's commit (12 hex digits after '+bmmo-'): what two builds of one tree differ in.
+_BUILD_ID = re.compile(rb"(\+bmmo-)[0-9a-f]{12}")
+
+COMPARE_MODES = ("run", "replay", "legacy")
+
+
+def canonical(path, mode="run", checkpoint_sets=False):
+    """The records a compare looks at, as (tag, tick or None, kind name or None, bytes), in file order.
+
+    run: every record but CLOCK, the build id masked and a pre-step resync note's times dropped - two runs of
+    one build (and of two builds of one tree) are equal when both ran on the virtual clock (a coordinated run, the
+    harness's twins, the L6 re-drive): a real-clock run's header utc_ms and TICK ms are the wall clock's, so two of
+    those differ in every compare mode.  replay: drops only class-2 CLOCK records (raw clock reads, link status): a
+    capture replay reproduces the clock-site values too.  legacy: the step's three tags dropped as well - a new
+    file against one written before step JNL.  checkpoint_sets: a CHECKPOINT's bodies compared as a set - a retail
+    capture replay's order follows the game's object ids, which another process numbers differently (K7)."""
+    if mode not in COMPARE_MODES:
+        raise ValueError(mode)
+    schema = {}
+    out = []
+    for tag, payload in records(path):
+        tick = _U32.unpack_from(payload, 0)[0] if tag != TAG_HEADER and len(payload) >= 4 else None
+        name = None
+        if tag == TAG_SCHEMA:
+            schema = parse_schema(payload)
+            if mode == "legacy":
+                continue
+        elif tag in (TAG_STAT, TAG_CLOCK):
+            kind = schema.get(_U16.unpack_from(payload, 4)[0]) if len(payload) >= 6 else None
+            name = kind["name"] if kind else "?"
+            if mode == "legacy" or (tag == TAG_CLOCK and (mode == "run" or not kind or kind["class"] == STAT_RAW)):
+                continue
+        elif tag == TAG_HEADER:
+            payload = _BUILD_ID.sub(rb"\1????????????", payload, count=1)
+        elif tag == TAG_NOTE:
+            text = _RESYNC_NOTE_TIMES.sub(b"", payload[6:])
+            if len(text) != len(payload) - 6:
+                payload = payload[:4] + _U16.pack(len(text)) + text
+        elif tag == TAG_CHECKPOINT and checkpoint_sets:
+            c = JournalReader._checkpoint(_Cursor(payload))
+            payload = (c["tick"], c["flags"], tuple(sorted(repr(sorted(b.items())) for b in c["bodies"])))
+        out.append((tag, tick, name, payload))
+    return out
+
+
+def compare(path_a, path_b, mode="run", checkpoint_sets=False):
+    """None when the two are equal under `mode`, else a text naming the first differing record."""
+    a, b = canonical(path_a, mode, checkpoint_sets), canonical(path_b, mode, checkpoint_sets)
+    for index, (x, y) in enumerate(zip(a, b)):
+        if x != y:
+            return "record %d differs: %s tick %s%s vs %s tick %s%s (%d of %d / %d records differ by position)" % (
+                index, TAG_NAMES.get(x[0], x[0]), x[1], " " + x[2] if x[2] else "",
+                TAG_NAMES.get(y[0], y[0]), y[1], " " + y[2] if y[2] else "",
+                sum(1 for p, q in zip(a, b) if p != q), len(a), len(b))
+    if len(a) != len(b):
+        return "one is a prefix: %d vs %d records" % (len(a), len(b))
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -1612,8 +1769,8 @@ def _synthetic_server():
     plan = []
     plan.append(("note", {"tick": 100,
                           "text": 'start: room 7 "%s": Alice(1, join 0), %s(2, join 1)' % (room, chinese)}))
-    plan.append(("player", {"tick": 100, "id": 1, "join_order": 0, "added": True, "name": "Alice"}))
-    plan.append(("player", {"tick": 100, "id": 2, "join_order": 1, "added": True, "name": chinese}))
+    plan.append(("player", {"tick": 100, "id": 1, "join_order": 0, "added": True, "name": "Alice", "life": 0}))
+    plan.append(("player", {"tick": 100, "id": 2, "join_order": 1, "added": True, "name": chinese, "life": 0}))
     plan.append(("input", {"tick": 101, "id": 1, "flags": INPUT_FRESH, "repeat": False,
                            "frame": _frame(0x0B, 0.5, 3, 5)}))
     plan.append(("input", {"tick": 101, "id": 2, "flags": 0, "repeat": False,
@@ -1650,8 +1807,8 @@ def _synthetic_server():
     plan.append(("tick", {"tick": 103, "hash": 4, "pose": 5, "cores": 13, "ms": 45,
                           "probe_name": "Ball_Paper_BMMO_3", "probe_position": (-1.0, 0.5, 2.0),
                           "probe_speed": (f32(1.0), f32(2.0), f32(3.0))}))
-    plan.append(("player", {"tick": 104, "id": 3, "join_order": 2, "added": True, "name": "Cara"}))
-    plan.append(("player", {"tick": 105, "id": 2, "join_order": 1, "added": False, "name": ""}))
+    plan.append(("player", {"tick": 104, "id": 3, "join_order": 2, "added": True, "name": "Cara", "life": 0}))
+    plan.append(("player", {"tick": 105, "id": 2, "join_order": 1, "added": False, "name": "", "life": 0}))
     plan.append(("note", {"tick": 105, "text": "end: room closed"}))
     # last, and big enough that chopping a few bytes truncates exactly one record
     plan.append(("checkpoint", {"tick": 105, "flags": CHECKPOINT_FULL,
@@ -1669,7 +1826,7 @@ def _synthetic_client():
               "own_player": 3, "own_join_order": 2, "world_options": 0, "anchor_placement": 0, "mechanism_slots": 0}
     plan = []
     plan.append(("note", {"tick": 0, "text": "anchor: hash 0123456789abcdef surfaces fedcba9876543210"}))
-    plan.append(("player", {"tick": 0, "id": 3, "join_order": 2, "added": True, "name": "Cara"}))
+    plan.append(("player", {"tick": 0, "id": 3, "join_order": 2, "added": True, "name": "Cara", "life": 0}))
     plan.append(("note", {"tick": 100, "text": "assigned: tick base 100"}))
     plan.append(("input", {"tick": 101, "id": 3, "flags": INPUT_FRESH, "repeat": False,
                            "frame": _frame(0x01, 0.125, 3, 5)}))
@@ -1705,6 +1862,59 @@ def _synthetic_client():
                                 "bodies": [_body(0, 3, "Ball_Paper_BMMO_4", 30.0)]}))
     plan.append(("note", {"tick": 121, "text": "end: level finished"}))
     return header, plan
+
+
+def _varint(value):
+    z = (value << 1) ^ (value >> 63)
+    out = bytearray()
+    while z >= 0x80:
+        out.append((z & 0x7F) | 0x80)
+        z >>= 7
+    out.append(z)
+    return bytes(out)
+
+
+def _typed_checks(directory, header):
+    """Step JNL: a file's SCHEMA describes its STAT / CLOCK records (journal.hpp schema_payload, stat_values)."""
+    kinds = [(0, "rewind", STAT_LOGICAL, [("anchor", "i"), ("body", "s")]),
+             (1, "s5", STAT_CLOCK_SITE, [("delay_us", "i")]),
+             (2, "status_clock", STAT_RAW, [("resim", "i"), ("t_rest", "f"), ("text", "s")])]
+    schema = bytearray(_U32.pack(100) + _U16.pack(len(kinds)))
+    for kind_id, name, klass, fields in kinds:
+        schema += _U16.pack(kind_id)
+        _put_str(schema, name)
+        schema += _U8.pack(klass) + _U8.pack(len(fields))
+        for field, kind in fields:
+            _put_str(schema, field)
+            schema += _U8.pack(ord(kind))
+
+    def text(value):
+        raw = value.encode("utf-8")
+        return _U16.pack(len(raw)) + raw
+
+    line, cut = "status: " + "x" * 5000, "y" * MAX_TEXT
+    paths = []
+    for name, delay in (("typed_a.bmjc", 7), ("typed_b.bmjc", 8)):
+        path = os.path.join(directory, name)
+        writer = JournalWriter(path, header)
+        writer.raw(TAG_SCHEMA, bytes(schema))
+        writer.raw(TAG_STAT, _U32.pack(105) + _U16.pack(0) + _varint(-3) + text("Ball_Wood_BMMO_2"))
+        writer.raw(TAG_CLOCK, _U32.pack(105) + _U16.pack(1) + _varint(delay))
+        writer.raw(TAG_CLOCK, _U32.pack(106) + _U16.pack(2) + _varint(41) + _F64.pack(1.5) + text(line))
+        writer.raw(TAG_CLOCK, _U32.pack(107) + _U16.pack(2) + _varint(delay) + _F64.pack(0.0) + text(cut))
+        writer.close()
+        paths.append(path)
+    journal = read_journal(paths[0])
+    _check("typed warning", "", journal.warning)
+    _check("typed schema", ["rewind", "s5", "status_clock"], [journal.schema[k]["name"] for k in sorted(journal.schema)])
+    _check("typed values", [{"anchor": -3, "body": "Ball_Wood_BMMO_2"}, {"delay_us": 7},
+                            {"resim": 41, "t_rest": 1.5, "text": line}, {"resim": 7, "t_rest": 0.0, "text": cut}],
+           [r["values"] for r in journal.stats])
+    _check("typed classes", [False, True, True, True], [r["clock"] for r in journal.stats])
+    _check("typed cut", [[], [], [], ["text"]], [r["cut"] for r in journal.stats])
+    _check("typed run compare", None, compare(paths[0], paths[1], "run"))
+    if compare(paths[0], paths[1], "replay") is None:
+        raise AssertionError("replay mode must compare a clock site's value (s5 delay_us 7 vs 8)")
 
 
 def _write_plan(path, header, plan, unknown_after=None):
@@ -2017,6 +2227,9 @@ def run_selftest(out_dir):
                 raise AssertionError("a bad %s should have been fatal" % why)
             os.remove(path)
 
+        _typed_checks(directory, client_header)
+        print("selftest: SCHEMA / STAT / CLOCK read back by the file's own schema (a long text whole, one at the"
+              " limit marked cut); run mode skips CLOCK, replay mode only the raw class")
         _limit_checks(directory)
         print("selftest: limits (bodies, string length, short payload) stop the read;"
               " an orphan repeat is tolerated like journal.hpp does")

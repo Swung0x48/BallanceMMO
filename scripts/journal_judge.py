@@ -572,6 +572,44 @@ def check_corrections(table, journal):
     table.add(journal.name, 'corrections', FAIL if kinds.get('hard') else REPORTED, detail)
 
 
+def check_stats(table, journal):
+    """Step JNL: a client journal's typed records against each other - one rewind record (what was asked) and one
+    rewind_base record (its base and depth) per rewind the status record counts (rb=), the depths summing to the
+    status line's resim= (status_clock), that line's mism=, rb= and resim= the records', and a window record
+    every 60 ticks.  A journal written before the step has none (not recorded); one without a status record (a
+    crash, the cap, an end that closed it without one), or with snapshot corrections (a snapshot's rollback is
+    counted in rb= with no rewind record: its CORRECTION record is the one), is reported, not failed; a text the
+    writer cut fails."""
+    if journal.schema is None:
+        table.add(journal.name, 'typed records', NA, 'none (written before step JNL)')
+        return
+    by = collections.defaultdict(list)
+    cut = []
+    for r in journal.stats:
+        by[r['name']].append(r['values'])
+        cut += ['%s.%s at tick %d' % (r['name'], f, r['tick']) for f in r.get('cut', [])]
+    rewinds, bases, windows, status = by['rewind'], by['rewind_base'], by['window'], by['status']
+    lo, hi = journal.tick_range()
+    depth = sum(r['depth'] for r in bases)
+    detail = 'rewinds %d / %d bases (%d ticks), windows %d over ticks %s..%s' % (
+        len(rewinds), len(bases), depth, len(windows), lo, hi)
+    if cut:
+        table.add(journal.name, 'typed records', FAIL, detail + '; text cut: ' + ', '.join(cut[:3]))
+        return
+    if not status:
+        table.add(journal.name, 'typed records', REPORTED, detail + '; no status record')
+        return
+    s = dict(status[-1], resim=by['status_clock'][-1]['resim'])
+    line = by['status_clock'][-1]['text']
+    said = {k: int(m.group(1)) for k in ('mism', 'rb', 'resim') for m in [re.search(r'\b%s=(\d+)' % k, line)] if m}
+    ok = s['rb'] == len(rewinds) == len(bases) and s['resim'] == depth \
+        and said == {'mism': s['mism'], 'rb': s['rb'], 'resim': s['resim']}
+    snapshots = len(journal.corrections())
+    table.add(journal.name, 'typed records', PASS if ok else REPORTED if snapshots else FAIL,
+              detail + '; status rb=%d resim=%d mism=%d%s' % (
+                  s['rb'], s['resim'], s['mism'], '; %d snapshot corrections' % snapshots if snapshots else ''))
+
+
 def own_inputs(journal):
     """(fresh ticks, substituted ticks) of the client's own player; the later
     record of a tick wins (journal.hpp: SUBSTITUTED follows FRESH)."""
@@ -723,6 +761,7 @@ def judge(name, server, clients, args):
         check_bodies(table, server, journal, args)
         check_resyncs(table, journal)
         check_corrections(table, journal)
+        check_stats(table, journal)
         check_client_inputs(table, journal)
     if server is not None:
         check_events(table, server, clients)

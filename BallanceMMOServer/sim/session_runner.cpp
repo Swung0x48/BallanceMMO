@@ -155,7 +155,26 @@ namespace bmmo::sim {
     }
 
     void session_runner::log(const std::string& text) {
+        s1_record(text);
         if (callbacks_.log) callbacks_.log(text);
+    }
+
+    void session_runner::s1_record(const std::string& text) {
+        constexpr std::string_view session_tag = "[session ", s1_tag = "] S1 ";
+        if (text.compare(0, session_tag.size(), session_tag) != 0 || !on_thread()) return;
+        const size_t close = text.find(s1_tag);
+        if (close == std::string::npos) return;
+        const auto it = sessions_.find(static_cast<uint32_t>(std::strtoul(text.c_str() + session_tag.size(), nullptr, 10)));
+        if (it == sessions_.end() || !it->second->world) return;
+        const size_t body = close + s1_tag.size();
+        const size_t space = text.find(' ', body);
+        const std::string kind = text.substr(body, space == std::string::npos ? std::string::npos : space - body);
+        // The quorum summary's quantiles and the arrival trace are raw clock
+        // reads (s1_quorum); every other S1 line replays (s1).
+        const bool raw = kind == "arrival" || text.compare(body, 12, "quorum tick=") == 0;
+        it->second->journal.stat(it->second->world->tick_index(),
+                                 raw ? bmmo::session::stat_kind::s1_quorum : bmmo::session::stat_kind::s1,
+                                 {kind, std::string_view(text).substr(body)});
     }
 
     void session_runner::warn(const std::string& text) {
@@ -316,6 +335,9 @@ namespace bmmo::sim {
         for (auto& [player, entry]: s.arrivals)
             entry.baseline.settled(entry.baseline.epoch(), now);
         s.running = true;
+        // Step JNL: who started it, and from which tick (the log's "all N
+        // players ready, ticking from T").
+        s.journal.stat(s.world->tick_index(), bmmo::session::stat_kind::ready, {s.players.size(), s.world->tick_index()});
         {
             std::lock_guard lk(view_mutex_);
             auto& v = views_[s.id];
@@ -378,12 +400,17 @@ namespace bmmo::sim {
         s.journal_start = logical_;
         std::string error;
         s.journal.set_compressed(true);   // a zstd stream (session/zstd_stream.hpp)
+        s.journal.set_stats(true);        // step JNL: the typed records
         if (!s.journal.open(path, header, config_.journal_max_bytes, error, std::move(poster),
                             bmmo::session::kJournalMaxQueued, config_.journal_flush, {},
                             [this, prefix](const std::string& text) { warn(prefix + text); })) {
             warn(prefix + error);
             return;
         }
+        // Step JNL: the switches the criteria read (the log's "Physics
+        // sessions enabled (..., patience P, lead adjust L, ...)").
+        s.journal.stat(first_tick, bmmo::session::stat_kind::server_config,
+                       {config_.lead_adjust ? 1 : 0, config_.patience ? 1 : 0});
         {
             std::lock_guard lk(view_mutex_);
             views_[s.id].journal = path.string();
@@ -1257,12 +1284,15 @@ namespace bmmo::sim {
     }
 
     void session_runner::request_resync_state(uint32_t session, uint32_t player, uint32_t base,
-                                              bmmo::session::resync_ref_id claim) {
-        post([this, session, player, base, claim] {
+                                              bmmo::session::resync_ref_id claim, uint32_t last_full,
+                                              uint32_t counted_through, const char* why) {
+        post([this, session, player, base, claim, last_full, counted_through, why] {
             auto it = sessions_.find(session);
             if (it == sessions_.end() || !it->second->world) return;
             auto& s = *it->second;
             const uint32_t next = s.world->tick_index();
+            s.journal.stat(next, bmmo::session::stat_kind::resync_request,
+                           {player, base, last_full, counted_through, why, 1});
             // base - 1 stepped already (next = tick_index(), the tick the
             // runner steps next, is past it: next >= base): nothing is sent
             // for a base the runner has passed - the client's check
@@ -1280,7 +1310,7 @@ namespace bmmo::sim {
                 if (callbacks_.on_resync_base_missed) callbacks_.on_resync_base_missed(s.id, player, base);
                 return;
             }
-            s.resync_requests[player] = {base, claim};
+            s.resync_requests[player] = {base, claim, last_full, counted_through};
         });
     }
 
@@ -1347,14 +1377,23 @@ namespace bmmo::sim {
             out.emit_us = static_cast<uint64_t>(
                     std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - started).count());
             encode_resync_state(s, r->second.claim, out);
-            if (recording)
+            // Step JNL: the note's numbers, and the state's, as a record; the
+            // capture and coding times (raw clock reads) in a CLOCK record of
+            // their own, which a run-to-run compare skips.
+            if (recording) {
                 s.journal.note(tick, "resync state for player " + std::to_string(out.player) + ": tick "
                                      + std::to_string(tick) + " base " + std::to_string(out.base) + ", "
                                      + std::to_string(out.state.rows.size()) + " rows, "
                                      + std::to_string(out.state.scripts.size()) + " script bytes, "
-                                     + std::to_string(out.state.savestate.size()) + " savestate bytes, captured in "
-                                     + std::to_string(out.emit_us) + " us, coded in " + std::to_string(out.encode_us) + " us"
+                                     + std::to_string(out.state.savestate.size()) + " savestate bytes"
                                      + (out.state.error.empty() ? std::string() : " (" + out.state.error + ")"));
+                s.journal.stat(tick, bmmo::session::stat_kind::resync_state,
+                               {out.player, tick, out.base, out.state.rows.size(), out.state.scripts.size(),
+                                out.state.savestate.size(), out.raw_size, out.frame.size(),
+                                out.ref_kind == bmmo::session::RESYNC_REF_PREVIOUS ? out.ref_tick : 0u,
+                                r->second.last_full, r->second.counted_through, out.state.error});
+                s.journal.stat(tick, bmmo::session::stat_kind::resync_cost, {out.player, tick, out.emit_us, out.encode_us});
+            }
             r = s.resync_requests.erase(r);
             if (callbacks_.on_resync_state) callbacks_.on_resync_state(out);
         }
@@ -1366,6 +1405,22 @@ namespace bmmo::sim {
             if (it == sessions_.end() || !it->second->world) return;
             it->second->journal.note(it->second->world->tick_index(), text);
         });
+    }
+
+    void session_runner::journal_clock(uint32_t session, bmmo::session::stat_kind kind,
+                                       std::vector<bmmo::session::journal_stat_value> values) {
+        if (bmmo::session::stat_info(kind).klass == bmmo::session::stat_class::logical) return;   // STAT is tick-placed only
+        // Now on the runner's thread when the session is there (a callback's:
+        // s5); else posted, after what is queued (a session a command is
+        // still creating: the start's link records).
+        const auto write = [this, session, kind](const std::vector<bmmo::session::journal_stat_value>& v) {
+            auto it = sessions_.find(session);
+            if (it == sessions_.end() || !it->second->world) return false;
+            it->second->journal.stat(it->second->world->tick_index(), kind, v);
+            return true;
+        };
+        if (on_thread() && write(values)) return;
+        post([write, values = std::move(values)] { write(values); });
     }
 
     void session_runner::describe(uint32_t session, std::function<void(const std::string&)> out) {
@@ -1711,6 +1766,8 @@ namespace bmmo::sim {
         }
         // Step BALA: the balls that entered the airship zone in this step
         // (ghosts from here, out of the sync) - in the journal.
+        for (const auto& g: s.world->take_spawn_ghost_changes())   // step JNL
+            s.journal.stat(tick, bmmo::session::stat_kind::ghost, {g.player, g.tick, g.solid ? 1 : 0});
         for (const auto& [player, zone_tick]: s.world->take_airship_entries())
             if (recording)
                 s.journal.note(tick, "airship: p" + std::to_string(player) + " in the airship zone at tick "
@@ -1822,6 +1879,11 @@ namespace bmmo::sim {
                     + " rule=" + decision.rule
                     + " streak=" + std::to_string(decision.streak)
                     + " offset=" + std::to_string(meter.offset());
+                // Step JNL: the decision as a record (its route: the lead
+                // record, or the lateness note, says what became of it).
+                s.journal.stat(tick, bmmo::session::stat_kind::lateness,
+                               {player, tick, raise ? 1 : 0, decision.k, decision.rule, decision.streak, meter.offset(),
+                                config_.lead_adjust ? "lead" : "observe"});
                 if (config_.lead_adjust) {
                     apply_lead_decision(s, player, decision, text);
                 } else {
@@ -1891,8 +1953,9 @@ namespace bmmo::sim {
         auto& lead = s.leads[player];
         const uint32_t next_tick = s.world->tick_index();
         const bool complete = s.union_complete();
+        const int64_t sector_bound = bmmo::session::lead_sector_bound(lead, d.k, next_tick, s.players.size(), complete);
         const std::string sector_text = lead_sector_text(lead, next_tick)
-            + " sector-bound=" + std::to_string(bmmo::session::lead_sector_bound(lead, d.k, next_tick, s.players.size(), complete))
+            + " sector-bound=" + std::to_string(sector_bound)
             + " union=" + std::to_string(s.requested_sector_count()) + "/" + std::to_string(s.world->level_sector_count());
         const auto plan = bmmo::session::lead_decide(true, lead, meter->second.meter, d, next_tick, buffer->second,
                                                    s.players.size(), complete);
@@ -1927,6 +1990,11 @@ namespace bmmo::sim {
                                                                                       : std::to_string(plan.held_source))
             + " dropped=" + std::to_string(plan.dropped) + " epoch=" + std::to_string(meter->second.meter.base());
         log(prefix + text + "; " + line + sector_text);
+        if (recording)
+            s.journal.stat(next_tick, bmmo::session::stat_kind::lead,
+                           {player, d.id, plan.k, plan.decided_k, plan.cap ? plan.cap : "", plan.binding ? plan.binding : "",
+                            next_tick, plan.held_from, plan.effective, plan.dropped, meter->second.meter.base(),
+                            sector_bound});
         // Design 2.3 (S3): the reset is in the box as a note only; the
         // range's frames are journaled with flag 0 as every substitute is.
         if (recording)
@@ -2281,6 +2349,8 @@ namespace bmmo::sim {
                 std::vector<uint32_t> v;
                 v.swap(s.step_us);
                 std::sort(v.begin(), v.end());
+                s.journal.stat(tick, bmmo::session::stat_kind::step,
+                               {tick + 1 - v.size(), tick, v[v.size() / 2], v[v.size() * 99 / 100], v.back()});
                 log("[session " + std::to_string(s.id) + "] step time over ticks " + std::to_string(tick + 1 - v.size())
                     + ".." + std::to_string(tick) + ": p50 " + std::to_string(v[v.size() / 2]) + " us, p99 "
                     + std::to_string(v[v.size() * 99 / 100]) + " us, max " + std::to_string(v.back()) + " us");

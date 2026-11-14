@@ -1,5 +1,7 @@
-import argparse, json, os, pathlib, shutil, struct, subprocess, time, re
+import argparse, json, os, pathlib, shutil, struct, subprocess, sys, time, re
 import heapq, select, socket, threading
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import session_facts
 
 ROOT = pathlib.Path(__file__).resolve().parent / 'probe'
 REPO = pathlib.Path('D:/repos/BallanceMMO')
@@ -144,7 +146,13 @@ def main():
             for p in proxies: p.close()
         item = {'case': case, 'directory': str(case_dir), 'clients': []}
         for i, p in enumerate(clients):
-            lines = (case_dir/f'client{i}.log').read_text(errors='replace').splitlines()
+            # Step JNL: the final status from the client's journal (its log when the journal predates the step).
+            journal = case_dir/f'client{i}.bmjc'
+            facts = session_facts.Facts(journal) if journal.exists() else None
+            if facts is not None and facts.recorded('status_clock'):
+                lines = session_facts.client_lines(facts)
+            else:
+                lines = (case_dir/f'client{i}.log').read_text(errors='replace').splitlines()
             statuses = [s for s in lines if s.startswith('status:')]
             final = statuses[-1] if statuses else ''
             item['clients'].append({'client': i, 'exit_code': p.returncode, 'final_status': final})

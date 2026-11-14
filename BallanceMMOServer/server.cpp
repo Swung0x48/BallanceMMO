@@ -1311,6 +1311,7 @@ public:
     struct session_latency {
         uint32_t input_delay = 6;
         uint32_t worst_rtt_ms = 0;
+        std::vector<std::pair<bmmo::net::connection, int>> pings;   // step JNL: each member's, as sampled
     };
 
     // The worst case among the members: the session's clock is one clock for
@@ -1320,6 +1321,7 @@ public:
     session_latency measure_session_latency(const bmmo::server_room& r) {
         int worst = 0;
         std::string detail;
+        std::vector<std::pair<bmmo::net::connection, int>> pings;
         for (const auto& m: r.members) {
             bmmo::net::connection_status status{};
             link_status(m.id, status);
@@ -1330,8 +1332,10 @@ public:
                 it->second.ping_peak_ms = static_cast<uint16_t>(std::min(ping, 65535));
             worst = std::max(worst, ping);
             detail += Sprintf("%s%s %d ms", detail.empty() ? "" : ", ", get_client_name(m.id), ping);
+            pings.emplace_back(m.id, ping);
         }
         session_latency out;
+        out.pings = std::move(pings);
         out.worst_rtt_ms = static_cast<uint32_t>(worst);
         out.input_delay = bmmo::session::input_delay_for_ping(worst, config_.physics_input_delay);
         Printf(kVerbose, "Room %u: input delay %u ticks (%.0f ms) for a worst round trip of %d ms (%s).",
@@ -1347,6 +1351,7 @@ public:
         s.room = r.id;
         s.map = map;
         const session_latency latency = measure_session_latency(r);
+        const auto start_pings = latency.pings;
         s.input_delay = latency.input_delay;
         s.sector_lead = bmmo::session::sector_lead_for_ping(s.input_delay, static_cast<int>(latency.worst_rtt_ms));
         Printf(kVerbose, "Room %u: sector lead %u ticks (%.0f ms): a crossing starts its sector that far ahead, on every member.",
@@ -1464,6 +1469,11 @@ public:
         runner_->create_session(id, map.level, players, input_delay, start_base, spawn_impulse, note, std::move(names),
                                 sector_lead, world_options, mechanism_slots, map_file,
                                 utc_ms_now(bmmo::session::clock_site::runner_journal_utc));
+        // Step JNL: the round trips the input delay was sized from (the log's
+        // "input delay N ticks ... for a worst round trip of W ms (...)").
+        for (const auto& [member, ping]: start_pings)
+            runner_->journal_clock(id, bmmo::session::stat_kind::link,
+                                   {stat_int(member), stat_int(ping), stat_int(latency.worst_rtt_ms), stat_int(input_delay)});
         return id;
     }
 
@@ -2023,6 +2033,9 @@ public:
                reference.c_str(), static_cast<unsigned long long>(out.encode_us),
                static_cast<size_t>(msg.size()), static_cast<int>(sent), static_cast<unsigned long long>(out.emit_us),
                out.state.error.empty() ? "" : ": ", out.state.error.c_str());
+        runner_->journal_clock(s.id, bmmo::session::stat_kind::resync_wire,
+                               {stat_int(out.player), stat_int(out.tick), stat_int(out.frame.size()),
+                                stat_int(msg.frame.empty() ? 0 : msg.size()), stat_int(sent ? 1 : 0)});
     }
 
     // The runner had stepped the base's tick before the request reached it:
@@ -2038,7 +2051,7 @@ public:
         auto& s = it->second;
         const auto c = static_cast<bmmo::net::connection>(player);
         if (std::find(s.members.begin(), s.members.end(), c) == s.members.end()) return;
-        const uint32_t again = resync_member(s, c, 0);
+        const uint32_t again = resync_member(s, c, 0, "again");
         Printf(kVerbose, "Physics session %u: resync base %u for %s was stepped before the request reached the runner: re-assigned at %u.",
                s.id, base, get_client_name(c), again);
     }
@@ -2400,6 +2413,14 @@ public:
                ms(m.interval_max), m.over_33, m.over_50, m.over_100, ms(m.work_p99), ms(m.work_max), m.rewinds,
                m.replayed, m.resyncs, m.holds, m.starved, ms(m.behind_max), ms(m.inbound_p50), ms(m.inbound_p99),
                ms(m.inbound_max), ping);
+        // Step JNL: the message's fields as received (tenths of ms where the line prints ms).
+        runner_->journal_clock(m.session, bmmo::session::stat_kind::telemetry,
+                               {stat_int(c), stat_int(m.host), stat_int(m.tick), stat_int(m.ticks), stat_int(m.frames),
+                                stat_int(m.interval_p50), stat_int(m.interval_p99), stat_int(m.interval_p999),
+                                stat_int(m.interval_max), stat_int(m.over_33), stat_int(m.over_50), stat_int(m.over_100),
+                                stat_int(m.work_p99), stat_int(m.work_max), stat_int(m.rewinds), stat_int(m.replayed),
+                                stat_int(m.resyncs), stat_int(m.holds), stat_int(m.starved), stat_int(m.behind_max),
+                                stat_int(m.inbound_p50), stat_int(m.inbound_p99), stat_int(m.inbound_max), stat_int(ping)});
     }
 
     // (Protocol 14-16's SessionGhostPose relay, step BALA, is retired at 17
@@ -2740,7 +2761,7 @@ public:
                                   s.start_repeats.end());
             ++s.resyncs;   // step SLQ
             ++s.member_resyncs[c];
-            const uint32_t base = resync_member(s, c, 0);
+            const uint32_t base = resync_member(s, c, 0, "start");
             Printf(kVerbose, "Physics session %u: start handshake: %s resynced at tick %u: from start %u onto start %u.", s.id,
                    get_client_name(c), base, x.ran_on, s.start_resync_onto);
         }
@@ -3140,6 +3161,7 @@ public:
                        assigned - 1, client_it->second.name);
             } else {
                 runner_->request_full_snapshot(s.id);
+                journal_snapshot_request(s, c, assigned, 0, 0, "join");
             }
         }
     }
@@ -3163,12 +3185,13 @@ public:
         if (auto lead = s.leads.find(c); lead != s.leads.end()) lead->second.resync_claim = msg.held;
         ++s.resyncs;   // step SLQ
         ++s.member_resyncs[c];
-        resync_member(s, c, msg.last_full_tick);
+        resync_member(s, c, msg.last_full_tick, "resync");
     }
 
     // The resync answer (handle_session_resync, and again for a base the
     // runner stepped before the request reached it): returns the base.
-    uint32_t resync_member(physics_session_state& s, bmmo::net::connection c, uint32_t last_full_tick) {
+    // `why` (step JNL, the journal's resync_request): "resync", "start" or "again".
+    uint32_t resync_member(physics_session_state& s, bmmo::net::connection c, uint32_t last_full_tick, const char* why) {
         // On the per-player path (lead_adjust on, the member declared
         // CAP_LEAD), at L_eff (late-player design 2.5, 2.8): the lead of the
         // member's first assignment plus its acknowledged offset, the lead
@@ -3212,9 +3235,12 @@ public:
         if (state) {
             const auto lead = s.leads.find(c);
             runner_->request_resync_state(s.id, c, assigned,
-                                          lead != s.leads.end() ? lead->second.resync_claim : bmmo::session::resync_ref_id{});
+                                          lead != s.leads.end() ? lead->second.resync_claim : bmmo::session::resync_ref_id{},
+                                          last_full_tick, counted_through, why);
+        } else {
+            runner_->request_full_snapshot(s.id);
+            journal_snapshot_request(s, c, assigned, last_full_tick, counted_through, why);
         }
-        else runner_->request_full_snapshot(s.id);
         Printf(kVerbose, "Physics session %u: %s resynced at tick %u (last full snapshot it had: %u; held counted through tick %u).",
                s.id, get_client_name(c), assigned, last_full_tick, counted_through);
         if (state)
@@ -3640,6 +3666,33 @@ public:
                a.rejected ? " rejected" : a.superseded ? " superseded"
                    : (a.token == 0 ? (a.type == bmmo::session::event_type::Trafo ? " server" : " leaver") : ""),
                timing);
+        bmmo::session::journal_stat_value type, flag;
+        type.type = flag.type = 's';
+        type.s = session_event_type_name(msg.type);
+        flag.s = a.rejected ? "rejected" : a.superseded ? "superseded"
+               : (a.token == 0 ? (a.type == bmmo::session::event_type::Trafo ? "server" : "leaver") : "");
+        runner_->journal_clock(s.id, bmmo::session::stat_kind::s5,
+                               {stat_int(a.player), type, stat_int(a.origin), stat_int(a.applied), stat_int(delay_us),
+                                stat_int(recipients), flag});
+    }
+
+    // Step JNL: a request the legacy full snapshot answers, in the journal
+    // as request_resync_state records the others (state 0).
+    void journal_snapshot_request(const physics_session_state& s, bmmo::net::connection c, uint32_t base,
+                                  uint32_t last_full, uint32_t counted_through, const char* why) {
+        bmmo::session::journal_stat_value text;
+        text.type = 's';
+        text.s = why;
+        runner_->journal_clock(s.id, bmmo::session::stat_kind::resync_request,
+                               {stat_int(c), stat_int(base), stat_int(last_full), stat_int(counted_through), text,
+                                stat_int(0)});
+    }
+
+    // Step JNL: one integer value of a CLOCK record posted to the runner.
+    static bmmo::session::journal_stat_value stat_int(int64_t v) {
+        bmmo::session::journal_stat_value out;
+        out.i = v;
+        return out;
     }
 
     static const char* session_event_type_name(bmmo::session::event_type type) {

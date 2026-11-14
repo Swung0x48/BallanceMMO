@@ -33,6 +33,10 @@ def judge(case, root, simtool):
     # empty on both twins (equal, so silent): the twin fails.
     if summary.get('server_log_level'):
         out['server_log_level'] = summary['server_log_level']
+    # Step JNL, while the proof lasts: the criteria read from the journals must equal the ones read from the
+    # logs (arena_map_test's criteria_source_check); a twin whose check says otherwise fails.  No key: not
+    # checked (--no-log-source-check, or no event report), said, not failed.
+    out['criteria_source_check'] = summary.get('criteria_source_check')
     servers = sorted((sector / 'journals').glob('*.bmjs'))
     clients = sorted(sector.glob('client*.bmjc'))
     if servers and clients:
@@ -66,10 +70,16 @@ def main():
                 print('    fail ' + f, flush=True)
             if r.get('server_log_level'):
                 print('    FAIL (not counted exact) ' + r['server_log_level'], flush=True)
+            check = r.get('criteria_source_check')
+            if check is None:
+                print('    criteria from the journals: not checked against the logs', flush=True)
+            elif check != 'equal':
+                print('    FAIL (not counted exact) criteria from the journals vs the logs: ' + check, flush=True)
             for l in r.get('final', []):
                 if ' PASS ' not in l:
                     print('    ' + l[:170], flush=True)
-    exact = sum(1 for r in rows if r.get('final_exact') and not r.get('server_log_level'))
+    exact = sum(1 for r in rows if r.get('final_exact') and not r.get('server_log_level')
+                and r.get('criteria_source_check') in (None, 'equal'))
     print('%d of %d twins FINAL exact' % (exact, len(rows)))
     (A / ('%s-lbm-fast.json' % args.labels[0].split('_')[0])).write_text(json.dumps(rows, indent=2), encoding='utf-8')
     return 0 if exact == len(rows) and rows else 1

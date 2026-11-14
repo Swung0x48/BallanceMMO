@@ -336,6 +336,18 @@ namespace bmmo::sim {
             out.swap(airship_entries_);
             return out;
         }
+        // Step JNL: the spawn ghost transitions since the last call - (player,
+        // tick, solid): the ball became a ghost (0) or solid again (1), as the
+        // world's spawn ghost lines say (the session journal records them).
+        struct spawn_ghost_change {
+            uint32_t player = 0, tick = 0;
+            bool solid = false;
+        };
+        std::vector<spawn_ghost_change> take_spawn_ghost_changes() {
+            std::vector<spawn_ghost_change> out;
+            out.swap(spawn_ghost_changes_);
+            return out;
+        }
         // Whether the set of movable mechanism bodies changed since the last
         // snapshot() call (a full snapshot is then due).
         bool body_set_changed() const { return body_set_changed_; }
@@ -511,6 +523,7 @@ namespace bmmo::sim {
         // Step SPGH: the spawn ghost over this world.
         void install_spawn_ghost();
         std::vector<std::pair<uint32_t, uint32_t>> airship_entries_;   // (player, tick) not yet taken
+        std::vector<spawn_ghost_change> spawn_ghost_changes_;          // step JNL: not yet taken
         bool airship_box_logged_ = false;
         // Step SPGH2: the spawn ghost's counters as last logged (a body that
         // came to a solid group - a trafo's new ball - and the births).

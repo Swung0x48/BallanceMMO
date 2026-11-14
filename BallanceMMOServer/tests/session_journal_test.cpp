@@ -1932,3 +1932,63 @@ TEST(SessionIo, WriteFileOnAStrandKeepsTheRewritesInOrder) {
     EXPECT_TRUE(io::write_file(path, "[now]", {}));   // no strand: at once
     EXPECT_EQ("[now]", read_file(path));
 }
+
+// Step JNL: a host's journal describes its typed records (SCHEMA) and reads
+// them back - a logical kind (rewind) as STAT, a raw one (rewind_base,
+// status_clock) as CLOCK, each value in its field's type, a text past the
+// note limit whole - and a file written without them says so (no SCHEMA:
+// not recorded, not zero).
+TEST(SessionJournal, TypedRecordsRoundTripThroughTheSchema) {
+    const temp_dir dir("stats");
+    const auto path = dir.file("client.bmjc");
+    const std::string line = "status: tick=106" + std::string(kJournalMaxString, 'x');
+    {
+        journal_writer writer;
+        writer.set_stats(true);
+        std::string error;
+        ASSERT_TRUE(writer.open(path, make_header(), 0, error)) << error;
+        writer.stat(105, stat_kind::rewind, {104, 105, static_cast<int>(rewind_cause::input), "Ball_Wood_BMMO_2"});
+        writer.stat(105, stat_kind::rewind_base, {105, 108, -3});
+        writer.stat(106, stat_kind::status_clock, {7, 1.5, 2.25, 0.0, 9.0, -1.0, 3.0, line});
+        writer.stat(106, stat_kind::ghost, {1, 2, 0});   // a server kind: not in a client's SCHEMA
+        writer.close();
+    }
+    journal out;
+    std::string error;
+    ASSERT_TRUE(read_journal(path, out, error)) << error;
+    EXPECT_TRUE(out.warning.empty()) << out.warning;
+    ASSERT_TRUE(out.has_schema);
+    const auto* rewind = find_schema_kind(out.schema, static_cast<uint16_t>(stat_kind::rewind));
+    const auto* base = find_schema_kind(out.schema, static_cast<uint16_t>(stat_kind::rewind_base));
+    ASSERT_NE(nullptr, rewind);
+    ASSERT_NE(nullptr, base);
+    EXPECT_EQ("rewind", rewind->name);
+    EXPECT_EQ(static_cast<uint8_t>(stat_class::logical), rewind->klass);
+    EXPECT_EQ(static_cast<uint8_t>(stat_class::raw), base->klass);
+    EXPECT_EQ(nullptr, find_schema_kind(out.schema, static_cast<uint16_t>(stat_kind::ghost)));
+    std::vector<journal_stat> stats;
+    for (const auto& group: out.ticks) stats.insert(stats.end(), group.stats.begin(), group.stats.end());
+    ASSERT_EQ(3u, stats.size());
+    EXPECT_FALSE(stats[0].clock);
+    EXPECT_EQ("Ball_Wood_BMMO_2", stats[0].values[3].s);
+    EXPECT_EQ("rewind anchor=104 at=105 cause=0 body=Ball_Wood_BMMO_2", stat_text(stats[0], *rewind));
+    EXPECT_TRUE(stats[1].clock);
+    EXPECT_EQ(-3, stats[1].values[2].i);
+    EXPECT_TRUE(stats[2].clock);
+    EXPECT_EQ(7, stats[2].values[0].i);
+    EXPECT_EQ(2.25, stats[2].values[2].f);
+    EXPECT_EQ(line, stats[2].values[7].s);
+
+    // Without set_stats: the bytes of before, nothing typed.
+    const auto plain = dir.file("plain.bmjc");
+    {
+        journal_writer writer;
+        ASSERT_TRUE(writer.open(plain, make_header(), 0, error)) << error;
+        writer.stat(105, stat_kind::stall, {300, 105});
+        writer.close();
+    }
+    journal old;
+    ASSERT_TRUE(read_journal(plain, old, error)) << error;
+    EXPECT_FALSE(old.has_schema);
+    EXPECT_EQ(1u, old.records);
+}

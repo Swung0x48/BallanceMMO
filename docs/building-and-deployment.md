@@ -405,6 +405,23 @@ physics:
   before the switch passes, as it logs everything), and `lbm_fast_judge.py`
   does not count such a twin exact. The journals are
   the same at either level. `logging_level` stays the network library's own.
+- **The analyses read the journals** (step JNL, 2026-11-13). The data a
+  report, a gate or a criterion reads - input delay, members, resyncs, lead,
+  rewinds, the window and status counters, step time, telemetry - is in the
+  session journals as typed records (`docs/session-journal-plan.md`, 'Typed
+  records'), at either log level: `scripts/pubtest_report.py` (the public
+  test's server tables), `scripts/telemetry_report.py`,
+  `scripts/session_facts.py` and the harness's criteria read the `.bmjs` /
+  `.bmjc` files, not the log. To analyse a public test, fetch the server's
+  `journals/` (and the players' `.bmjc` if wanted); the server log is for the
+  operator; `pubtest_report.py`'s default output names no player (an end
+  reason that names one prints its category; `--players` stays local). The
+  harness still writes `log_verbose: true` so that each case also compares
+  the criteria from the logs with the ones from the journals, and
+  `scripts/lbm_fast_judge.py` fails a twin where the two differ.
+  `scripts/journal_compare.py A B --mode run` compares two runs' journals
+  record by record (on the virtual clock: a real-clock run's header and TICK
+  times are the wall clock's).
 - The server validates client-reported physics events at the rate/shape
   level (design section 9.4): more than `event_rate_limit` events/second per
   player are dropped, malformed `Physicalize` payloads are rejected outright,

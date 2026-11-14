@@ -1472,6 +1472,10 @@ namespace {
             // A session still running when the client goes down says so in its
             // box rather than just stopping mid-file.
             core_.retire_final_checkpoints(stopped);
+            // Step JNL: the status line's counters into the box before it
+            // closes (report() prints the line from the same state).
+            core_.settle_script_diffs();
+            core_.journal_status(counters(), true);
             core_.journal().close(stopped);
             report();
             finish_inbound();
@@ -3682,7 +3686,11 @@ namespace {
             if (args_.pause_at >= 0 && !paused_once_ && static_cast<int64_t>(current_tick()) >= args_.pause_at) {
                 paused_once_ = true;
                 logf("test pause: %d ms at tick %u", args_.pause_ms, current_tick());
-                if (args_.stall_named) logf("stall: %d ms at tick %u (--stall-ms)", args_.pause_ms, current_tick());
+                if (args_.stall_named) {
+                    logf("stall: %d ms at tick %u (--stall-ms)", args_.pause_ms, current_tick());
+                    core_.journal().writer().stat(current_tick(), bmmo::session::stat_kind::stall,
+                                                  {args_.pause_ms, current_tick()});   // step JNL
+                }
                 wall_sleep(bmmo::session::clock_site::wait_test_pause, std::chrono::milliseconds(args_.pause_ms));
             }
             // A SessionLead's slew (late-player design 2.4) moves the origin
@@ -5102,7 +5110,7 @@ namespace {
         }
         void report() {
             core_.settle_script_diffs();   // step SDF: the line counts every rewind's script diff
-            log_line(core_.status_text(counters()));
+            log_line(core_.journal_status(counters(), false));   // step JNL: the line in the box too
             // RC4 (step B6RC's fix-up, review 2): what the dormant-script
             // encoding did in this process - trafo scripts written as one byte
             // from the ledger, walked and found built, walked and written as

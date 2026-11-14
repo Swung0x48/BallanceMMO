@@ -997,6 +997,7 @@ namespace bmmo::session {
             s.parked_events_.clear();
         }
         retire_final_checkpoints("the session ended");
+        journal_status(host_values(), true);   // step JNL
         journal_.close(reason);
         // After the journal closed: the own body guard is lifted (host
         // state; hooks.ended, a back-call until E11), and every mirror's
@@ -1515,11 +1516,26 @@ namespace bmmo::session {
     bool session_client_core::rewind_world(uint32_t anchor, uint32_t now,
                                            const std::function<bool(const std::string& entity, uint32_t tick,
                                                                     bmmo::session::input_frame& out)>& input_at,
-                                           const std::string& reason, uint32_t reach, uint32_t* restored) {
+                                           rewind_cause cause, const std::string& reason, uint32_t reach,
+                                           uint32_t* restored, std::string_view body) {
         const uint64_t frozen_before = s.rollback_.stats().frozen;
         const uint64_t globals_before = s.rollback_.stats().globals_failures;
+        const uint64_t rollbacks_before = s.rollback_.stats().rollbacks, resim_before = s.rollback_.stats().resim_ticks;
         s.spawn_forget_cursor_valid_ = false;   // FULL step GHF: the replay below begins at its restore
-        const bool rolled = s.rollback_.rewind_to(world(), anchor, now, input_at, reason, reach, restored);
+        uint32_t restored_at = anchor;
+        const bool rolled = s.rollback_.rewind_to(world(), anchor, now, input_at, reason, reach,
+                                                  restored ? restored : &restored_at);
+        // Step JNL: the rewind the status line's rb= and resim= count, as two
+        // records (after rewind_to: its cost meter has closed): what was
+        // asked (logical), then the base its restore was (the log line's: a
+        // light anchor's whole record, step LVR's wall-clock gate) and the
+        // ticks it re-simulated (raw).
+        if (s.rollback_.stats().rollbacks != rollbacks_before) {
+            auto& w = journal_.writer();
+            w.stat(now, stat_kind::rewind, {anchor, now, static_cast<int>(cause), body});
+            w.stat(now, stat_kind::rewind_base,
+                   {now, restored ? *restored : restored_at, s.rollback_.stats().resim_ticks - resim_before});
+        }
         if (s.rollback_.stats().frozen != frozen_before) request_resync("local physics clock frozen", true);
         // C3 (record-format-gaps design 2.3 step 6, step RK1): a refused
         // write of the physics globals dropped the history the same way.

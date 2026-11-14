@@ -3652,3 +3652,138 @@ edited, not run. The L6 re-drives (`pf_slq1_1`, `pf_slqq_1`), the capture replay
 toggle (`slqc2`) ran on the tree before the review's fixes and were not run again: the fixes change only the
 severity of failure-path lines, `describe`'s output and two `member_left` arguments. (`--report-only` on `slqf2_off`
 gave the same FAIL.) Open for the user: whether public tests run verbose (the analyzer reads verbose lines).
+
+## Built (the journal carries what the analyses read, step JNL, 2026-11-13)
+
+**Why.** The user, 2026-11-13, after SLQ made the server log quiet and the public-test analyzer was found reading
+verbose lines (input delay, member joins, resyncs, lead): those data belong in the journal, not in a log; a log is
+for people, and the journal must reconstruct the whole scene, these data included. Census and design:
+`.local-tools/work/JNL/` (the census's two facts: the 12 Level 13 server journals that differed between any two
+runs differed only in the resync note's capture / coding times, raw clock reads; and with snapshots off a client
+journal had no record of a rewind at all - `rb=`, `resim=` and the depths were log-only).
+
+**The format.** Three tags inside version 10 (no bump; `docs/session-journal-plan.md` 'Typed records'):
+`SCHEMA` (10), written with the HEADER in its chunk, names this writer's kinds, their class and fields; `STAT` (11)
+a record of a logical kind (class 0: follows from the ticks, compared run to run); `CLOCK` (12) one of class 1 (a
+value that follows a recorded clock site: exact under the virtual clock and a capture replay) or 2 (a raw clock
+read, a link's status, or a record whose tick thread timing sets). One table, `session/journal_stats.hpp`
+(`stat_kind`, `kStatKinds`); `journal_writer::stat(tick, kind, {values})` writes each value as its field's type
+(zigzag LEB128, f64, a text of up to 65 535 bytes - `kJournalMaxText`, the notes' 4 096 stays; one of exactly the
+limit was cut, which the readers flag) and picks the tag from the class; a debug build asserts the value count. A
+file describes itself, so neither reader keeps the table (`read_schema_payload` / `read_stat_payload` / `stat_text`
+in `journal.hpp`, `journal_tick::stats`; `journal_trace.parse_schema` / `parse_stat`; `SimTool --list` prints
+`stat` / `clock` lines). Only the hosts' journals write them (`set_stats`, where the files are made compressed): the
+tests' and SimTool's files keep their bytes. Nothing reads a clock for a record: each carries a value its site
+already had; no K7 site moved. Every write is on the thread that writes the journal already (the runner, the client
+core); what server.cpp records goes through `session_runner::journal_clock`, which writes at once on the runner's
+thread when the session is there (`s5`, from `on_event_accepted`) and posts like `journal_note` otherwise (the
+start's `link` records, whose session a queued command is still creating), and only for a CLOCK kind. The
+compression stays on the I/O strand.
+
+**The kinds.** Server: `server_config`, `ready`, `resync_state` (the note's numbers and the state's raw / framed
+bytes, its reference, the request's last full snapshot and counted-through tick), `resync_cost` (the capture and
+coding times that left the note: raw), `resync_wire`, `resync_request` (each request as the runner takes it, with
+`why` - `resync`, `start` (the start handshake's), `again` (a base the runner stepped first, answered again), `join`
+(a late joiner's state) - and `state`, 0 when the legacy full snapshot answers it, which server.cpp records itself),
+`lead` (from the decision's plan and the sector bound the log line prints, computed once), `lateness`, `s1` (the
+lateness meter's `[session N] S1 ...` lines - decisions, resets, lead acks, patience, clock skew - as their
+key=value text: class 1, not 0 - a lead ack's and a reset's tick is a posted command's, and a raise's line carries the
+link's `rtt=`, both of which a capture replay gives again and two runs need not), `s1_quorum` (its quorum summary and arrival lines, whose quantiles are raw clock reads),
+`step`, `link`, `telemetry`, `s5` (class 1), `ghost`. Client: `rewind` (what each rewind the status line's `rb=`
+counts was asked - `rewind_world` and the resync re-step: the anchor, the tick, a cause code, the corrected ball of
+an input rewind; logical) followed by `rewind_base` (the base its restore was and the ticks it re-simulated: 440
+of the fast LBM's 1 711 rewinds and 56 858 of one L6 re-drive's 72 749 restore at a record before the one asked;
+raw, because some of those follow step LVR's wall-clock gate - `steady_clock`, no clock site - which records a heavy
+frame's live tick light, so a later rewind restores the whole record before it: of six coordinated runs of the
+re-drive one differed from the others in one client's two bases), both after the engine's cost meter closed; `window` (the window line's numbers and its tails; logical: its
+depths count from the anchor asked); `status` (the status line's logical counters, `mism`, `hard`, `scr` ... all but
+`resim`, at `end()` and the headless stop before the journal closes); `status_clock` (`resim`, the clock values and
+the whole line, there and at each headless 5 s report, so a client killed later keeps its last line, as its log
+does); `own_death`, `stall`. The resync note keeps its rows and bytes; its times moved to `resync_cost`.
+
+**Compares.** `scripts/journal_compare.py A B --mode run|replay|legacy [--checkpoint-sets]` (files or directories;
+no journal found is an error) walks the records decompressed (`journal_trace.records`, `canonical`, `compare`) and
+names the first that differs: `run` skips CLOCK, masks the build id's commit and drops a pre-step resync note's
+times - two runs on the virtual clock (a real-clock run's header `utc_ms` and TICK `ms` are the wall clock's, so
+those differ in every mode); `replay` skips only class-2 CLOCK (`capture_replay.first_difference` uses it; a capture
+replay's journal no longer equals the live one byte for byte); `legacy` skips the three tags too;
+`--checkpoint-sets` compares a checkpoint's bodies as a set (the retail capture replay, `.local-tools/work/K7/replay.py`,
+uses it with `replay`).
+
+**The readers.** `scripts/session_facts.py` reads a journal once in file order (`Facts`) and renders its records
+as the lines the log readers parse (`client_lines`, `server_lines`), so the criteria's parsers are unchanged and a
+journal from before the step falls back to its log; `rewinds()` pairs each `rewind` with its `rewind_base`, `gate()`
+gives a session's end counters. `scripts/arena_map_test.py` reads the criteria's facts from the journals
+(`CRITERIA_SOURCE`, `--criteria-source journal|log`): `read_client_log`, the status metrics, `event_report`'s server
+lines, `parse_s1`, `airship_spans`, `lead_mode`; with a verbose server log it builds the report from the logs too and
+compares (`criteria_source_check`), and `scripts/lbm_fast_judge.py` fails a twin whose check is not `equal`
+(no check: said, not failed). `scripts/pubtest_report.py` replaces the public-test server analyzer
+(work/ARCH/pt/server.py, SRV/srvload.py, PERF/pt_server_resync.py stay as the history of pubtest1's numbers): journals
+only, the typed records where there are, else derived from the records every journal has, else '-'; its end column
+is the reason's category, so no member's name leaves the machine. `scripts/telemetry_report.py` reads the
+`telemetry` records. `scripts/probe.py` takes the final status from the journal. `scripts/journal_judge.py`
+`check_stats`: one `rewind` and one `rewind_base` per `rb=`, the depths summing to `resim=`, the stored line's
+`mism=` / `rb=` / `resim=` the records', no text cut. `journal_trace.py --selftest` passes again (its PLAYER plan
+lacked the `life` key since step TRL) and round-trips SCHEMA / STAT / CLOCK. Left on the log or stdout, by design:
+the log level check, the live harness cues, tools' stdout (`diverged`, VERDICT), file copies, human greps, and the
+perf one-offs in work/.
+
+**Proof** (`.local-tools/work/JNL`, the fix pass in `JNL/fix`, the gate in `JNL/gate`). The review's defects and
+their proof: the run compare hides no logical counter - the builder's diverging L6 pair (`pf_jnl1_1` /
+`pf_jnlq_1`) projected onto the fields now logical: 13 of 13 clients equal (the difference was in `rewind_base`'s and
+`status_clock`'s fields only), and a copy of a client journal with `mism` 0 written as 3 fails `--mode run` at its
+`status` record (`fix/compare_proof.py`). Fast LBM on the final tree, `jnlf6`: 38/38 twins FINAL exact, the 38 rows
+and every fail line equal to SLQ's `slqf1`, 38 of 38 'criteria from the journals vs the logs: equal', the 178
+journals equal to `slqf1`'s under `legacy`, 650 of 650 line kinds rendered from the journals equal to the logs'
+(`lines_proof.py`), 140 of 140 clients' 1 711 rewinds one for one with their log lines (the base, the depth, the
+ball) and with `rb=` / `resim=` (37 377 ticks) (`rewind_proof.py`); a second run of five arms, `jnlf7` (A0, A6B, A6M
+superseded, A10X, A5D): 10/10 FINAL exact, rows equal, its 50 journals equal to `jnlf6`'s under `run` and `replay`.
+The L6 re-drive verbose (`pf_jnl3_1`) and at the default level (`pf_jnlq3_1`): the 14 journals equal to each
+other's under `run` and `replay` and to SLQ's `pf_slq1_1` under `legacy`; from the records alone mism 0, `rb` 72 749
+= the rewind records, `resim` 663 877 = their depths, `sdiff` 767 queued = 767 classified, in both runs, and each
+rewind one for one with its log line; this pair did not diverge (`pf_jnl3_1`'s 72 749 bases and depths equal to the
+builder's `pf_jnl1_1`, `pf_jnl2_1` and `pf_jnlq2_1`, two differing from `pf_jnlq_1`'s), so defect 1's proof is the
+projection and the planted `mism` above; `telemetry_report.py` from the journal equal to the old reader on the
+verbose log. The periodic status line: a coordinated run's headless client reports once (its 5 s report clock is the
+wall clock, and a coordinated run is short in it), so a real-time A0 run (`jnlrt1`, 25 s): each client's journal
+holds 6-7 `status_clock` records, their texts the log's status lines one for one, and one `status` record; a
+real-clock run's TICK `ms` differ (the retail L12 runs of SLQ's and this gate: 1 564 TICK records differ), which is
+why `run` needs the virtual clock. A server capture replay (`jnlcap2`, `run_capture.sh`) at both levels: `capture_replay.py` SAME, the replayed
+journals equal to the live one under `replay` - its 109 class-1 records (81 `s1`, 28 `s5`) compared and equal, the
+typed records differing only in the 6 `s1_quorum` and 6 `step` ones - and under `run`. The public test
+(`D:/repos/bmmo-pubtest1`, read with `python -I`, aggregates only; the 30 server journals predate the step):
+`pubtest_report.py`'s columns as before the fix, against the frozen log analyzer's 18 public sessions: minutes, the
+input delay and the raises (116) equal in 18, the end in 17 (a crash: the log ends, the journal has no end note),
+the resyncs in 15 (the log 2 151, the journals 2 148: requests whose state was never sent), the tight ones in 16
+(1 638 / 1 636), N0 in 17, the peak in 16, player-hours within 0.03 in 12; substituted ticks an upper bound before
+the step (the journals 265 662, the log 190 332): a pre-step journal cannot tell the ticks a resync leaves unnumbered,
+which `resync_request` records now; the round trip, the resync MB and the step time were never in a journal ('-').
+Gate (`gate/run_gate.sh`): 860/860 and `journal_trace.py --selftest`; x64, x86 and the Arch server at one build id; retail at K = 20, L12 and L11 at human key rates (`jnlg_l12_h_150_1`, `jnlg_ctl_h_150_1`): 0 mismatches, FINAL rows bit-equal to `r6on`'s with L11's 32 trafo pieces, the server log verbose, `refs=` faults 0 (from the log); every retail client journal carries the typed records (L12 23 / 58 rewinds with their bases and 26 windows, L11 61 / 91 and 72), `check_stats` PASS on all four, from the records mism 0, `rb` = the rewind records, `resim` = their depths (546, 1 406, 1 450, 2 212), `sdiff` queued = classified (2, 4, 11, 13), the journal's status metrics equal to the log's last status line (its full text differs in `remotes=`, 1 in the journal's, written before the end's teardown, 0 in the log's, printed after it); both retail server journals carry their kinds (`link`, `ready`, `s1`, `s1_quorum`, `s5`, `step`, `telemetry`, `ghost`) and `pubtest_report.py` reads its row from each alone (the L12 one by hand after the gate, from the same file: the gate's newest-file pick raced the file's mtime; fixed to a marker).
+
+**Cost.** `stat()` builds the payload and appends it to the segment: 0.18-0.20 us a rewind record, 0.45-0.50 us a
+window record (`stat_bench.cpp`, against 1.6-2.4 us a note); a rewind now writes two. The most typed records
+measured in one tick: a client's 3 (2.5 kB: the end's status pair and one more), a server's 22 (an S1 summary tick; 13 members on L6: 29).
+Size against SLQ's runs: the fast LBM's client journals +0.09 % raw / +0.42 % on disk, the server's +0.22 % / +0.42 %;
+the L6 re-drive's clients +8.6 % raw / +9.5 % on disk (72 749 rewinds, two records each), its server +7.1 % / +1.6 %.
+
+**Not done** (left out rather than recorded unproven): the lobby journal (J7, the user's call); `rewind_cost`,
+`frame`, `report` (the process counters), the client's `config` and `telemetry`, `boot`, `base_due`, the end's flagged
+/ rejected counts and the leave reason; `refs=` (the reference poses' counters) is in no record - the gate reads it
+from the log; the criteria still parse the status line's text (`status_clock.text`) rather than the `status`
+record's fields, and `session_facts` renders a spawn ghost's ball as `?`; the harness's default stays verbose and
+its join cue the verbose line; `srtj_judge.py`, the per-step `run_gate.sh`, `ghost_state.py`,
+`classify_rollbacks.py`, `pre_rollback_error.py`, `moved_own_sector.py`, `server_client_drift.py` and
+`recipe_run.anchored` stay on the logs (their records exist now: rewind, ghost); the harness builds each report
+twice while the journal-vs-log proof lasts (an arm 45 s -> 61 s).
+
+**Not exercised:** a retail K7 capture replay with the new records (`K7/replay.py`'s record compare ran only on an
+older pair, `k7f_l11_raised` client 1: equal with the bodies as sets, 1 281 of 10 336 records differ by position
+without); a retail session that crashes (retail prints and journals its status line at the end only); a headless
+client killed between reports; a text cut at 65 535 bytes outside the selftest; the `resync_request` kinds `start`,
+`again` and the legacy full snapshot's (the runs made 32 `resync` and 6 `join`); `s1`'s raise / lead lines (they
+carry `rtt=`) and lead acks under a capture replay (`jnlcap2` is an A0 arm with no lateness or lead
+record), and the arrival trace landing in `s1_quorum`; `lbm_fast_judge` failing a twin on a check that is not
+`equal` (every check was `equal`); the debug build's value-count assert (every build was Release; a parser found
+every call site's count equal to its kind's); the gate script's marker-based server-journal pick (changed after the
+gate ran); a run with snapshots on; the fast LBM's arms at the default log level; the wire check (no wire change);
+the 8845HS cost.

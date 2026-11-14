@@ -479,7 +479,7 @@ namespace bmmo::session {
                     return recorded_input_at(entity, tick, out);
                 };
                 const scope_guard keep_cells = keep_live_cells();
-                if (rewind_world(f.until - 1, now, input_at,
+                if (rewind_world(f.until - 1, now, input_at, rewind_cause::spawn_forget,
                                  "spawn ghost group " + f.group + " forgotten at tick " + std::to_string(f.until)))
                     continue;
             }
@@ -614,7 +614,7 @@ namespace bmmo::session {
         // A stamp inside the last exact resync's re-step reaches as deep as
         // that re-step did, as an input correction there does (step A3): the
         // events of the window arrive with its frames, behind the state.
-        if (rewind_world(event_tick - 1, now, input_at, reason, life_rewind_reach(event_tick))) {
+        if (rewind_world(event_tick - 1, now, input_at, rewind_cause::lifecycle, reason, life_rewind_reach(event_tick))) {
             ++s.life_rewinds_;
             s.life_rewind_depth_ += now - (event_tick - 1);
             drop_carried_own_replay(event_tick - 1, false);
@@ -768,7 +768,8 @@ namespace bmmo::session {
             // every correction after it, so a pending replay from there on
             // is carried too.
             uint32_t restored = anchor;
-            rolled = rewind_world(anchor, now, input_at, reason, life_rewind_reach(anchor + 1), &restored);
+            rolled = rewind_world(anchor, now, input_at, rewind_cause::lifecycle, reason, life_rewind_reach(anchor + 1),
+                                  &restored);
             if (rolled) {
                 ++s.life_rewinds_;
                 s.life_rewind_depth_ += now - anchor;
@@ -2121,9 +2122,14 @@ namespace bmmo::session {
         const uint32_t now = current_tick();
         const uint32_t stamp = msg.origin_tick;
         const std::string head = "own death moved " + std::to_string(stamp) + " -> " + std::to_string(msg.tick);
+        // Step JNL: each outcome's line, in the log and as an own_death record.
+        const auto say = [&](const std::string& line) {
+            logf("%s", line.c_str());
+            journal_.writer().stat(now, stat_kind::own_death, {stamp, msg.tick, now, line});
+        };
         const auto resync = [&](const std::string& why) {
             ++s.own_death_moves_resynced_;
-            logf("%s at local tick %u: %s, resync", head.c_str(), now, why.c_str());
+            say(textf("%s at local tick %u: %s, resync", head.c_str(), now, why.c_str()));
             journal_.note(head + ": " + why + ", resync");
             request_resync("own death moved: resync", true);
         };
@@ -2145,8 +2151,8 @@ namespace bmmo::session {
             const uint32_t end = own_beam_end(beam);
             if (end == before) {
                 ++s.own_deaths_kept_;
-                logf("%s (a beam) at local tick %u: its Physicalize (applied %u) replaced the body first: nothing to move",
-                     head.c_str(), now, beam.applied);
+                say(textf("%s (a beam) at local tick %u: its Physicalize (applied %u) replaced the body first: nothing to move",
+                          head.c_str(), now, beam.applied));
                 return;
             }
             std::string refused = static_cast<int32_t>(end - now) > 0 ? "the beam's old body ends after the live tick"
@@ -2163,7 +2169,7 @@ namespace bmmo::session {
                                                                      + std::to_string(static_cast<int>(now - (before - 1))) + ")");
             ++s.own_deaths_moved_;
             ++s.own_pairs_moved_;
-            logf("%s at local tick %u: rewound to %u in the frame's batch", why.c_str(), now, before - 1);
+            say(textf("%s at local tick %u: rewound to %u in the frame's batch", why.c_str(), now, before - 1));
             journal_.note(why);
             return;
         }
@@ -2190,11 +2196,11 @@ namespace bmmo::session {
         if (end == before) {
             ++s.own_deaths_kept_;
             if (pair && pair->state == own_life::verdict::sent)
-                logf("%s at local tick %u: its pair's birth is unanswered (counted at its stamp): moved with that "
-                     "birth's echo", head.c_str(), now);
+                say(textf("%s at local tick %u: its pair's birth is unanswered (counted at its stamp): moved with that "
+                          "birth's echo", head.c_str(), now));
             else
-                logf("%s at local tick %u: a birth of ours ended the body at the server first (applied %u): nothing to move",
-                     head.c_str(), now, end);
+                say(textf("%s at local tick %u: a birth of ours ended the body at the server first (applied %u): nothing to move",
+                          head.c_str(), now, end));
             return;
         }
         {
@@ -2215,7 +2221,7 @@ namespace bmmo::session {
             return resync("past the reach (depth " + std::to_string(static_cast<int>(now - (before - 1))) + ")");
         ++s.own_deaths_moved_;
         if (pair && pair->moved()) ++s.own_pairs_moved_;
-        logf("%s at local tick %u: rewound to %u in the frame's batch", why.c_str(), now, before - 1);
+        say(textf("%s at local tick %u: rewound to %u in the frame's batch", why.c_str(), now, before - 1));
         journal_.note(why);
     }
 
@@ -4147,7 +4153,7 @@ namespace bmmo::session {
             return recorded_input_at(entity, tick, out);
         };
         const scope_guard keep_cells = platform_.keep_live_cells(*this);
-        if (!rewind_world(anchor, now, input_at, reason)) {
+        if (!rewind_world(anchor, now, input_at, rewind_cause::own_move, reason)) {
             // The body set put back the way the server has it, then the
             // resync (a refusal leaves the world at the live tick).
             resync_own_life(life, made, applied, "the rewind to " + std::to_string(anchor) + " was refused");

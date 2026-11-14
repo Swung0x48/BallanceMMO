@@ -75,6 +75,13 @@
 //                     `tick` on (session_remote_input_msg::wait); `tick` is
 //                     the server's step tick, in a client's file too (the
 //                     header's msg.tick, not the client's own tick then)
+//   tag 10 SCHEMA     (step JNL, version 10 still): the typed kinds this
+//                     writer records, written right after the HEADER
+//   tag 11 STAT       a typed record of a logical kind (journal_stats.hpp)
+//   tag 12 CLOCK      a typed record of a clock or link kind: what a
+//                     run-to-run compare skips
+//                     (journal_stats.hpp has the layout; an older reader
+//                     skips all three as unknown tags)
 //
 // Every record but the header carries a tick as its first field, so a reader
 // groups the file by tick without understanding a single tag.  The length
@@ -91,15 +98,18 @@
 // See docs/session-journal-plan.md and design 9.15 for the capture points.
 
 #include <algorithm>
+#include <cassert>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <initializer_list>
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <tuple>
 #include <vector>
@@ -108,12 +118,14 @@
 #include "../physics/physics_rt_api.h"
 #include "../physics/world_hash.hpp"
 #include "io_queue.hpp"
+#include "journal_stats.hpp"
 #include "zstd_stream.hpp"
 
 namespace bmmo::session {
     enum class journal_tag : uint8_t {
         header = 0, player = 1, input = 2, event = 3, tick = 4,
-        checkpoint = 5, note = 6, correction = 7, resync = 8, wait = 9
+        checkpoint = 5, note = 6, correction = 7, resync = 8, wait = 9,
+        schema = 10, stat = 11, clock = 12   // step JNL
     };
     enum class journal_kind : uint8_t { server = 0, client = 1 };
 
@@ -140,9 +152,12 @@ namespace bmmo::session {
     constexpr const char* kServerJournalExtension = ".bmjs";
     constexpr const char* kClientJournalExtension = ".bmjc";
     constexpr const char* kLegacyJournalExtension = ".bmjr";
-    constexpr uint8_t kJournalMaxTag = static_cast<uint8_t>(journal_tag::wait);
+    constexpr uint8_t kJournalMaxTag = static_cast<uint8_t>(journal_tag::clock);
     // A str never exceeds this; a longer one makes the record invalid.
     constexpr size_t kJournalMaxString = 4096;
+    // Step JNL: a STAT / CLOCK text value's limit (the whole u16 length: the
+    // status line is 2.4 kB at 13 players); one of exactly this size was cut.
+    constexpr size_t kJournalMaxText = 0xffff;
     // A checkpoint never carries more bodies than this (about 600 KB of
     // payload); a bigger count means a corrupt file, not a bigger world.
     constexpr size_t kJournalMaxCheckpointBodies = 4096;
@@ -300,6 +315,47 @@ namespace bmmo::session {
         double server_position[3] = {};
     };
 
+    // Step JNL: one value of a STAT / CLOCK record as the writer takes it:
+    // an integer, a double or a text (a view: the record is built before the
+    // call returns).
+    struct journal_value {
+        char type = 'i';
+        int64_t i = 0;
+        double f = 0.0;
+        std::string_view s;
+        journal_value(int v) : i(v) {}
+        journal_value(long v) : i(v) {}
+        journal_value(long long v) : i(v) {}
+        journal_value(unsigned v) : i(static_cast<int64_t>(v)) {}
+        journal_value(unsigned long v) : i(static_cast<int64_t>(v)) {}
+        journal_value(unsigned long long v) : i(static_cast<int64_t>(v)) {}
+        journal_value(double v) : type('f'), f(v) {}
+        journal_value(std::string_view v) : type('s'), s(v) {}
+        journal_value(const std::string& v) : type('s'), s(v) {}
+        journal_value(const char* v) : type('s'), s(v ? v : "") {}
+    };
+
+    // A STAT / CLOCK record as read back (the values in the kind's order).
+    struct journal_stat_value {
+        char type = 'i';
+        int64_t i = 0;
+        double f = 0.0;
+        std::string s;
+    };
+    struct journal_stat {
+        uint32_t tick = 0;
+        uint16_t kind = 0;
+        bool clock = false;   // tag 12
+        std::vector<journal_stat_value> values;
+    };
+    // One kind of a file's SCHEMA.
+    struct journal_schema_kind {
+        uint16_t id = 0;
+        std::string name;
+        uint8_t klass = 0;
+        std::vector<std::pair<std::string, char>> fields;
+    };
+
     // Serialization helpers.  Explicit shifts and masks rather than a memcpy of
     // the whole value: this code only ever runs on little-endian x86/x64/ARM64,
     // but the file must not depend on that.
@@ -321,6 +377,16 @@ namespace bmmo::session {
 
         inline void write_i32(std::string& out, int32_t v) { write_u32(out, static_cast<uint32_t>(v)); }
 
+        // Step JNL: a STAT value's integer, zigzag LEB128.
+        inline void write_varint(std::string& out, int64_t v) {
+            uint64_t z = (static_cast<uint64_t>(v) << 1) ^ static_cast<uint64_t>(v >> 63);
+            while (z >= 0x80) {
+                out.push_back(static_cast<char>((z & 0x7f) | 0x80));
+                z >>= 7;
+            }
+            out.push_back(static_cast<char>(z));
+        }
+
         inline void write_f32(std::string& out, float v) {
             uint32_t bits = 0;
             std::memcpy(&bits, &v, sizeof(bits));
@@ -333,10 +399,10 @@ namespace bmmo::session {
             write_u64(out, bits);
         }
 
-        inline void write_str(std::string& out, const std::string& v) {
-            const size_t size = std::min(v.size(), kJournalMaxString);
+        inline void write_str(std::string& out, std::string_view v, size_t limit = kJournalMaxString) {
+            const size_t size = std::min(v.size(), limit);
             write_u16(out, static_cast<uint16_t>(size));
-            out.append(v, 0, size);
+            out.append(v.data(), size);
         }
 
         // A fixed-size char array of the bridge structs: written as the str up
@@ -411,6 +477,18 @@ namespace bmmo::session {
 
             int32_t i32() { return static_cast<int32_t>(u32()); }
 
+            int64_t varint() {
+                uint64_t z = 0;
+                for (int shift = 0; shift < 64; shift += 7) {
+                    const uint8_t b = u8();
+                    if (!ok) return 0;
+                    z |= static_cast<uint64_t>(b & 0x7f) << shift;
+                    if (!(b & 0x80)) return static_cast<int64_t>(z >> 1) ^ -static_cast<int64_t>(z & 1);
+                }
+                ok = false;
+                return 0;
+            }
+
             float f32() {
                 const uint32_t bits = u32();
                 float v = 0.0f;
@@ -425,10 +503,10 @@ namespace bmmo::session {
                 return v;
             }
 
-            std::string str() {
+            std::string str(size_t limit = kJournalMaxString) {
                 const uint16_t length = u16();
                 if (!ok) return {};
-                if (length > kJournalMaxString) {
+                if (length > limit) {
                     ok = false;
                     return {};
                 }
@@ -573,6 +651,29 @@ namespace bmmo::session {
             write_u8(out, h.mechanism_slots);
         }
 
+        // Step JNL: the SCHEMA record of a writer of `side` (STAT_SERVER /
+        // STAT_CLIENT): every kind of journal_stats.hpp's table it records.
+        inline std::string schema_payload(uint32_t first_tick, uint8_t side) {
+            std::string out;
+            write_u32(out, first_tick);
+            uint16_t n = 0;
+            for (const auto& k: kStatKinds) n += (k.side & side) ? 1 : 0;
+            write_u16(out, n);
+            for (uint16_t id = 0; id < static_cast<uint16_t>(stat_kind::count); ++id) {
+                const auto& k = kStatKinds[id];
+                if (!(k.side & side)) continue;
+                write_u16(out, id);
+                write_str(out, k.name);
+                write_u8(out, static_cast<uint8_t>(k.klass));
+                write_u8(out, k.field_count);
+                for (uint8_t f = 0; f < k.field_count; ++f) {
+                    write_str(out, k.fields[f].name);
+                    write_u8(out, static_cast<uint8_t>(k.fields[f].type));
+                }
+            }
+            return out;
+        }
+
         inline bool read_header_payload(const std::string& payload, journal_header& h) {
             cursor in(payload);
             const uint8_t kind = in.u8();
@@ -714,6 +815,11 @@ namespace bmmo::session {
             std::string payload;
             journal_detail::write_header_payload(payload, header);
             append_record(start, journal_tag::header, payload);
+            // Step JNL: the kinds this file records, in the header's chunk
+            // (a crashed file still describes itself).  Without set_stats
+            // there is no SCHEMA and stat() writes nothing.
+            side_ = !stats_next_ ? 0 : header.kind == journal_kind::server ? STAT_SERVER : STAT_CLIENT;
+            if (side_) append_record(start, journal_tag::schema, journal_detail::schema_payload(header.first_tick, side_));
             bytes_ += start.size();
             sink_.append(std::move(start), true);
             if (!sink_.async()) {
@@ -733,6 +839,10 @@ namespace bmmo::session {
         // writer, and the size cap counts the bytes on disk.  The hosts' session
         // journals (the server's, the clients'); off for the tests and the SimTool.
         void set_compressed(bool on) { compress_next_ = on; }
+        // Step JNL: the next open() writes a SCHEMA and stat() records -
+        // the hosts' session journals; off for the tests and the SimTool,
+        // whose files keep the bytes they had.
+        void set_stats(bool on) { stats_next_ = on; }
         bool compressed() const { return compressed_; }
 
         bool is_open() const { return sink_.is_open(); }
@@ -907,6 +1017,28 @@ namespace bmmo::session {
             record(journal_tag::wait, payload);
         }
 
+        // Step JNL: a typed record of `kind` (journal_stats.hpp) at `tick`,
+        // the writer's current tick: STAT for a logical kind, CLOCK for a
+        // clock or link kind.  `values` in the kind's field order (a debug
+        // build asserts the count); each is written as its field's type (a
+        // missing one as 0 / "", an extra one dropped), so a caller cannot
+        // write a record its SCHEMA does not describe.
+        void stat(uint32_t tick, stat_kind kind, std::initializer_list<journal_value> values) {
+            stat_values(tick, kind, values.begin(), values.size());
+        }
+        // The same with values built at run time (a record posted from
+        // another thread: session_runner::journal_clock).
+        void stat(uint32_t tick, stat_kind kind, const std::vector<journal_stat_value>& owned) {
+            std::vector<journal_value> values;
+            values.reserve(owned.size());
+            for (const auto& v: owned) {
+                if (v.type == 's') values.emplace_back(std::string_view(v.s));
+                else if (v.type == 'f') values.emplace_back(v.f);
+                else values.emplace_back(v.i);
+            }
+            stat_values(tick, kind, values.data(), values.size());
+        }
+
         // Explicit and blocking: everything queued is written and handed to
         // the OS.  No session path calls it (step SIO).
         void flush() {
@@ -926,6 +1058,32 @@ namespace bmmo::session {
 
     private:
         bool writable() const { return sink_.is_open() && !capped_; }
+
+        void stat_values(uint32_t tick, stat_kind kind, const journal_value* values, size_t n) {
+            const auto& info = stat_info(kind);
+            assert(n == info.field_count && "a stat() call passes its kind's fields, in order");
+            if (!writable()) return;
+            if (!(info.side & side_)) return;
+            last_tick_ = tick;
+            std::string payload;
+            journal_detail::write_u32(payload, tick);
+            journal_detail::write_u16(payload, static_cast<uint16_t>(kind));
+            for (uint8_t f = 0; f < info.field_count; ++f) {
+                const journal_value* v = f < n ? values + f : nullptr;
+                switch (info.fields[f].type) {
+                    case 'f':
+                        journal_detail::write_f64(payload, !v ? 0.0 : v->type == 'f' ? v->f : static_cast<double>(v->i));
+                        break;
+                    case 's':
+                        journal_detail::write_str(payload, v && v->type == 's' ? v->s : std::string_view(), kJournalMaxText);
+                        break;
+                    default:
+                        journal_detail::write_varint(payload, !v ? 0 : v->type == 'f' ? static_cast<int64_t>(v->f) : v->i);
+                        break;
+                }
+            }
+            record(info.klass == stat_class::logical ? journal_tag::stat : journal_tag::clock, payload);
+        }
 
         static std::string note_payload(uint32_t tick, const std::string& text) {
             std::string payload;
@@ -1038,6 +1196,8 @@ namespace bmmo::session {
         uint32_t last_tick_ = 0;
         bool capped_ = false;
         bool compress_next_ = false, compressed_ = false;
+        bool stats_next_ = false;
+        uint8_t side_ = 0;   // step JNL: the SCHEMA's side (0: none written, stat() writes nothing)
         std::string segment_;        // compressed: the records since segment_tick_, not queued yet
         uint32_t segment_tick_ = 0;
     };
@@ -1059,6 +1219,7 @@ namespace bmmo::session {
         std::vector<journal_correction> corrections;
         std::vector<journal_resync> resyncs;   // version 4
         std::vector<journal_wait> waits;       // version 7
+        std::vector<journal_stat> stats;       // step JNL: STAT and CLOCK, file order
     };
 
     struct journal {
@@ -1069,12 +1230,87 @@ namespace bmmo::session {
         std::vector<journal_player> initial_players;
         std::vector<journal_tick> ticks;
         std::vector<journal_note> notes;   // every NOTE, file order
+        // Step JNL: the file's SCHEMA (empty: written before the step - no
+        // kind recorded, which is not the same as none happened).
+        std::vector<journal_schema_kind> schema;
+        bool has_schema = false;
         uint64_t records = 0;              // records read, header and unknown ones included
         uint64_t unknown_records = 0;
         uint64_t bytes_read = 0;
         uint64_t bytes_dropped = 0;
         std::string warning;               // truncation, unknown tags, a bad payload, duplicate TICKs
     };
+
+    // Step JNL: a SCHEMA payload, the kind of a STAT / CLOCK record in it,
+    // that record's values, and its text for a listing (SimTool --list:
+    // "<kind> name=value ...").  A STAT whose kind the file's SCHEMA does not
+    // describe does not parse.
+    inline bool read_schema_payload(const std::string& payload, std::vector<journal_schema_kind>& out) {
+        journal_detail::cursor in(payload);
+        in.u32();   // first_tick
+        const uint16_t n = in.u16();
+        std::vector<journal_schema_kind> kinds;
+        for (uint16_t k = 0; in.ok && k < n; ++k) {
+            journal_schema_kind kind;
+            kind.id = in.u16();
+            kind.name = in.str();
+            kind.klass = in.u8();
+            const uint8_t fields = in.u8();
+            for (uint8_t f = 0; in.ok && f < fields; ++f) {
+                std::string name = in.str();
+                const char type = static_cast<char>(in.u8());
+                if (type != 'i' && type != 'f' && type != 's') in.ok = false;
+                kind.fields.emplace_back(std::move(name), type);
+            }
+            kinds.push_back(std::move(kind));
+        }
+        if (!in.ok) return false;
+        out = std::move(kinds);
+        return true;
+    }
+
+    inline const journal_schema_kind* find_schema_kind(const std::vector<journal_schema_kind>& schema, uint16_t id) {
+        for (const auto& k: schema)
+            if (k.id == id) return &k;
+        return nullptr;
+    }
+
+    inline bool read_stat_payload(const std::string& payload, bool clock, const std::vector<journal_schema_kind>& schema,
+                                  journal_stat& st) {
+        journal_detail::cursor in(payload);
+        st.tick = in.u32();
+        st.kind = in.u16();
+        st.clock = clock;
+        const journal_schema_kind* kind = find_schema_kind(schema, st.kind);
+        if (!in.ok || !kind) return false;
+        st.values.clear();
+        for (const auto& field: kind->fields) {
+            journal_stat_value v;
+            v.type = field.second;
+            if (v.type == 'i') v.i = in.varint();
+            else if (v.type == 'f') v.f = in.f64();
+            else v.s = in.str(kJournalMaxText);
+            st.values.push_back(std::move(v));
+        }
+        return in.ok;
+    }
+
+    inline std::string stat_text(const journal_stat& st, const journal_schema_kind& kind) {
+        std::string out = kind.name;
+        char number[32];
+        for (size_t f = 0; f < kind.fields.size() && f < st.values.size(); ++f) {
+            const auto& v = st.values[f];
+            out += ' ' + kind.fields[f].first + '=';
+            if (v.type == 's') {
+                out += v.s;
+            } else {
+                if (v.type == 'f') std::snprintf(number, sizeof(number), "%.17g", v.f);
+                else std::snprintf(number, sizeof(number), "%lld", static_cast<long long>(v.i));
+                out += number;
+            }
+        }
+        return out;
+    }
 
     // Streams the file: the header is parsed here, every other record is handed
     // to `on_record` as raw payload bytes (return false to stop the scan).
@@ -1421,6 +1657,22 @@ namespace bmmo::session {
                     auto& group = groups[w.tick];
                     group.tick = w.tick;
                     group.waits.push_back(w);
+                    ++delivered;
+                    return true;
+                }
+                case journal_tag::schema: {
+                    if (!read_schema_payload(payload, out.schema)) break;
+                    out.has_schema = true;
+                    ++delivered;
+                    return true;
+                }
+                case journal_tag::stat:
+                case journal_tag::clock: {
+                    journal_stat st;
+                    if (!read_stat_payload(payload, tag == journal_tag::clock, out.schema, st)) break;
+                    auto& group = groups[st.tick];
+                    group.tick = st.tick;
+                    group.stats.push_back(std::move(st));
                     ++delivered;
                     return true;
                 }

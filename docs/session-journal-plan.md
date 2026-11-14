@@ -98,6 +98,54 @@ Reader: `bool read_journal(path, journal&, std::string& error)` returning a
 `journal_tick` groups the records that preceded each `TICK`. Reject a truncated
 tail cleanly (keep the ticks read so far, report how many bytes were dropped).
 
+### Typed records (step JNL, 2026-11-13; version 10 unchanged)
+
+Logs are for people; every number an analysis, a gate or a criterion reads is in the journal. Three tags carry
+what used to live only in log lines (`BallanceMMOCommon/include/session/journal_stats.hpp` holds the one table):
+
+| tag | payload |
+|---|---|
+| `SCHEMA` (10) | `u32 first_tick, u16 n`, then per kind `u16 id, str name, u8 class, u8 nfields` and per field `str name, u8 type` (`'i'` zigzag LEB128 integer, `'f'` f64, `'s'` a str of up to 65 535 bytes, `kJournalMaxText`; one of exactly that size was cut). Written with the HEADER, in its chunk. |
+| `STAT` (11) | `u32 tick, u16 kind`, the values in the kind's field order: a kind of class 0, logical (follows from the ticks) |
+| `CLOCK` (12) | the same, for class 1 (a value that follows a recorded clock site: exact under the virtual clock and a capture replay) and class 2 (a raw clock read, a link's status, or a record whose tick thread timing sets) |
+
+A file describes itself: a reader takes the names from its SCHEMA, and a kind absent from it means *not recorded*
+(never 0). Only the hosts' session journals write them (`journal_writer::set_stats`, set where the files are made
+compressed); the tests' and SimTool's files keep the bytes they had. An older reader skips the three tags as
+unknown ones and reads the rest (an old SimTool says "unknown records skipped" on stderr).
+
+Server kinds: `server_config` (patience, lead adjust), `ready` (players, first tick), `resync_state` (the state's
+rows and bytes, raw and framed, its reference, the request's last full snapshot and counted-through tick),
+`resync_cost` (capture / coding time, raw), `resync_wire` (frame and wire bytes, sent; raw), `resync_request` (each
+request as the runner takes it: player, base, last full snapshot, counted-through tick, `why` - `resync` (the
+member's SessionResync), `start` (the start handshake's), `again` (a base the runner stepped first, answered again)
+or `join` (a late joiner's state) - and `state`, 0 for the legacy full snapshot; raw), `lead` (a SessionLead from
+the decision: k, decided, cap, binding, at, held-from, effective, dropped, epoch, sector bound), `lateness` (a raise
+or lower, its rule, streak, offset, route), `s1` (the lateness meter's `[session N] S1 ...` lines - decisions,
+resets, lead acks, patience, clock skew - as their key=value text; class 1), `s1_quorum` (its quorum summary and
+arrival lines, whose quantiles are raw clock reads; raw), `step` (step time p50 / p99 / max per 660 ticks; raw),
+`link` (each member's round trip at the start, the worst, the input delay; raw), `telemetry` (a member's
+SessionTelemetry as received; raw), `s5` (an event's intake-to-send delay, written on the runner's thread as it is
+relayed; class 1), `ghost` (a ball's spawn ghost made / solid). Client kinds: `rewind` (what a rewind was asked:
+anchor, tick, cause code, the ball an input correction names), `rewind_base` (right after it: the base its restore
+was and the ticks it re-simulated; raw - step LVR's wall-clock gate can restore a light anchor's whole record
+before the one asked), `window` (the 60-tick window line's numbers and its per-player tails), `status` (the status
+line's counters but `resim=`, at the session's end before the journal closes), `status_clock` (`resim=`, the clock
+values and the whole line, at the end and at each headless 5 s report; raw), `own_death` (each outcome line of a
+late own death), `stall` (a headless `--stall-ms` stall).
+
+The resync note keeps its rows and bytes; its capture and coding times (raw reads that differed between any two
+runs) moved to `resync_cost`.
+
+Compares: `scripts/journal_compare.py A B --mode run|replay|legacy [--checkpoint-sets]` (files or two
+directories; nothing to compare is an error) walks the records decompressed and names the first that differs.
+`run` (two runs on the virtual clock: a real-clock run's header `utc_ms` and TICK `ms` are the wall clock's) skips
+CLOCK, masks the build id and drops a pre-step resync note's times; `replay` (a capture replay) skips only class-2
+CLOCK; `legacy` (against a journal written before the step) skips the three tags as well; `--checkpoint-sets`
+compares a checkpoint's bodies as a set (a retail capture replay numbers the objects in another order). `scripts/session_facts.py` reads the typed records (and
+renders them as the lines the log readers parse); `scripts/pubtest_report.py` and `scripts/telemetry_report.py`
+read journals only.
+
 ## Config
 
 ```yaml

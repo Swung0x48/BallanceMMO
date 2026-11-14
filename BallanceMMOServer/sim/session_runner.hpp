@@ -453,8 +453,14 @@ namespace bmmo::sim {
         // `claim`: the state the member's SessionResync says it decoded last
         // (protocol 34); the state is coded against it when it is the one
         // this runner sent that member last, plain otherwise.
+        // `last_full` / `counted_through` / `why` (step JNL): the server's
+        // view of the request (the last full snapshot the member had, the
+        // newest tick its old epoch's held_total counted, and what asked:
+        // "resync", "start", "again" or "join" - a string literal), for the
+        // journal's resync_request record.
         void request_resync_state(uint32_t session, uint32_t player, uint32_t base,
-                                  bmmo::session::resync_ref_id claim = {});
+                                  bmmo::session::resync_ref_id claim = {}, uint32_t last_full = 0,
+                                  uint32_t counted_through = 0, const char* why = "join");
         // Diagnostics through `out` (from the runner's thread; the log
         // callback when unset): the server's sessions command.
         void describe(uint32_t session, std::function<void(const std::string&)> out = {});
@@ -462,6 +468,14 @@ namespace bmmo::sim {
         // next (from any thread; posted).  Step G5: the first BodyRevived a
         // member sent, dropped (the union, always on since step UOFF).
         void journal_note(uint32_t session, const std::string& text);
+        // Step JNL: a CLOCK record (a clock or link kind) of the session at
+        // the tick the runner simulates next: written now on the runner's
+        // thread (a callback's - s5: a clock site's value at a point a
+        // capture replays), posted like journal_note from another thread
+        // (its tick then set by thread timing - which is why no logical kind
+        // comes this way).
+        void journal_clock(uint32_t session, bmmo::session::stat_kind kind,
+                           std::vector<bmmo::session::journal_stat_value> values);
 
         // Readable from any thread: the tick the session will simulate next
         // (0 when unknown) and whether it is ticking.
@@ -704,6 +718,7 @@ namespace bmmo::sim {
             struct resync_request {
                 uint32_t base = 0;
                 bmmo::session::resync_ref_id claim;
+                uint32_t last_full = 0, counted_through = 0;   // step JNL: the request as the server saw it
             };
             std::map<uint32_t, resync_request> resync_requests;
             // Protocol 34: the body of the last state sent to each player and
@@ -806,6 +821,12 @@ namespace bmmo::sim {
         void log(const std::string& text);
         void warn(const std::string& text);   // step SLQ: callbacks_.warn, else log
         void encode_resync_state(session_state& s, const bmmo::session::resync_ref_id& claim, resync_state_out& out);
+        // Step JNL: an S1 line of the lateness meter ("[session N] S1 kind
+        // key=value ...", every one goes through log()) as a CLOCK s1 record
+        // of that session: its kind and the rest of the line (CLOCK: the
+        // quorum and lateness quantiles are clock-derived, the lead line has
+        // the link's round trip).
+        void s1_record(const std::string& text);
         void publish_state(const session_state& s);
         // Starts the session's deadline schedule and publishes it to the
         // cross-thread view (step RL1b: one place for both start paths).

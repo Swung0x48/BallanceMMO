@@ -30,11 +30,11 @@ def command_line(capture):
 
 
 def first_difference(a, b):
-    x, y = a.read_bytes(), b.read_bytes()
-    if x == y:
-        return None
-    n = next((i for i in range(min(len(x), len(y))) if x[i] != y[i]), min(len(x), len(y)))
-    return 'differs at byte %d (%d vs %d bytes)' % (n, len(x), len(y))
+    """None when the replay's journal equals the live one, record by record (journal_compare.py's replay mode:
+    only the raw clock and link records skipped, step JNL); else the first differing record."""
+    sys.path.insert(0, str(W / 'scripts'))
+    import journal_trace as jt
+    return jt.compare(a, b, 'replay')
 
 
 def newest(d, pattern):

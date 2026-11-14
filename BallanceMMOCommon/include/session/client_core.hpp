@@ -1994,6 +1994,12 @@ namespace bmmo::session {
         // The status line (the headless 5 s report and the session's end;
         // the retail F3 overlay), with the host's counters at their places.
         std::string status_text(const host_counters& h) const;
+        // Step JNL: the status line (returned, as status_text) into the
+        // journal: its clock values and the whole line as `status_clock`, and
+        // with `final` (the session's end, before the journal closes) its
+        // counters as the `status` record.  The headless 5 s report writes
+        // the line only (a client killed later keeps its last one).
+        std::string journal_status(const host_counters& h, bool final);
         // Step SDF: every queued end-of-replay script diff classified, so a
         // status line that follows counts them (a host calls it before its
         // own status_text; end() does, and a resync's trafo reconcile).
@@ -2227,10 +2233,14 @@ namespace bmmo::session {
         // history with no replay and still returns true; with the
         // session's snapshots off (step RC3, B5RX) on_snapshot's check no
         // longer runs, so this is where the re-anchor is asked for.
+        // Step JNL: each rewind that ran is a `rewind` record (`cause`; `body`:
+        // the ball an input correction names), written after the engine's
+        // cost meter closed; `reason` is the log line's text only.
         bool rewind_world(uint32_t anchor, uint32_t now,
                           const std::function<bool(const std::string& entity, uint32_t tick,
                                                    bmmo::session::input_frame& out)>& input_at,
-                          const std::string& reason, uint32_t reach = 0, uint32_t* restored = nullptr);
+                          rewind_cause cause, const std::string& reason, uint32_t reach = 0,
+                          uint32_t* restored = nullptr, std::string_view body = {});
 
         // Part two's forced own frames (E5; design 1.3 steps 11 and 21).
         // The forced frame of `tick` (a SessionLead's (c, E)), taken: the

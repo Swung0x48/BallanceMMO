@@ -151,7 +151,8 @@ namespace bmmo::session {
         if (has_own) s.own_replay_pacer_.ran();
         s.remote_replay_pacer_.ran();
         const uint32_t standard = s.rollback_.thresholds().max_resim_ticks;
-        if (rewind_world(anchor - 1, now, input_at, reason, reach > standard ? reach : 0)) {
+        if (rewind_world(anchor - 1, now, input_at, own ? rewind_cause::own_input : rewind_cause::input, reason,
+                         reach > standard ? reach : 0, nullptr, own ? std::string_view() : std::string_view(entity))) {
             if (reach > standard && now - (anchor - 1) > standard) ++s.resync_window_rewinds_;
             if (has_own) {
                 ++s.subst_rewinds_;
@@ -221,7 +222,7 @@ namespace bmmo::session {
             return recorded_input_at(name, tick, out);
         };
         const scope_guard keep_cells = keep_live_cells();
-        if (!rewind_world(anchor, now, input_at, "calibration")) return;
+        if (!rewind_world(anchor, now, input_at, rewind_cause::calibration, "calibration")) return;
         s.rewind_calibrated_ = true;
         drop_carried_own_replay(anchor, false);
         const auto& cost = s.rollback_.rewind_cost();
@@ -252,7 +253,7 @@ namespace bmmo::session {
         // timing of resync design 9 Q2); a depth within max_resim_ticks is
         // the rewind it always was.
         const uint32_t reach = depth > s.rollback_.thresholds().max_resim_ticks ? depth : 0;
-        if (rewind_world(anchor, now, input_at, "forced", reach)) {
+        if (rewind_world(anchor, now, input_at, rewind_cause::forced, "forced", reach)) {
             ++s.forced_rollbacks_;
             s.forced_rollback_depth_ += now - anchor;
             drop_carried_own_replay(anchor, false);
@@ -448,7 +449,7 @@ namespace bmmo::session {
             {
                 const scope_guard keep_cells = keep_live_cells();
                 rd.active = true;
-                const bool rolled = rewind_world(anchor, now, input_at, reason);
+                const bool rolled = rewind_world(anchor, now, input_at, rewind_cause::sector, reason);
                 rd.active = false;
                 // Re-derived through the live tick (a frozen world rewinds
                 // nothing and drops the history instead).

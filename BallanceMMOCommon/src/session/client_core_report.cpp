@@ -222,6 +222,7 @@ namespace bmmo::session {
                          d(now.own_moved, was.own_moved),
                          d(now.own_removed, was.own_removed), d(now.own_resynced, was.own_resynced),
                          d(now.superseded, was.superseded), d(now.replaced, was.replaced));
+            const size_t fixed = text.size();
             for (const auto& [player, hist]: s.window_lag_) {
                 text += " lag[" + std::to_string(player) + "]=";
                 bool comma = false;
@@ -231,8 +232,10 @@ namespace bmmo::session {
                     comma = true;
                 }
             }
+            const size_t lags = text.size();
             for (const auto& [player, n]: s.window_inrew_src_)
                 text += " inrew[" + std::to_string(player) + "]=" + std::to_string(n);
+            const size_t inrews = text.size();
             for (const auto& [player, margins]: s.window_sector_margins_) {
                 text += " sector-margin[" + std::to_string(player) + "]=";
                 for (size_t index = 0; index < margins.size(); ++index) {
@@ -240,11 +243,66 @@ namespace bmmo::session {
                     text += std::to_string(margins[index]);
                 }
             }
+            // Step JNL: the window as a record - the numbers of the line, and
+            // its per-player tails as the line has them (space-separated).
+            const std::string_view tail(text);
+            const auto piece = [&tail](size_t from, size_t to) {
+                return from == to ? std::string_view() : tail.substr(from + 1, to - from - 1);
+            };
+            journal_.writer().stat(tick, stat_kind::window,
+                {tick, d(now.inrew, was.inrew), d(now.inrew_depth, was.inrew_depth), d(now.life, was.life),
+                 d(now.life_depth, was.life_depth), d(now.forced, was.forced), d(now.forced_depth, was.forced_depth),
+                 d(now.snaprb, was.snaprb), d(now.snaprb_depth, was.snaprb_depth), d(now.snaps, was.snaps),
+                 d(now.resyncs_sent, was.resyncs_sent), d(now.resyncs_done, was.resyncs_done), now.rebases - was.rebases,
+                 d(now.relay_new, was.relay_new), d(now.relay_late, was.relay_late), d(now.relay_covered, was.relay_covered),
+                 d(now.subst_recv, was.subst_recv), d(now.subst_diff, was.subst_diff), d(now.subst_same, was.subst_same),
+                 d(now.subst_bodiless, was.subst_bodiless), d(now.subst_late, was.subst_late),
+                 d(now.substrew, was.substrew), d(now.substrew_depth, was.substrew_depth),
+                 d(now.subst_deferred, was.subst_deferred), d(now.subst_unseen, was.subst_unseen),
+                 d(now.subst_subsumed, was.subst_subsumed), d(now.subst_saved, was.subst_saved),
+                 d(now.lead_adj, was.lead_adj), s.lead_offset_, s.lead_slew_.outstanding(),
+                 d(now.birth_moved, was.birth_moved), d(now.echo_acked, was.echo_acked), d(now.echo_moved, was.echo_moved),
+                 d(now.echo_superseded, was.echo_superseded), d(now.echo_rejected, was.echo_rejected),
+                 d(now.echo_missing, was.echo_missing), d(now.own_moved, was.own_moved), d(now.own_removed, was.own_removed),
+                 d(now.own_resynced, was.own_resynced), d(now.superseded, was.superseded), d(now.replaced, was.replaced),
+                 piece(fixed, lags), piece(lags, inrews), piece(inrews, text.size())});
         }
         s.window_base_ = now;
         s.window_lag_.clear();
         s.window_inrew_src_.clear();
         s.window_sector_margins_.clear();
+        return text;
+    }
+
+    std::string session_client_core::journal_status(const host_counters& h, bool final) {
+        std::string text = status_text(h);
+        if (!journal_.journalling()) return text;
+        const auto& st = s.corrector_.stats();
+        const auto& rs = s.rollback_.stats();
+        const uint32_t tick = current_tick();
+        auto& w = journal_.writer();
+        if (final) {
+            double mech_max = 0.0;
+            for (const auto& [name, c]: s.mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
+            w.stat(tick, stat_kind::status,
+                   {tick, s.frames_since_anchor_, rs.mismatched, rs.rollbacks, rs.unmatched, st.hard,
+                    s.mechanism_hard_, rs.max_error, mech_max, s.input_starved_, s.worst_starved_, h.rebases, s.resyncs_sent_,
+                    s.resyncs_done_, s.snapshots_received_, s.snapshots_applied_, s.snapshots_stale_, s.relay_new_, s.relay_dup_,
+                    s.relay_parked_, s.relay_late_, s.relay_covered_, s.relay_lag_max_, relay_lag_p99(),
+                    s.mechanism_tracking_.known(), s.mechanism_tracking_.resolved(), s.subst_recv_, s.subst_diff_,
+                    s.subst_same_, s.subst_bodiless_, s.subst_rewinds_, s.subst_late_, s.lead_adjustments_,
+                    s.own_echo_acked_, s.own_echo_moved_, s.own_echo_superseded_, s.own_echo_rejected_, s.own_echo_missing_,
+                    s.own_births_moved_, s.own_births_removed_, s.own_moves_resynced_, s.own_remakes_, s.own_moves_other_,
+                    rs.script_restores, rs.script_restore_failures, rs.script_mismatches, rs.script_float_mismatches,
+                    h.script_reset_skips, s.resync_holds_, s.input_rewinds_, s.life_rewinds_, s.forced_rollbacks_,
+                    s.rollback_.defer_script_diffs() ? 1 : 0, rs.script_diffs_queued, rs.script_diffs_classified,
+                    rs.script_diffs_forced, rs.script_diffs_unclassified, rs.script_diff_queue_max, s.script_diffs_rewound_});
+        }
+        w.stat(tick, stat_kind::status_clock,
+               {rs.resim_ticks, rs.restore_us / 1000.0, rs.replay_us / 1000.0, rs.rewind_us_max / 1000.0,
+                rs.capture_us / 1000.0,
+                s.lead_count_ ? static_cast<double>(s.lead_sum_) / static_cast<double>(s.lead_count_) : 0.0,
+                static_cast<double>(s.resync_hold_ms_max_), text});
         return text;
     }
 

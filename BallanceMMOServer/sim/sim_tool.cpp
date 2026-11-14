@@ -5625,6 +5625,7 @@ namespace {
             std::printf("        utc=%s own_player=%u own_join_order=%u\n", utc_string(h.utc_ms).c_str(),
                 h.own_player, static_cast<unsigned>(h.own_join_order));
         };
+        std::vector<bmmo::session::journal_schema_kind> schema;   // step JNL: the file's typed kinds
         auto on_record = [&](bmmo::session::journal_tag tag, const std::string& payload) {
             print_header();
             bmmo::session::journal_detail::cursor in(payload);
@@ -5810,6 +5811,22 @@ namespace {
                     if (!in.ok) break;
                     seen_tick(tick);
                     std::printf("tick %-8u wait player=%u %u ticks\n", tick, player, static_cast<unsigned>(wait));
+                    ++delivered;
+                    return true;
+                }
+                case bmmo::session::journal_tag::schema:
+                    // Step JNL: nothing printed; it names the stat lines' fields.
+                    if (!bmmo::session::read_schema_payload(payload, schema)) break;
+                    ++delivered;
+                    return true;
+                case bmmo::session::journal_tag::stat:
+                case bmmo::session::journal_tag::clock: {
+                    bmmo::session::journal_stat st;
+                    const bool clock = tag == bmmo::session::journal_tag::clock;
+                    if (!bmmo::session::read_stat_payload(payload, clock, schema, st)) break;
+                    seen_tick(st.tick);
+                    std::printf("tick %-8u %s %s\n", st.tick, clock ? "clock" : "stat",
+                                bmmo::session::stat_text(st, *bmmo::session::find_schema_kind(schema, st.kind)).c_str());
                     ++delivered;
                     return true;
                 }

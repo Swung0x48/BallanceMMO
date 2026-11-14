@@ -127,7 +127,41 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 # run this with python -I, which leaves the script's own directory off the path.
 sys.path.insert(0, str(REPO / 'scripts'))
 import late_player_harness as lph
+import session_facts
 from journal_trace import client_journal, journal_files, SERVER_EXT, LEGACY_EXT
+
+# Step JNL: where the criteria read the run's facts - the journals (a journal written before the step, with no
+# SCHEMA, falls back to its log), or the logs as before (--criteria-source log, the proof's other half).
+CRITERIA_SOURCE = 'journal'
+
+
+def client_record_lines(log_path):
+    """client{i}.log's lines the criteria read: from its journals (every life's, in order), or the log."""
+    log_path = pathlib.Path(log_path)
+    if CRITERIA_SOURCE == 'journal':
+        case_dir, stem = log_path.parent, log_path.stem
+        paths = [client_journal(case_dir, stem)]
+        k = 1
+        while client_journal(case_dir, f'{stem}.rejoin{k}').exists():
+            paths.append(client_journal(case_dir, f'{stem}.rejoin{k}'))
+            k += 1
+        facts = [session_facts.Facts(p) for p in paths if p.exists()]
+        if facts and all(f.schema is not None for f in facts):
+            return [line for f in facts for line in session_facts.client_lines(f)]
+    if not log_path.exists():
+        return []
+    return log_path.read_text(errors='replace').replace('\x00', '').splitlines()
+
+
+def server_record_text(case_dir):
+    """The server's lines the criteria read: from the case's newest server journal, or its log."""
+    if CRITERIA_SOURCE == 'journal':
+        found = server_journals(case_dir)
+        if found:
+            facts = session_facts.Facts(found[-1])
+            if facts.schema is not None:
+                return '\n'.join(session_facts.server_lines(facts))
+    return server_log_text(case_dir)
 
 
 def server_journals(directory):
@@ -1432,7 +1466,7 @@ def run_case(args, sector, case_dir):
             result['clients'].append({'exit_code': None, 'metrics': None, 'never_started': True})
             continue
         text = (case_dir / f'client{i}.log').read_text(errors='replace')
-        statuses = [s for s in text.splitlines() if s.startswith('status:')]
+        statuses = [s for s in client_record_lines(case_dir / f'client{i}.log') if s.startswith('status:')]
         row = {
             'exit_code': p.returncode,
             'metrics': status_metrics(statuses[-1]) if statuses else None,
@@ -1633,7 +1667,7 @@ def read_client_log(path):
     if not path.exists():
         return out
     life = None
-    for line in path.read_text(errors='replace').replace('\x00', '').splitlines():
+    for line in client_record_lines(path):
         if not out['own_id']:
             m = RE_OWN_ID.search(line)
             if m:
@@ -2074,7 +2108,7 @@ def event_report(args, case, case_dir):
     index_of = {pid: i for i, pid in id_of.items() if pid}
     arm = infer_arm(args, ep['source'])
     family = ARM_FAMILY.get(arm, 'burst')
-    s1 = lph.parse_s1(server_log_text(case_dir), server.header['session'])
+    s1 = lph.parse_s1(server_record_text(case_dir), server.header['session'])
     client_cadence = {}
     for i in range(args.players):
         path = client_journal(case_dir, 'client%d' % i)
@@ -2137,14 +2171,14 @@ def event_report(args, case, case_dir):
     late_events = [{'tick': e['tick'], 'stamp': e.get('origin_tick', e['event_tick']), 'type': e['type'],
                     'player': e['id'], 'client': index_of.get(e['id']), 'state': e.get('state', 0)}
                    for e in server.events() if e['tick'] != e.get('origin_tick', e['event_tick'])]
-    server_log = case_dir / 'server.log'
+    server_text = server_record_text(case_dir)
     late_by_lines, barrier_lines, s5_lines, bodiless = [], [], [], []
     counted_through = {}   # resync base -> the old epoch's last counted tick
     # SessionLeads sent to this run's players and their acks (an external
     # server's log holds other runs too: kept to this run's ids and ticks).
     leads = []
-    if server_log.exists():
-        for line in server_log.read_text(errors='replace').splitlines():
+    if server_text:
+        for line in server_text.splitlines():
             m = RE_RESYNCED.search(line)
             if m:
                 counted_through[int(m.group(1))] = int(m.group(2))
@@ -2194,8 +2228,8 @@ def event_report(args, case, case_dir):
 
     server_world = fd.worlds(server, want_local=False)
     # Step F0: the airship spans per player (server log): never compared.
-    airship = airship_spans(server_log_text(case_dir))
-    report['lead_adjust'] = lead_mode(server_log_text(case_dir))
+    airship = airship_spans(server_text)
+    report['lead_adjust'] = lead_mode(server_text)
     report['relay_episodes'] = [dict(tick=tick, clients=sorted({event.client for event in args.events if event.tick == tick}))
                                 for tick in sorted({event.tick for event in args.events})]
     for i in range(args.players):
@@ -3697,12 +3731,56 @@ def emit_report(args, case, case_dir):
         return
     crit = criteria(report, case, load_controls(args.control, case['sector']))
     case['event_report'], case['criteria'] = report, crit
+    case['criteria_source'] = CRITERIA_SOURCE
+    check = criteria_source_check(args, case, case_dir, report, crit)
+    if check is not None:
+        case['criteria_source_check'] = check
+        print(f'  criteria from the journals vs the logs: {check}', flush=True)
     lines = format_report(report, crit)
     (case_dir / 'event_report.txt').write_text('\n'.join(lines) + '\n', encoding='utf8')
     (case_dir / 'event_report.json').write_text(json.dumps({'report': report, 'criteria': crit}, indent=1),
                                                 encoding='utf8')
     for line in lines:
         print('  ' + line, flush=True)
+
+
+def criteria_source_check(args, case, case_dir, report, crit):
+    """Step JNL: the report and criteria of the other source (the logs, when the journals were read), compared:
+    'equal', or the first key path that differs.  None when there is no verbose log to compare with."""
+    global CRITERIA_SOURCE
+    if CRITERIA_SOURCE != 'journal' or not getattr(args, 'check_log_source', True):
+        return None
+    if server_log_level_problems(case_dir, False)[0]:
+        return 'not compared (the server log is not verbose)'
+    CRITERIA_SOURCE = 'log'
+    try:
+        other = event_report(args, case, case_dir)
+        other_crit = criteria(other, case, load_controls(args.control, case['sector'])) if other else None
+    finally:
+        CRITERIA_SOURCE = 'journal'
+    a = json.loads(json.dumps({'report': report, 'criteria': crit}, default=str))
+    b = json.loads(json.dumps({'report': other, 'criteria': other_crit}, default=str))
+    return first_json_difference(a, b) or 'equal'
+
+
+def first_json_difference(a, b, where=''):
+    if type(a) is not type(b):
+        return f'{where or "/"}: {str(a)[:80]} vs {str(b)[:80]}'
+    if isinstance(a, dict):
+        for key in sorted(set(a) | set(b)):
+            if key not in a or key not in b:
+                return f'{where}/{key}: only in the {"logs" if key not in a else "journals"}'
+            d = first_json_difference(a[key], b[key], f'{where}/{key}')
+            if d:
+                return d
+        return None
+    if isinstance(a, list):
+        for k, (x, y) in enumerate(zip(a, b)):
+            d = first_json_difference(x, y, f'{where}[{k}]')
+            if d:
+                return d
+        return None if len(a) == len(b) else f'{where}: {len(a)} vs {len(b)} items'
+    return None if a == b else f'{where or "/"}: {str(a)[:80]} vs {str(b)[:80]}'
 
 
 def report_only(args):
@@ -3901,6 +3979,12 @@ def main():
     ap.add_argument('--quiet-server-log', action='store_true',
                     help='step SLQ: the server at its default log level (log_verbose: false): the rows read from '
                          'its diagnostics stay empty and its log is not checked for "Verbose logging on."')
+    ap.add_argument('--criteria-source', choices=('journal', 'log'), default='journal',
+                    help='step JNL: read the facts the criteria need from the journals (a journal written before '
+                         'the step falls back to its log), or from the logs as before')
+    ap.add_argument('--no-log-source-check', dest='check_log_source', action='store_false',
+                    help='step JNL: do not compute the report from the logs too and compare (the check needs a '
+                         'verbose server log; a quiet run is not compared)')
     ap.add_argument('--control', action='append', default=[],
                     help='H8: a control run (its directory or summary.json) whose event report is the band; repeatable')
     ap.add_argument('--arm', default='', help='H8: the arm of design 5.2 (A0, A0j, A1 .. A9c) whose own criteria '
@@ -3931,6 +4015,8 @@ def main():
                          '--players and event flags, and --control); its server.bmjs (server.bmjr from an older build), when the batch copied one '
                          'there, is the journal')
     args = ap.parse_args()
+    global CRITERIA_SOURCE
+    CRITERIA_SOURCE = args.criteria_source
     # Step T1: a coordinated run defaults to what the project ships (the
     # server's defaults since LBM5: patience and lead adjust on, no snapshots);
     # without it, the harness's old defaults.

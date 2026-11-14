@@ -780,8 +780,15 @@ namespace bmmo::session {
                 platform_.forget_births_after(tick, entities);
             };
             s.spawn_forget_cursor_valid_ = false;   // FULL step GHF
+            const uint64_t rollbacks_before = s.rollback_.stats().rollbacks, resim_before = s.rollback_.stats().resim_ticks;
             ok = s.rollback_.resync(resync_world, anchor, now, spec, input_at, restored,
                                     "resync from the server's tick " + std::to_string(anchor));
+            // Step JNL: the re-step is a rewind the status line counts (rb=, resim=).
+            if (s.rollback_.stats().rollbacks != rollbacks_before) {
+                auto& w = journal_.writer();
+                w.stat(now, stat_kind::rewind, {anchor, now, static_cast<int>(rewind_cause::resync), std::string_view()});
+                w.stat(now, stat_kind::rewind_base, {now, anchor, s.rollback_.stats().resim_ticks - resim_before});
+            }
             // C3 (record-format-gaps design 2.3 step 6, step RK1): a refused
             // write of the physics globals dropped the history: not applied.
             if (s.rollback_.stats().globals_failures != globals_before) ok = false;
