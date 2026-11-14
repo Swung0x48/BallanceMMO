@@ -192,21 +192,23 @@ namespace bmmo::retail {
             }
         }
 
-        // A game-thread read of a value from outside (retail_connected):
-        // recorded, or the capture's.
-        bool flag(bmmo::session::clock_site site, bool live) {
+        // A game-thread read of a value from outside (retail_connected, the
+        // inbound wait): recorded, or the capture's (a free site's: `live`).
+        int64_t value(bmmo::session::clock_site site, int64_t live) {
+            if (file_->is_free(site)) return live;
             if (mode_ == mode::recording) {
-                file_->clock(site, live ? 1 : 0);
+                file_->clock(site, live);
                 return live;
             }
             if (mode_ == mode::replaying) {
                 int64_t value = 0;
                 std::string error;
                 if (!file_->take_clock(site, value, error)) { diverge(error); return live; }
-                return value != 0;
+                return value;
             }
             return live;
         }
+        bool flag(bmmo::session::clock_site site, bool live) { return value(site, live ? 1 : 0) != 0; }
 
         // A session send: recorded (true: send it), or compared with the
         // capture's (false: a replay sends nothing).

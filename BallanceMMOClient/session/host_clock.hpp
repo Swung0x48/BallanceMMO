@@ -5,9 +5,11 @@
 // tick driver's - goes through it by site, so a capture can record it and a
 // replay hand it back; the real clock otherwise.  A read only a panel, a log
 // or a measurement uses takes clock_site::retail_display (a free site, never
-// recorded).  The legacy mode's own timers (CKTimeManager::GetTime, the
-// transport's process_timestamp: the classic highscore timer, its points,
-// the legacy display) feed no session and stay on the real clock.
+// recorded); a measurement the session sends (the SessionTelemetry's frame
+// times, step K7G) takes retail_frame_time, which is recorded.  The legacy
+// mode's own timers (CKTimeManager::GetTime, the transport's
+// process_timestamp: the classic highscore timer, its points, the legacy
+// display) feed no session and stay on the real clock.
 
 #include <atomic>
 

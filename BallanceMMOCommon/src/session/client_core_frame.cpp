@@ -1207,11 +1207,17 @@ namespace bmmo::session {
         // equal in every byte but a proximity hold's float frame where the
         // two differ (the fast LBM's a4_swing, tick 1671).  Only a host whose
         // live step runs inside the frame (live_step_in_frame): on retail the
-        // span would hold the render and the frame's wait.
+        // span would hold the render and the frame's wait.  Step K7G: the
+        // wall-clock verdict goes through measured_flag, so a capture holds
+        // it (a later rewind's base, an input merge's anchor and the
+        // telemetry's replayed ticks follow it) and a replay takes it back.
+        const auto over_budget = [this] {
+            const bool live = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frame_.started).count()
+                              >= s.live_record_ms_;
+            return platform_.measured_flag ? platform_.measured_flag(clock_site::live_record, live) : live;
+        };
         const bool heavy = caps_.live_step_in_frame && config.rollback && s.rollback_.stats().resim_ticks != frame_.resim_before
-                        && !s.resync_pending_ && !s.resync_in_flight_ && !s.have_resync_state_
-                        && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frame_.started).count()
-                               >= s.live_record_ms_;
+                        && !s.resync_pending_ && !s.resync_in_flight_ && !s.have_resync_state_ && over_budget();
         if (config.rollback && !s.rollback_.amend_record(world(), tick, heavy)) {
             if (s.amend_failures_++ == 0)
                 logf("amend_record found no history entry for tick %u (the tick was dropped)", tick);

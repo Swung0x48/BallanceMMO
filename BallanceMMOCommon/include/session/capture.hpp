@@ -30,7 +30,11 @@
 // Version 3 (step T3), the same records: the headless client's login uuid
 // seed is a clock read (clock_site::login_uuid) - a replay of an older
 // capture takes that site from its own clock.  Version 4 (K7d) adds Q, K and
-// O; the older records are unchanged.
+// O; the older records are unchanged.  Version 5 (step K7G), the same
+// records: the placement slice's clock, the frame times, the retail inbound
+// wait and the headless live-record verdict are reads
+// (clock_site::placement_slice .. live_record) - a replay of an older
+// capture takes those sites from its own clock (or its own verdict).
 // CK-free and header-only.
 
 #include <bitset>
@@ -53,7 +57,7 @@ namespace bmmo::session {
             iteration = 'I', clock = 'C', message = 'N', status = 'T', link_status = 'P', link_clock = 'L',
             message_v1 = 'M', status_v1 = 'S', end = 'E', take = 'Q', keys = 'K', sent = 'O',
         };
-        static constexpr uint32_t kVersion = 4;
+        static constexpr uint32_t kVersion = 5;
 
         // A message as captured (its bytes owned).
         struct message_record {
@@ -234,6 +238,10 @@ namespace bmmo::session {
             if (!get_i64(den) || den != clock_den) { error = path + ": captured with a clock of " + std::to_string(den)
                                                             + " ticks per second, this one has " + std::to_string(clock_den); return false; }
             if (!get_string32(command_line_)) { error = path + ": truncated header"; return false; }
+            if (version_ < 5)
+                for (const auto site: {clock_site::placement_slice, clock_site::frame_time, clock_site::retail_frame_time,
+                                       clock_site::retail_inbound_wait, clock_site::live_record})
+                    set_free(site);
             replay_ = true;
             return true;
         }

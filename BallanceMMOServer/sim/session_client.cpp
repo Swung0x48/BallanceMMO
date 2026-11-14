@@ -2025,6 +2025,7 @@ namespace {
                 }
             };
             p.now = [this](bmmo::session::clock_site site) { return wall_now(site); };
+            p.measured_flag = [this](bmmo::session::clock_site site, bool live) { return measured_flag(site, live); };
             p.log = [](bmmo::session::log_level, const std::string& text) { log_line(text); };
             // The journal's (E2): --journal verbatim, the header's utc_ms,
             // and the bodies of corrections and LOCAL checkpoints.
@@ -2581,6 +2582,32 @@ namespace {
         // The wall clock as the session flow reads it, by site: clock_ (step
         // K1), which records into the capture or replays from it (step K3).
         clock_type::time_point wall_now(bmmo::sim::wall_site site) { return clock_->now(site); }
+
+        // Step K7G: an instant that measures the CPU (a frame's start and end:
+        // the frame_time line and the SessionTelemetry's times) - the real
+        // clock under every clock (a virtual clock's time is not the work's),
+        // written into the capture so a replay hands it back.  The main loop's
+        // thread only, the capture's owner (no owner check, as sync_report_clock).
+        clock_type::time_point measured_now(bmmo::sim::wall_site site) {
+            if (inbound_.replaying()) return wall_now(site);
+            const auto now = clock_type::now();
+            if (inbound_.capturing()) inbound_.clock(site, static_cast<int64_t>(now.time_since_epoch().count()));
+            return now;
+        }
+        // The same for a verdict measured on the real clock (step LVR's heavy
+        // frame, the platform's measured_flag); an older capture's replay
+        // (the site free) keeps its own.
+        bool measured_flag(bmmo::sim::wall_site site, bool live) {
+            if (inbound_.replaying()) {
+                if (inbound_.is_free(site)) return live;
+                int64_t value = 0;
+                std::string error;
+                if (!inbound_.take_clock(site, value, error)) inbound_diverged(error);
+                return value != 0;
+            }
+            if (inbound_.capturing()) inbound_.clock(site, live ? 1 : 0);
+            return live;
+        }
 
         // The system clock in ms since the epoch (the journal header's utc_ms,
         // read at wall_site::journal_utc).
@@ -3726,10 +3753,10 @@ namespace {
                 }
             }
             ++flow_steps_;
-            const auto frame_started = std::chrono::steady_clock::now();
+            const auto frame_started = measured_now(bmmo::sim::wall_site::frame_time);
             frame();
             core_.end_frame();   // step SDF: the frame's end, every rewind of it run
-            const auto frame_ended = std::chrono::steady_clock::now();
+            const auto frame_ended = measured_now(bmmo::sim::wall_site::frame_time);
             note_frame_time(frame_ended - frame_started);
             // Step A6: the telemetry window's times (start to start, and the frame).
             using ms = std::chrono::duration<double, std::milli>;

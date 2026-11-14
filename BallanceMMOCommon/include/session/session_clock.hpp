@@ -9,8 +9,13 @@
 // the reads were before: steady_clock and system_clock.
 //
 // Not through here: the reads that time the CPU (a step's cost, a rewind's
-// split, a placement's slice budget) - they measure real work and stay
-// steady_clock - and the log's date stamps.
+// split) - they measure real work and stay steady_clock - and the log's date
+// stamps.  Step K7G: a CPU read whose value leaves the process or steers a
+// frame goes through here after all, so a capture holds it - the retail
+// placement slice's budget (which frame each copy lands on) and the frame
+// times a SessionTelemetry sends (the headless host reads those on the real
+// clock under every clock and writes them into the capture itself), and step
+// LVR's heavy-frame verdict (session_platform::measured_flag, likewise).
 //
 // The waits of every host's loops go through it too (step K4c, seam C4), by
 // site, so a virtual clock (virtual_clock.hpp) ends a wait when its time

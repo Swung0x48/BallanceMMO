@@ -196,6 +196,9 @@ namespace bmmo::session {
         // frame - steady_clock, no clock site - records its live tick light,
         // and a later rewind rebases to the whole record before it): those
         // are rewind_base and status_clock, which a run-to-run compare skips.
+        // (Step K7G: a headless capture holds that gate's verdict, so a
+        // replay gives rewind_base - and the asked anchor an input merge
+        // takes from its base - again; two live runs can still differ.)
         BMMO_STAT_KIND(rewind, logical, STAT_CLIENT),
         BMMO_STAT_KIND(window, logical, STAT_CLIENT),
         BMMO_STAT_KIND(status, logical, STAT_CLIENT),

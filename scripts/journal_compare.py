@@ -19,7 +19,9 @@ changing every compressed byte after it:
           and CLOCK records skipped as well, so the rest is proven unchanged.
 
 --checkpoint-sets compares a CHECKPOINT's bodies as a set (a retail capture
-replay numbers the game's objects in another order).
+replay numbers the game's objects in another order) and leaves out a TICK's
+probe when it is not a Ball_ body (then the first movable object in that
+order; step K7G).
 
 Prints one line per pair and a total; exit code 1 when any pair differs or
 is missing, or when there is nothing to compare.  Python 3.8+,

@@ -497,6 +497,10 @@ namespace bmmo::session {
         // (session/clock_site.hpp): the headless client hands it to the
         // inbound capture or takes the captured value; retail ignores it.
         std::function<std::chrono::steady_clock::time_point(clock_site site)> now;
+        // Optional (step K7G): a verdict the host measured on the real clock
+        // (`live`), which the headless client writes into its capture and a
+        // replay takes back; empty: `live`.
+        std::function<bool(clock_site site, bool live)> measured_flag;
         // One line of text, written as it is (the harness parses the headless
         // client's lines).
         std::function<void(log_level level, const std::string& text)> log;

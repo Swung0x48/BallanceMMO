@@ -1020,7 +1020,8 @@ namespace {
     anchor_freeze_state anchor_freeze;
     bmmo::retail::hold_panel hold_panel_ui;
     constexpr double kHoldShotSeconds[] = {0.3, 1.0};
-    // Step SPL: a placement slice per rendered frame (at least one copy), how
+    // Step SPL: a placement slice per rendered frame (at least one copy; its
+    // clock the host clock's placement_slice, so a capture holds it, K7G), how
     // long the server's boot is shown with no new phase and no SessionStart
     // (a server that died without its SessionEnd), and when each
     // start stage's screenshot is due ('session hold shots DIR').
@@ -3315,10 +3316,14 @@ void BallanceMMOClient::core_host_drain() {
                 core_host_end_local("ended by the server: " + msg.reason);
             continue;
         }
-        // Step A5's measure: from the transport's stamp to the handover.
-        if (entry.code == bmmo::SessionRemoteInput && entry.received
-                && !bmmo::retail::session_capture::instance().replaying())
-            host.core->note_inbound_wait((transport().local_timestamp() - entry.received) / 1000.0);
+        // Step A5's measure: from the transport's stamp to the handover, in us
+        // (-1: no stamp).  Step K7G: a value the capture holds for every
+        // SessionRemoteInput - a replayed entry has no stamp.
+        if (entry.code == bmmo::SessionRemoteInput) {
+            const int64_t live = entry.received ? static_cast<int64_t>(transport().local_timestamp() - entry.received) : -1;
+            const int64_t us = bmmo::retail::session_capture::instance().value(bs::clock_site::retail_inbound_wait, live);
+            if (us >= 0) host.core->note_inbound_wait(static_cast<double>(us) / 1000.0);
+        }
         core_host_dispatch(entry.code, entry.bytes);
     }
     core_host_capture_idle();
@@ -4126,7 +4131,7 @@ void BallanceMMOClient::core_host_prepare_frame() {
     if (!deferred && trouble.empty() && f.prep == prep_stage::placing) {
         auto& placement = placement_host.placement;
         std::string refused;
-        if (placement.steps_left()) refused = placement.step(m_bml->GetCKContext(), kPlacementSlice);
+        if (placement.steps_left()) refused = placement.step(m_bml->GetCKContext(), kPlacementSlice, bmmo::retail::host_clock());
         hold_panel_ui.placing(placement.copies_done(), placement.copies_planned(), bmmo::retail::host_clock().now(bs::clock_site::retail_display));
         if (!refused.empty() || !placement.steps_left()) {
             const auto placed_at = bmmo::retail::host_clock().now(bs::clock_site::retail_display);
@@ -4296,8 +4301,9 @@ void BallanceMMOClient::core_host_stage_shot() {
 // the next CKContext::Process steps.
 void BallanceMMOClient::core_host_frame() {
     // FULL step RT1 (RCX-x86): this frame's time and the period since the
-    // previous one, measured only.
-    const auto frame_started = bmmo::retail::host_clock().now(bs::clock_site::retail_display);
+    // previous one, measured only.  Step K7G: on the host clock's
+    // retail_frame_time, so a capture holds what the SessionTelemetry sends.
+    const auto frame_started = bmmo::retail::host_clock().now(bs::clock_site::retail_frame_time);
     if (frame_times.session != host.session) {   // a host whose session_start did not reset them
         frame_times.frame.reset();
         frame_times.interval.reset();
@@ -4316,7 +4322,7 @@ void BallanceMMOClient::core_host_frame() {
         double interval_ms;
         ~frame_time_scope() {
             const double ms =
-                    std::chrono::duration<double, std::milli>(bmmo::retail::host_clock().now(bs::clock_site::retail_display) - started).count();
+                    std::chrono::duration<double, std::milli>(bmmo::retail::host_clock().now(bs::clock_site::retail_frame_time) - started).count();
             frame_times.frame.note(ms);
             if (host.core) host.core->note_frame_time(interval_ms, ms);   // step A6: the telemetry window
         }

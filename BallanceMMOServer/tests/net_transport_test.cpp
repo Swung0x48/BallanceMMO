@@ -149,6 +149,7 @@ TEST(SimTransport, LinkStepBlackoutAndBursts) {
 // The capture seams (session/capture_seams.hpp, step K3): what a recording
 // transport and clock write, their replaying twins hand back in order.
 #include <filesystem>
+#include <fstream>
 
 #include <session/capture_seams.hpp>
 
@@ -239,6 +240,48 @@ TEST(CaptureSeams, RetailRecords) {
     EXPECT_EQ(keys, "keys");
     EXPECT_FALSE(file.take_sent(2, "other", error));
     EXPECT_TRUE(file.complete());
+    std::filesystem::remove(path);
+}
+
+// Step K7G: version 5's reads (the frame times here) come back from a version 5
+// capture; a version 4 one holds none, so its replay reads its own clock there.
+TEST(CaptureSeams, VersionFiveSites) {
+    const auto path = (std::filesystem::temp_directory_path() / "bmmo_capture_k7g_test.bmic").string();
+    const int64_t den = 1000000000;
+    int64_t frame = 0, journal = 0;
+    {
+        bmmo::session::capture_file file;
+        std::string error;
+        ASSERT_TRUE(file.open_capture(path, "k7g", den, error)) << error;
+        bmmo::session::recording_clock clock(bmmo::session::real_session_clock(), file);
+        frame = clock.now(bmmo::session::clock_site::frame_time).time_since_epoch().count();
+        journal = clock.now(bmmo::session::clock_site::journal_ms).time_since_epoch().count();
+        file.close();
+    }
+    const auto replay = [&](int64_t& frame_read, int64_t& journal_read) {
+        bmmo::session::capture_file file;
+        std::string error, diverged;
+        ASSERT_TRUE(file.open_replay(path, den, error)) << error;
+        bmmo::session::replay_clock clock(file, bmmo::session::real_session_clock(),
+                                          [&](const std::string& why) { diverged = why; });
+        frame_read = clock.now(bmmo::session::clock_site::frame_time).time_since_epoch().count();
+        journal_read = clock.now(bmmo::session::clock_site::journal_ms).time_since_epoch().count();
+        EXPECT_TRUE(diverged.empty()) << diverged;
+        EXPECT_TRUE(file.complete());
+    };
+    int64_t frame_read = 0, journal_read = 0;
+    replay(frame_read, journal_read);
+    EXPECT_EQ(frame_read, frame);
+    EXPECT_EQ(journal_read, journal);
+    {
+        std::fstream f(path, std::ios::in | std::ios::out | std::ios::binary);
+        f.seekp(4);
+        const uint32_t v4 = 4;
+        f.write(reinterpret_cast<const char*>(&v4), sizeof(v4));
+    }
+    replay(frame_read, journal_read);
+    EXPECT_GT(frame_read, frame);   // the replay's own clock, read after the capture
+    EXPECT_EQ(journal_read, journal);
     std::filesystem::remove(path);
 }
 

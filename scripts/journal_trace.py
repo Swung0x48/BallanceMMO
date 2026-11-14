@@ -1103,7 +1103,9 @@ def canonical(path, mode="run", checkpoint_sets=False):
     those differ in every compare mode.  replay: drops only class-2 CLOCK records (raw clock reads, link status): a
     capture replay reproduces the clock-site values too.  legacy: the step's three tags dropped as well - a new
     file against one written before step JNL.  checkpoint_sets: a CHECKPOINT's bodies compared as a set - a retail
-    capture replay's order follows the game's object ids, which another process numbers differently (K7)."""
+    capture replay's order follows the game's object ids, which another process numbers differently (K7); for the
+    same reason a TICK whose probe is not a Ball_ body (the first movable object, physics_state.cpp) leaves its probe
+    name, position and speed out (K7G: an L12 replay's probe was Rope003 where the live run's was Rope002)."""
     if mode not in COMPARE_MODES:
         raise ValueError(mode)
     schema = {}
@@ -1134,6 +1136,11 @@ def canonical(path, mode="run", checkpoint_sets=False):
         elif tag == TAG_CHECKPOINT and checkpoint_sets:
             c = JournalReader._checkpoint(_Cursor(payload))
             payload = (c["tick"], c["flags"], tuple(sorted(repr(sorted(b.items())) for b in c["bodies"])))
+        elif tag == TAG_TICK and checkpoint_sets:
+            cursor = _Cursor(payload)
+            t = JournalReader._tick(cursor)
+            if not t["probe_name"].startswith("Ball_"):   # K7G: no ball - the probe is the first movable object
+                payload = (t["tick"], t["hash"], t["pose"], t["cores"], t["ms"], payload[cursor.off:])
         out.append((tag, tick, name, payload))
     return out
 

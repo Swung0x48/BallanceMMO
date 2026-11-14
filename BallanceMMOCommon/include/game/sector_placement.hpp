@@ -26,6 +26,7 @@
 #include <entity/session.hpp>
 #include <physics/physics_rt_api.h>
 #include <session/placement_plan.hpp>
+#include <session/session_clock.hpp>
 #include <utility/name_filter.hpp>
 
 #include "ck_object_ids.hpp"
@@ -396,8 +397,12 @@ namespace bmmo::game {
         // keeps the copies.  A refusal in any part undoes everything the job
         // made and ends it; `abandon` undoes a job the host gives up between
         // two steps.  `apply` is begin, step until none is left, finish.
+        // Step K7G: a step with a budget reads `clock` at
+        // clock_site::placement_slice (the retail host's, so a capture holds
+        // which frame each copy lands on); an unlimited one reads no clock.
         std::string begin(CKContext* context, const placement_hooks& hooks = {});
-        std::string step(CKContext* context, std::chrono::steady_clock::duration budget);
+        std::string step(CKContext* context, std::chrono::steady_clock::duration budget,
+                         session::session_clock& clock = session::real_session_clock());
         std::string finish(CKContext* context);
         void abandon(CKContext* context, const std::string& why);
         bool in_progress() const { return job_.has_value(); }
@@ -683,7 +688,8 @@ namespace bmmo::game {
         return {};
     }
 
-    inline std::string sector_placement::step(CKContext* context, std::chrono::steady_clock::duration budget) {
+    inline std::string sector_placement::step(CKContext* context, std::chrono::steady_clock::duration budget,
+                                              session::session_clock& clock) {
         using namespace placement_detail;
         using kind = session::placement_action::kind;
         if (!job_) return "no placement in progress";
@@ -733,10 +739,11 @@ namespace bmmo::game {
             }
             return present;
         };
-        const auto started = std::chrono::steady_clock::now();
+        const bool sliced = budget != std::chrono::steady_clock::duration::max();
+        const auto started = sliced ? clock.now(session::clock_site::placement_slice) : session::session_clock::time_point{};
         bool copied = false;
         while (job.next < job.plan.actions.size()) {
-            if (copied && std::chrono::steady_clock::now() - started >= budget) break;
+            if (copied && sliced && clock.now(session::clock_site::placement_slice) - started >= budget) break;
             const session::placement_action& a = job.plan.actions[job.next++];
             const std::string at = "row " + std::to_string(a.row) + ": ";
             if (a.what == kind::share && a.name != a.source) {

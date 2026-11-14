@@ -4231,3 +4231,145 @@ with the `boot` record (class 1: its sites are recorded; no gate replays a serve
 journals predate the kinds: '-'),
 `moved_own_sector.py` on a run with a moved own Sector, `pre_rollback_error.py` on a capped journal, the 8845, the
 wire check beyond s18's (no wire change).
+
+## Built (K7 captures record the placement slice and the telemetry times, step K7G, 2026-11-14)
+
+**Why.** A K7 retail capture no longer replayed to its end marker (`.local-tools/work/VRF`, HEAD 0b944ed7): two
+(three - the third, headless, found while recording core_ref_s19, below) reads that steer what the session does or sends were outside the capture. (1) The non-blocking hold places a slice
+per rendered frame (`kPlacementSlice`, 10 ms), and `sector_placement::step` read `steady_clock` for the budget, so
+a replay put the copies on other frames (L11: 17 / 18 frames live, 7 in replay; the replay diverged at frame 48,
+"expected a clock read at retail_prep, the capture has a take at site 1"). (2) SessionTelemetry (protocol 38, every
+660 ticks) sends frame times read at the free `retail_display` site and an inbound wait from
+`transport().local_timestamp()` (retail), and frame times from `steady_clock` (headless): the first telemetry send of
+any capture differed (the blocking-hold control arm diverged at tick 688), and core_ref_s18 had to mask the
+telemetry hashes (`wire_compare.py --telemetry-free`). Work, runs and proofs: `.local-tools/work/K7G`.
+
+**The slice: recorded, not count-based.** `sector_placement::step(context, budget, clock)` reads the given session
+clock at `clock_site::placement_slice` (the slice's start and the budget check after each action) when it has a
+budget, and no clock at all when the budget is unlimited (headless `apply`, the blocking hold, `placement_tool`'s
+zero budget keeps the real clock). The retail anchor passes the host clock, so a capture holds the reads and a
+replay ends every slice where the live one did. A count-based slice would need no capture, but it fixes a
+machine-dependent constant (an L11 copy is 123 to 871 CK objects; an 8845-class player takes longer per copy than
+the 14700KF) and changes the live pacing; the recorded clock changes nothing live: the same reads on the same
+real clock, ten bytes per read in the capture (93 reads on L11).
+
+**The telemetry times.** Retail: the frame's start and end in `core_host_frame` read the host clock at
+`retail_frame_time` (recorded, no longer `retail_display`; the F3 panel's frame times are the same reads), and the
+inbound wait is a value the capture holds for every SessionRemoteInput dispatched (`session_capture::value`, in us,
+-1 for an entry with no stamp - a replayed entry never has one; `flag` is now `value` != 0). Headless:
+`measured_now(frame_time)` reads the real `steady_clock` under every clock (a virtual clock's time is not the work's:
+the coordinated runs' telemetry keeps its CPU times) and writes it into the capture; a replay takes it from the file.
+The headless inbound wait was already replayed (the recorded transport's stamp and `local_timestamp`). The values
+sent are the same reads as before; only their being in the capture is new. So in a replay of a version 5 capture the
+headless `frame_time:` log line and the retail F3 panel's frame times show the live run's times, not the replay's CPU
+cost (no script reads that line; time a replay from outside).
+
+**A third read: step LVR's heavy-frame verdict (headless).** The first core_ref_s19 recording did not replay: h1_150
+client 0's journal differed in two class-0 records at tick 1 079 (`rewind` anchor 1 058 live, 1 057 in both of two
+replays; the `window` after it), and l6_pubtest client 0's second SessionTelemetry (tick 1 341) in its hash. The
+cause: a frame that replayed and took at least `BMMO_LIVE_RECORD_MS` (10.5) of `steady_clock` may record its live
+tick light (step LVR), and a light record is never a base - so the base a rewind restores (`rewind_base`), the
+ticks it re-simulates (the telemetry's `replayed`) and, through `merges_input_replay`'s `restore_base`, whether a
+lifecycle batch takes a pending input correction's anchor (the `rewind` record, logical) all followed a raw clock
+read no capture held. At tick 1 079 both sides restored base 1 056, but live did not merge (anchor 1 058) and the
+replay did (1 057). s18 never showed it in a `rewind` record (only `rewind_base`, its README); it hid there by
+timing. Now the verdict is a value: the core's `heavy` test reads the real clock last, after its logical
+conditions, and passes `live` through the platform's new optional `measured_flag(clock_site::live_record, live)`;
+the headless client writes 0 / 1 into its capture and a replay takes it back (an older capture's replay keeps its own
+verdict). Live it is the same read on the same clock, so no decision changes (the coordinated LBM and L6 runs keep
+real-time verdicts, as before); retail never reaches it (`live_step_in_frame` is false). The record classes are
+unchanged: two live runs can still differ in `rewind_base`.
+
+**The capture format.** Version 5 (`capture.hpp`): the same records; a replay of an older capture frees the five new
+sites (`placement_slice`, `frame_time`, `retail_frame_time`, `retail_inbound_wait`, `live_record`) and reads its own clock there, as
+version 3 did for `login_uuid` - so core_ref_s18 still replays with this build (its telemetry still masked). A new
+headless capture holds two `frame_time` reads per frame, so core_ref_s18's rules cannot judge one: the set is
+re-recorded as core_ref_s19 (no telemetry mask, below). Unit test: `CaptureSeams.VersionFiveSites` (a version 5
+capture hands the frame times back; the same file as version 4 reads its own clock there and still takes the next
+recorded read).
+
+**Proof (retail L11 ctl at human key rates, lag 150, cadence 660, the non-blocking hold - the default;
+`k7g_ctl_h_150_1`).** Live: installed = built (20 files), the Arch server at the build's id, 18 x `mismatches=0`,
+FINAL rows bit-equal to `r6on_ctl_h_150_1`'s on both clients (ball 2 / 2, body 23 / 23, piece 32 / 32). Each
+client's capture replayed in its own copy with no server: the end marker reached at frame 4 374 / 4 373, "every
+read matched", every send matched (4 399 / 4 384 sends, the 6 SessionTelemetry of each included), the journals
+IDENTICAL in replay mode (checkpoint bodies as sets). The blocking-hold control arm (`k7gb_ctl_h_150_1`,
+`VRF/vrf_retail.py`: VRF's arm that diverged at tick 688 on the first telemetry send): live the same checks pass, both
+captures replayed to their end markers (frame 4 377 / 4 377), every read and send matched, journals IDENTICAL; its
+captures hold no `placement_slice` read (the unlimited step reads no clock).
+The telemetry sends are real values, not empty windows: client 1's six windows (ticks 688 .. 3 988) carry 660 frames
+each, interval p50 15.0-15.1 ms, work p99 3.6-15.6 ms, inbound wait p50 7.9-8.5 ms. Captures 1.25 / 1.21 MB for the 66 s session (VRF's `vrfk` on HEAD: 1.10 MB): `retail_frame_time` 8 651 reads,
+`retail_inbound_wait` 4 323, `placement_slice` 93 - about +13 %, ~19 KB/s.
+
+**The slice's frame cost.** The same rule on the same clock, so the same cost by construction. L11 placement (the
+53 client copies) in the retail sessions since DWB, both clients: 0.197-0.257 s over 13-18 rendered frames, 13.2-15.8
+ms a frame - but `dwbg`, `dwcg`, `fgh2`, `fuh1` and `jn2g` ran with 20 slots (209 server copies), and only `vrfk`
+(HEAD, 8 slots like the K7G sessions) is like for like: 0.231 / 0.238 s over 17 / 18 frames (13.6 / 13.2 ms a frame).
+With K7G 0.180 / 0.170 s over 13 / 13 frames (13.8 / 13.1 ms a frame): no regression, the per-frame cost inside
+the spread (the totals and frame counts are not). From the K7G captures' recorded reads (`work/K7G/slices.py`): 13
+slices per client, the 12 full ones 10.2-12.0 ms, mean 11.0 / 11.0 ms (the 10 ms budget plus the copy that crossed it:
+the check follows each copy, as before); the last slice ends with the plan (7.6 ms / one read). HEAD's slices are not
+in its captures, so only the per-frame figures compare.
+
+The retail replay compare and the probe. An L12 capture (`k7gd_l12_h_150_1`, the data review) replayed to its end
+marker with every read and send matched, but 315 / 271 TICK records differed in replay mode: only `probe_name`,
+`probe_position` and `probe_speed` (Rope002 live, Rope003 in the replay, a mirrored pair; from tick 35, while no
+`Ball_` body exists), hash, pose and cores equal. With no ball the probe is the first entry of `m_MovableObjects`
+(`physics_state.cpp`), an order another process builds differently - the reason a checkpoint's bodies already
+compare as a set. So `journal_trace.canonical(..., checkpoint_sets=True)` (`journal_compare.py --checkpoint-sets`,
+K7/replay.py) leaves a TICK's probe out when its name is not `Ball_*`; hash, pose, cores and ms stay compared, and a
+ball probe on one side only still differs. No product change: an order-free probe would change the TICK bytes of
+every journal and every reference set. Re-compared: both L12 replays equal, the four L11 replays (`k7g`, `k7gb`)
+still equal, the selftest OK; headless compares never pass the flag.
+
+Old captures: this build replays core_ref_s18's fan_dr and h1_150 (version 4) strictly - every end marker, the sends
+SAME under `--telemetry-free`, the journals equal (`work/K7G/s18compat.log`).
+
+Headless, before the set: one scratch arm (S18/record.py's recipe with the first K7G build, not a reference set,
+removed since) replayed strictly with the telemetry hashes compared: 4 / 4 end markers, the four send traces SAME,
+5 / 5 journals equal.
+
+**core_ref_s19 (`maps/arena-test/core_ref_s19`, its README.md).** core_ref_s18's twelve arms re-recorded with S18/record.py's
+recipe unchanged (`S18_STORE=core_ref_s19 S18_PREFIX=s19_`, binaries rS19 and the Arch server of this tree's id;
+17:01-17:18, about 17 min; the first recording, made before the `live_record` site, was discarded - see above).
+Every server journal tick- and checkpoint-exact; the harness exits as in s18 (h1_150's server ran 3 190 ticks, s18's
+3 678: the proxies' drop timing). The strict replay (S18/verify.py, which now masks only a `core_ref_s18*` store):
+57 / 57 end markers, 57 / 57 send traces SAME with every hash compared (541 297 sends, 796 SessionTelemetry), 58 / 58
+journals IDENTICAL; the only raw records differing are `status_clock` (`rewind_base`, 3 of s18's 58 journals, now
+none). l6_pubtest: 2 366 lifecycle events, 143 216 rewinds, depth sum 1 294 323, deepest 18 at tick 21 442 - equal to
+s18's. Captures 425.2 MB (s18 412.5, +3.1 %). pins.json = s18's = a fresh scan (58 files); SHA256SUMS 430 lines;
+`player_data_check.py` over the set (405 files) and the `s19_l6_pubtest` case (46 files): PLAYER-DATA: NONE.
+The whole verification (strict + `wire_check.sh - rS19`, `work/K7G/k7gf_verify_all.sh`), twice on a quiet machine:
+112.8 + 147.3 = **260.1 s** and 111.6 + 145.2 = **256.8 s** (s18: 254.5 / 255.4 s); both wire checks ALL SAME, 57
+sends and 58 journals, 0 skipped, no telemetry mask. `.local-tools/wire_check.sh` defaults to core_ref_s19 (the s18
+rules for core_ref_s18* and core_ref_s19*, the telemetry mask for core_ref_s18* only, `TELEMETRY_FREE=1|0` forces
+it; a set with no known arm fails); `fast_gate.sh` part 3 replays core_ref_s19 (`S18_STORE` / `REF` passed
+explicitly). Old captures with the final build: core_ref_s18's fan_dr and h1_150 strictly (8 captures, 9 journals,
+masked) and `REF=core_ref_s18 LABELS="fan_dr h1_150" wire_check.sh - rS19`: ALL SAME, 8 telemetry-mask lines.
+
+**Gate (full_gate.sh k7gf1, FULL-GATE PASS, 1 150 s).** x64, x86 and the Arch server; 862 / 862; s19 strict replay
+57 captures and 58 journals ALL SAME (159 s), s19 wire check 57 + 58 ALL SAME (197 s); fast LBM on-only 19 / 19 FINAL
+exact, rows (6 524 lines) equal to `JN2/rows_jn2g_values.txt` - no value moved, none of the telemetry change's -
+89 / 89 journals equal to jn2g's; the L6 re-drive mism 0 on 13 clients, 14 / 14 journals equal to pf_dwbr1_1's,
+placement equal, 72 749 rewinds; retail L12 + L11 at K = 20 (human key rates) FINAL rows bit-equal to r6on (L12 ball
+2 / 2, body 14 / 14; L11 ball 2 / 2, body 23 / 23, piece 32 / 32), 22 + 18 x `mismatches=0`, placement equal to jnlg.
+
+**The final K7 retail replays (the acceptance test).** The gate's two retail sessions' four captures (version 5),
+each replayed in its own copy with no server (`work/K7G/k7gf_replay.sh`): L12 c1 / c2 the end marker at frame
+1 606 / 1 615, L11 c1 / c2 at 4 376 / 4 376, "every read matched" (every send compared: 1 608 / 1 613 and 4 400 /
+4 387 sends recorded, 2 / 2 and 6 / 6 SessionTelemetry among them, real windows of 660 frames), the journals IDENTICAL in replay mode (checkpoint bodies as sets, the non-ball probe rule
+above). The captures hold `retail_frame_time` 3 115-8 655, `retail_inbound_wait` 1 538-4 326, `placement_slice`
+88-124 reads and no `live_record` or `frame_time` read.
+
+**Placement cost, again.** In the gate (lane P's LBM on the P-cores beside it) L11 placed in 0.282 / 0.284 s over
+19 / 20 frames and L12 in 0.521 / 0.517 s over 30 / 31 - more than jn2g's gate (0.248 / 0.257 s over 17; 0.407 /
+0.415 s over 22). Run alone right after (`gate_retail.sh k7gf2`, the same build): L11 0.201 / 0.202 s over 13 / 13,
+L12 0.395 / 0.405 s over 22 / 22 - equal to the fast gates' RETAIL=1 sessions (retail alone after part 3) on HEAD
+(`fgh2` / `fuh1`: 0.199-0.208 s over 13-14, L12 0.401-0.414 s over 22-23). So the gate's figures were load, not K7G.
+
+**Not exercised:** a placement refused mid-slice under replay, an inbound entry with no stamp in a live run, a v4
+retail capture replayed by this build, the raised arm, the `live_record` verdict under `BMMO_LIVE_RECORD=whole |
+verify`, a capture whose frame loop runs on another thread than the one that built the session client
+(`measured_now` / `measured_flag` make no owner check, as `sync_report_clock`), a SessionStart replaced inside
+`core_host_frame` while no capture runs (its start read real, its end read recorded: detected, not silent; left
+unguarded so a live window's samples do not change), the 8845.
