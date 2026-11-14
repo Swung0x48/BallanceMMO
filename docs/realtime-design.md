@@ -3983,3 +3983,100 @@ local runs used the Windows and Arch servers), the 8845HS live server and a seco
 drained in turn under the server's trace, `BMMO_PSI_PROBE` or the hull probe with two worlds, a second world on
 another thread; the sampled boot profile and the cuts-off PMU row on the final tree; the K7 capture replay; the wire
 check (no wire change).
+
+## Built (the engine reads its profiler clock only while profiling, step DWC, 2026-11-14)
+
+**Why.** The audit of 2026-11-13 (`.local-tools/work/DWA/`: `census.md`, `design.md` T3, `skeptic.md` T3 "holds;
+add one site") found the engine reading the wall clock on every behaviour graph, every body lookup, every manager
+call and every parameter operation, for values only the profiler uses: 4.16 % of an L6 replay tick and 4.90 % of an
+L13 tick on the 8845HS (`census.md`; DWB's baseline sampled 4.47 / 4.73 %, this step's base 4.72 / 4.90 %, and 4.55 / 5.10 % as the gate's debug-stripped copy). The user approved the clean approaches only (no new process global, no mutable
+function-local static, no lazily initialised shared table). This step is the skeptic's stage 2 for T3 and edits two
+engine forks; BallanceMMO's own code is unchanged. It is engine change #26 (`docs/engine-changes.md`: the sites, the
+helper, the ones left and why).
+
+**The change.** The CK2 fork: a local `CKProfileTimer` (`CK2/src/CKProfileTimer.h`, a `VxTimeProfiler` constructed
+only when started; `Current()` 0 when it never was) at `CKBehavior::Execute`, `ExecuteStepStart`, the five manager
+loops in `CKContext.cpp` and `CKParameterOperation::DoOperation`, started with `m_ProfilingEnabled` at entry, and at
+`CKBehaviorManager::Execute`'s per-object timer, started by its first `Reset` under profiling; `ExecuteStep`'s
+never-read timer is deleted. physics_RT: `CKIpionManager::GetPhysicsObject` looks the body up without the clock
+unless `m_Context->IsProfilingEnable()`. With profiling on the profiler gets the same code's numbers; with it off no
+clock is read for them, a manager's `m_ProcessingTime` (read by nothing) holds only what `StartProfile` /
+`StopProfile` add, and physics_RT's two lookup times keep their values (the "Get Profiler Values" block in base.cmo's
+Exit Level graph, whose outputs no parameter reads). A behaviour span during which the Statistics block switches
+profiling on reports nothing for that frame, where it reported the whole span's time before (in
+`CKBehaviorManager::Execute`, the time since the function's entry). No class layout and no shared state change: the
+helper is a stack local (a `static_assert` states that `VxTimeProfiler` needs no destructor, which its union relies
+on), the flag is the context's.
+
+**Left, and why.** `CKContext::Process`'s `ProcessTime`, `CKBehaviorManager::Execute`'s `TotalBehaviorExecution` and
+`CKTimeManager`'s frame clock: once per frame, and `CKStats` publishes the first two whatever the flag (the time
+manager's `EstimatedInterfaceTime` reads `ProcessTime`). `CKBaseManager::StartProfile` / `StopProfile` (the
+collision and floor managers' spans): a member timer with no started bit, so gating both on the flag would make the
+frame profiling turns on add a span from a stale start; neither sampled replay, L6 or L13, reached them.
+`CKDebugContext`'s step timer (used unconditionally, Dev's stepping). RenderEngine's render-path timers (another
+submodule; the headless engine renders nothing). On the 8845 what is left of the clock in the two sampled replays
+is those three per-frame callers: 0.14 % of an L6 tick and 0.15 % of an L13 tick.
+
+**Retail.** CK2 is the headless engine's alone (retail loads the 2002 CK2.dll). physics_RT ships in the retail
+client and changes there: a body lookup no longer reads the clock, and nothing in the game displays the two times.
+K7's capture reads only BallanceMMO's named clock sites (`session/clock_site.hpp`), not the engine's timer.
+
+**Fork commits** (made 2026-11-14): `Swung0x48/CK2` `bmmo-collision-overhaul` `18ad761` (`src/CKProfileTimer.h`
+new, `src/CKBehavior.cpp`, `src/CKBehaviorManager.cpp`, `src/CKContext.cpp`, `src/CKParameterOperation.cpp`) and
+`Swung0x48/CKBuildingBlocks` `bmmo-collision-overhaul` `aa70e25` (`physics_RT/CKIpionManager.cpp`); `Swung0x48/Ballanced`
+`5ca0037` points at both, and this repository's `submodule/Ballanced` points at it.
+
+**Results** (the final tree, `.local-tools/work/DWC/gate/run_gate.sh`, log `gate/gate.log`, GATE-RC 0). The
+changed files: the six submodule files above and no BallanceMMO product file, their hashes the same at the gate's
+start and end. Builds: x64 BUILD-OK and 861/861, its four CK2 objects newer than `CKProfileTimer.h` and its
+`CKIpionManager` object newer than its source (the dirty build id is the same string before and after an edit, so
+the gate checks the objects' times); the x86 client and physics_RT.dll (sha256 `195a8d94b7c78272`, newer than
+`CKIpionManager.cpp`); the Arch server at `ballanced-690d1c23beac-dirty+bmmo-eb8b39f6cf83-dirty`, its objects newer
+than their sources. Fast LBM as shipped (`dwcrf1`): 38/38 twins FINAL exact, the 39 rows equal to DWB's `dwbrf1`,
+178/178 journals equal to `dwbrf1`'s in run mode with the whole build id masked (`DWC/arm_journals_id.py`; run
+mode's mask covers only the BallanceMMO commit, and the id's `ballanced-` part carries `-dirty` now and a new hash
+once the forks are committed and the pointers bumped, so a later gate against these journals needs the whole-id
+mask or a base from the same Ballanced id). Retail at K = 20 and human key rates, with the new physics_RT.dll and
+the client installed in both game copies (byte-equal to the build) and the WSL server at the build's id:
+
+| Run | Mismatches | FINAL rows vs r6on | Placement vs jnlg |
+|---|---|---|---|
+| L12, `dwcg_l12_h_150_1` | 0 (22 lines) | ball 2/2, body 14/14 bit-equal (both clients) | equal (62 copies) |
+| L11, `dwcg_ctl_h_150_1` | 0 (18 lines) | ball 2/2, body 23/23, piece 32/32 bit-equal (both clients) | equal (53 copies) |
+
+The 8845HS (vCPU 2, the four public-test server journals replayed by SimTool). Base: DWB's final `dwbr` / `dwbrd`.
+Final: `dwcr` / `dwcrd`, built from HEAD with the two submodule working trees laid over (`DWC/mksrc_wt.sh`,
+OVERLAY-EQUAL; `DWC/dwc_pkg.sh`, the five changed sources compiled), the build id pinned to dwbr's
+(`ballanced-690d1c23beac+bmmo-18f1a3bb6490`) on purpose so the A/B's summary lines compare equal: the id names the
+A/B pair, not the tree. Its `.text` is byte-equal to the builder's `dwc` (the `static_assert` changes no code).
+Every record of every replay equal, base vs final in both orders and each against itself, clean and timing builds
+and a second L7 timing pair: 27/27 AB-EQUAL, no summary or run difference, every tick of the 20 timing runs under
+15.15 ms. PMU totals, base and final back to back, then again in the other order:
+
+| | L6 | L13 | L7 | L8 |
+|---|---|---|---|---|
+| instructions:u, base -> final | 81.12 -> 78.62 / 78.63 G (-3.1 %) | 215.88 / 215.90 -> 208.36 / 208.33 G (-3.5 %) | 109.02 / 109.01 -> 105.99 / 106.01 G (-2.8 %) | 211.30 / 211.34 -> 204.40 / 204.38 G (-3.3 %) |
+| cycles:u, the two pairs | -1.7 %, -5.2 % | -5.4 %, -5.8 % | -5.8 %, -4.0 % | -1.2 %, -6.1 % |
+| mean tick, live-equivalent (A/B pairs) | -4.6 %, -4.2 % | -7.5 %, -7.6 % | -6.6 %, -3.7 %; again -4.5 %, -6.1 % | -11.0 %, -8.8 % |
+| the profiler clock, share of a tick (sampled) | 4.55 % -> 0.14 % | 5.10 % -> 0.15 % | - | - |
+
+The sampled split (1M user cycles; both sides debug-stripped: A's stripped copy was made on the 8845, its `.text`
+equal to A's) before the change: `CKBehavior::Execute` 2.75 / 3.00 %, `GetPhysicsObject` 1.41 / 1.59 %, the manager
+loops 0.33 / 0.43 %, `DoOperation` 1 sample on L13; after it the profiler clock's callers are
+`CKBehaviorManager::Execute`, `CKContext::Process` and `CKTimeManager::PreProcess` only, and `GetPhysicsObject`
+went from 1.65 / 1.89 % of a tick to 0.06 / 0.05 %. Those three unchanged per-frame callers drew more samples in the
+final build (L6 39 -> 73, L13 138 -> 216) with both sides stripped alike, so the rise is not the symbols; it is
+unexplained (a guess: the five or so reads left a tick find the clock's page cold) and small (0.15 % of a tick).
+Tails: the first chain (the builder's `dwct`) had L7's p999 up in both pairs (3.90 / 3.79 -> 4.31 / 4.25 ms) and
+its max up (+27 / +35 %); on the final tree the two L7 pairs and the repeat give p999 4.74 / 4.03 / 3.78 / 4.00 ms
+(base) against 4.06 / 4.28 / 3.70 / 3.66 ms (final), and the maxima scatter both ways (7.2-9.5 against 7.5-10.9
+ms), so neither the p999 rise nor its direction repeats; every L6, L7, L8 and L13 tick of both builds stays under
+15.15 ms. The builder's runs (`DWC/8845_an_dwc.log`, `dwcf1`, B from the tree before the `static_assert`, the same
+`.text`) agree: 24/24 AB-EQUAL, instructions:u -2.8 to -3.5 %; the only tick over 15.15 ms in either chain was
+one base L6 tick there (18.76 ms, `dwct_a1`; the other three L6 runs of that chain peak at 7.6-8.2 ms).
+
+**Not exercised:** any run with profiling on (the Statistics block, Dev), so the profiler's numbers under the
+change are equal by reading only; Exit Level's "Get Profiler Values" running under the change (not traced whether
+an arm, a replay or a retail run reaches it); `CKBaseManager::StartProfile` callers (the collision and floor
+managers: not in a sample); the server binary and the live server on the 8845; the L6 re-drive; L7 / L8 sampled
+profiles; the K7 capture replay; the wire check (no wire change).

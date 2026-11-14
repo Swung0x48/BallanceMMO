@@ -29,10 +29,10 @@ upstream:
 | Under `submodule/Ballanced` | Fork (upstream) | BallanceMMO's commits |
 |---|---|---|
 | `Source/BuildingBlocks/physics_RT/ivp` | `Swung0x48/source-physics` (before it, `doyaGu/ivp`) | #1 `68bb6cb`, #3 `d8513b1`, #5 `618ca67`, #7 `94fecee`, #12 `c563ad7`, #16 `b22a980`, the `IVP_PORTABLE_BMMO` macro `5d6b57a`, #17 `22b594a`, #25 `fcaedc2` |
-| `Source/BuildingBlocks` (physics_RT) | `Swung0x48/CKBuildingBlocks` (`doyaGu/CKBuildingBlocks`, from `e5d441f` on its `sdl`) | #6 `a9c4b3b`, #8 `1bc05ef`, #9 `673d89b`, #10 `325321c`, #13 `926dc2f`, #14 `0bb5e8c`, #15 `f628978`, #18 `7999d04`, #19 `7daf5eb`, #24 `962f73b`; the force block's exported helpers (bridge API v14, not numbered) `19b7758`; the rest are the ivp pointer and its URL |
+| `Source/BuildingBlocks` (physics_RT) | `Swung0x48/CKBuildingBlocks` (`doyaGu/CKBuildingBlocks`, from `e5d441f` on its `sdl`) | #6 `a9c4b3b`, #8 `1bc05ef`, #9 `673d89b`, #10 `325321c`, #13 `926dc2f`, #14 `0bb5e8c`, #15 `f628978`, #18 `7999d04`, #19 `7daf5eb`, #24 `962f73b`, #26 `aa70e25`; the force block's exported helpers (bridge API v14, not numbered) `19b7758`; the rest are the ivp pointer and its URL |
 | `Source/VxMath` | `Swung0x48/VxMath` (`doyaGu/VxMath`) | #2 `a67bd5d`, #11 `576f3a9`, #23 `3c0fff4` |
 | `Source/Player` | `Swung0x48/BallancePlayer` (`doyaGu/BallancePlayer`) | #4 `2870c91` |
-| `Source/CK2` | `Swung0x48/CK2` (`doyaGu/CK2`, from `d80b8de` on its `sdl`) | #21 `a821135`, the only one |
+| `Source/CK2` | `Swung0x48/CK2` (`doyaGu/CK2`, from `d80b8de` on its `sdl`) | #21 `a821135`, #26 `18ad761` |
 | Ballanced itself | `Swung0x48/Ballanced` (`doyaGu/Ballanced`, from `013afc7` on its `sdl`) | no source file: the four submodule pointers above and their `.gitmodules` URLs (CK2's since `9c52cd1`) |
 
 qhull (`Source/BuildingBlocks/3DTrans/qhull`, #2's other half), RenderEngine,
@@ -1001,6 +1001,55 @@ Evidence: the x86 SimTool's replays of the server journals before the change:
 L8 first divergence at 2146, L5 at 23635; after it the per-tick hashes equal
 the server's over L5 55175, L6 36131 and L8 103762 ticks, as the x64
 SimTool's (unchanged).
+
+---
+
+## 26. The profiler's clock read only while profiling (CK2, physics_RT)
+
+Files: `Source/CK2/src/CKProfileTimer.h` (new), `CKBehavior.cpp` (`Execute`, `ExecuteStepStart`, `ExecuteStep`),
+`CKContext.cpp` (the five manager loops: PreProcess, PostProcess, OnPreRender, OnPostRender, OnPostSpriteRender),
+`CKParameterOperation.cpp` (`DoOperation`), `CKBehaviorManager.cpp` (`Execute`'s per-object timer); and
+`Source/BuildingBlocks/physics_RT/CKIpionManager.cpp` (`GetPhysicsObject`).
+
+Each of these read the wall clock (`VxTimeProfiler`, whose only constructor calls `Reset`) on every call and used
+the value only for the profiler: `CKBehavior::m_LastExecutionTime` and `CKStats` under
+`CKContext::m_ProfilingEnabled`, a manager's `m_ProcessingTime` ("time elapsed during profiling", read by nothing in
+the engine, its plugins or BallanceMMO), and physics_RT's `m_HasPhysicsTime` / `m_DePhysicalizeTime`, read only by
+the "Get Profiler Values" block. On the 8845HS replaying the public test's server journals the clock reads were
+4.16 % of an L6 tick and 4.90 % of an L13 tick (`.local-tools/work/DWA/census.md`), almost all in
+`CKBehavior::Execute` (once per behaviour graph per frame) and `GetPhysicsObject` (once per body lookup).
+
+CK2: `CKProfileTimer` holds a `VxTimeProfiler` in an anonymous union and constructs it only when started (the
+constructor's argument, or a `Reset`); `Current()` is the profiler's own when started and 0 otherwise. Each site
+starts it with the context's flag at entry and keeps its old use of the value, so with profiling on the numbers are
+the same code's; with profiling off no clock is read for them, and a manager's `m_ProcessingTime` holds only what
+`StartProfile` / `StopProfile` add (below; before, the loops summed into it every frame whatever the flag). A span
+during which profiling was switched on (the Statistics block calls `EnableProfiling` from inside a behaviour, so
+inside the enclosing `Execute` frames) adds nothing for that frame; before, it added the whole span's time (in
+`CKBehaviorManager::Execute`, the time since the function's entry, its per-object timer not yet reset).
+`ExecuteStep`'s timer was never read and is gone. No class layout changes (the helper is a local; a
+`static_assert` states that `VxTimeProfiler` needs no destructor, which the union relies on), so physics_RT built
+against these headers still matches the 2002 CK2.dll retail loads.
+
+physics_RT: `GetPhysicsObject` keeps `++m_HasPhysicsCalls` and looks the body up without the clock when
+`m_Context->IsProfilingEnable()` is false (exported by the 2002 CK2.dll); with profiling on it times the lookup as
+before. With profiling off the two times keep their values (0 after `ResetProfiler`) instead of a lookup's wall time.
+base.cmo has one "Get Profiler Values", in Event_handler's "Exit Level" graph, wired to its Reset input by "reset
+Level" and to its Start input by the same output; no parameter reads its outputs.
+
+Left as they were: `CKContext::Process`'s `ProcessTime` and `CKBehaviorManager::Execute`'s
+`TotalBehaviorExecution` (once per frame, and published in `CKStats` whatever the flag: `GetProfileStats` and the
+time manager's `EstimatedInterfaceTime` reads `ProcessTime`); `CKBaseManager::StartProfile` / `StopProfile` (the
+collision and floor managers' spans, out of line in CK2.dll, so the headless engine's only; a member timer that has
+no started bit, so gating both on the flag would make the frame profiling turns on add a span from a stale start,
+and neither sampled replay, L6 or L13, reached them); `CKDebugContext`'s
+step timer (its value is used unconditionally; Dev's debug stepping only); `CKTimeManager` (the frame clock);
+`UserProfileStart` / `UserProfileEnd` (an explicit request); RenderEngine's (another submodule: render paths and
+Dev's object descriptions).
+
+Retail: CK2 is the headless engine's only (retail runs the 2002 CK2.dll); physics_RT ships in the retail client,
+where nothing displays the times. K7's capture reads only BallanceMMO's named clock sites
+(`session/clock_site.hpp`), not the engine's timer.
 
 ---
 
