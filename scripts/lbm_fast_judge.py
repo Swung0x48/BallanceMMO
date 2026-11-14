@@ -3,7 +3,13 @@ harness's criteria (counts, every fail), the server journal's replay, and journa
 every client's world with the server's.  The raw criteria are read as LBM6's were: against the real-time run's
 rows for the same arm, not as a pass/fail of their own.
 
-    python scripts/lbm_fast_judge.py [--root GAME] [--simtool PATH] LABEL...   (LABEL_off / LABEL_on in maps/arena-test)
+    python scripts/lbm_fast_judge.py [--root GAME] [--simtool PATH] [--on-only | --twins] [--rows-out FILE]
+        [--rows-ref FILE] LABEL...   (LABEL_off / LABEL_on in maps/arena-test)
+
+The pass (exit 0): every run FINAL exact (and its log checks clean), every expected run there (--on-only: each
+LABEL_on, --twins: LABEL_off and LABEL_on; neither: what exists), and with --rows-ref the criteria rows (one per
+run, the label's prefix cut) equal to that file's - a previous run of the same mode, its --rows-out.  On-only
+runs have no off twin: their 'relay lag in D' rows are n/a, counted per run below as skipped.
 """
 import argparse
 import json
@@ -30,6 +36,7 @@ def judge(case, root, simtool):
     out['criteria'] = {s: sum(1 for c in crit if c['status'] == s) for s in ('pass', 'fail', 'masked', 'n/a')}
     out['failures'] = ['%s %s: %s' % (c['who'], c['criterion'], c['detail'][:160])
                        for c in crit if c['status'] in ('fail', 'masked')]
+    out['no_twin'] = sum(1 for c in crit if c['status'] == 'n/a' and c['detail'].startswith('n/a: no off twin'))
     out['replay'] = [r['summary'].replace('summary: ', '') for r in summary.get('replays') or []]
     # Step SLQ: a server log that is not verbose leaves the server-read rows
     # empty on both twins (equal, so silent): the twin fails.
@@ -58,20 +65,33 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--root', default='C:/Users/geekerwan/Desktop/Ballance-Agent')
     ap.add_argument('--simtool', default=str(W / 'build-agent/BallanceMMOServer/BallanceMMOSimTool.exe'))
+    group = ap.add_mutually_exclusive_group()
+    group.add_argument('--on-only', action='store_true', help='each LABEL_on must be there (lbm_fast.sh by default)')
+    group.add_argument('--twins', action='store_true', help='each LABEL_off and LABEL_on must be there')
+    ap.add_argument('--rows-out', help='write the criteria rows here')
+    ap.add_argument('--rows-ref', help='the rows must equal this file (a previous --rows-out of the same mode)')
     ap.add_argument('labels', nargs='+')
     args = ap.parse_args()
-    rows = []
+    prefix = args.labels[0].split('_')[0]
+    rows, lines = [], []
     for label in args.labels:
         for mode in ('off', 'on'):
             case = A / ('%s_%s' % (label, mode))
             if not case.exists():
+                if args.twins or (args.on_only and mode == 'on'):
+                    rows.append({'label': case.name, 'error': 'missing'})
+                    print('%-28s FAIL missing: %s' % (case.name, case), flush=True)
                 continue
             r = judge(case, args.root, args.simtool)
             rows.append(r)
             c = r.get('criteria', {})
-            print('%-28s FINAL %s | criteria pass %s fail %s n/a %s | replay %s' % (
+            line = '%-28s FINAL %s | criteria pass %s fail %s n/a %s | replay %s' % (
                 r['label'], {True: 'EXACT', False: 'DIFFERENT'}.get(r.get('final_exact'), '?'),
-                c.get('pass'), c.get('fail'), c.get('n/a'), '; '.join(r.get('replay', [])) or r.get('error', '')), flush=True)
+                c.get('pass'), c.get('fail'), c.get('n/a'), '; '.join(r.get('replay', [])) or r.get('error', ''))
+            print(line, flush=True)
+            lines.append(' '.join(line[len(prefix) + 1:].split()))
+            if args.on_only and r.get('no_twin'):
+                print('    skipped (no off twin, n/a): %d "relay lag in D" rows' % r['no_twin'], flush=True)
             for f in r.get('failures', []):
                 print('    fail ' + f, flush=True)
             if r.get('server_log_level'):
@@ -88,9 +108,18 @@ def main():
                     print('    ' + l[:170], flush=True)
     exact = sum(1 for r in rows if r.get('final_exact') and not r.get('server_log_level')
                 and r.get('criteria_source_check') in (None, 'equal') and not r.get('cut_differences'))
-    print('%d of %d twins FINAL exact' % (exact, len(rows)))
-    (A / ('%s-lbm-fast.json' % args.labels[0].split('_')[0])).write_text(json.dumps(rows, indent=2), encoding='utf-8')
-    return 0 if exact == len(rows) and rows else 1
+    rows_ok = True
+    if args.rows_out:
+        pathlib.Path(args.rows_out).write_bytes(''.join(l + '\n' for l in lines).encode('utf-8'))
+    if args.rows_ref:
+        ref = pathlib.Path(args.rows_ref).read_text(encoding='utf-8').splitlines()
+        rows_ok = ref == lines
+        print('criteria rows %s %s' % ('equal to' if rows_ok else 'DIFFER from', args.rows_ref), flush=True)
+        for l in sorted(set(ref) ^ set(lines)):
+            print('    %s %s' % ('ref ' if l in ref else 'this', l[:170]), flush=True)
+    print('%d of %d %s FINAL exact' % (exact, len(rows), 'on runs' if args.on_only else 'twins'))
+    (A / ('%s-lbm-fast.json' % prefix)).write_text(json.dumps(rows, indent=2), encoding='utf-8')
+    return 0 if exact == len(rows) and rows and rows_ok else 1
 
 
 if __name__ == '__main__':

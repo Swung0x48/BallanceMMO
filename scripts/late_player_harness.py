@@ -131,6 +131,14 @@ def twins(args, argv):
     print('twins: ' + str(target), flush=True)
     return int(any(statuses))
 
+def on_only(args):
+    """The twins' on run alone (the fast LBM's default since 2026-11-14: production always runs patience and lead
+    adjust on): LABEL_on with both flags on, judged against the --control runs given (no off twin)."""
+    if args.twins:
+        raise ValueError('--on-only and --twins exclude each other')
+    args.label += '_on'
+    args.patience = args.lead_adjust = 'on'
+
 def parse_s1(text, session=None):
     groups = {'quorum': [], 'lateness': [], 'sector': [], 'arrival': [], 'clock-skew': [], 'decisions': []}
     for line in text.splitlines():

@@ -861,6 +861,19 @@ comparison). It is a fast check between real-time gates, not the gate: the full 
   patience never acts.
 - **Not modelled:** jitter, a client stall (`--stall-ms` sleeps real time), the proxy's forced drops and
   outages (refused with --coordinated); retail arms.
+- **On runs only (2026-11-14, the user: "只跑开"; production always runs patience and lead adjust on):**
+  `lbm_fast.sh` now runs each arm's on run alone (`arena_map_test.py --on-only`: LABEL_on, both flags on). The
+  control is A0's on run (`a0_second` is judged against it too; `a0_first` and the A4 swing arms, sector 4, have
+  none). `TWINS=1` keeps the off/on twins for steps that touch lead, patience or late-player logic. The judge
+  passes a set when every run is there and FINAL exact, and, with `ROWS_REF`, when the criteria rows equal a
+  previous run of the same mode (`maps/arena-test/PREFIX-lbm-rows.txt`). The rows are a reference, not a fail-0
+  rule.
+  - Without an off twin the rule "relay lag in D: one initial patience hold" is n/a. The judge counts these rows
+    as skipped.
+  - The rollback-tick and late-ball-rewind bands of the A6 and A8 arms fail against a fault-free control. The off
+    twins' rows always failed the same way, except A8's late-ball rewinds, which the off twin passes.
+  - On HEAD 0b944ed7 the twins took 1354 s and the on runs 675 s. Each on run's journals and event report equal
+    its twin's on run, and every criterion that differs reads the control.
 
 #### T3: capture replay (2026-11-05)
 

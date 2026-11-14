@@ -2633,10 +2633,15 @@ def criteria(report, case, controls):
                             None if edge is None else st['p99'] <= edge, '%d vs <= %s%s' % (st['p99'], edge, note))
             else:
                 add(who, 'mechanism error / rollbacks / relay lag within control', None, 'no --control given')
+            # Its twin is the same arm's run with lead adjust off: an on-only run (--on-only) has none, so the
+            # rule is n/a there, said in the detail.
+            no_twin = arm.upper() != 'A3M' and not any(rep.get('arm') == report.get('arm') and rep.get('lead_adjust') == 'off'
+                                                       for rep in controls)
             for result in relay_start_hold(report, row, controls, control=family == 'control'):
                 relay_rule = 'A3m band + 22 until last E, band from E + 48' if arm.upper() == 'A3M' else 'one initial patience hold'
                 add(who, 'relay lag in D: %s (source %s)' % (relay_rule, result['source']),
-                    result['ok'], str(result))
+                    result['ok'], ('n/a: no off twin of this arm among the controls; '
+                                   if no_twin and result['ok'] is None else '') + str(result))
             if family == 'control':
                 # A0/A0j: substituted ticks per player <= HEAD + 0.5 % of the
                 # ticks (the controls given are the HEAD runs), moved births 0.
@@ -4009,6 +4014,8 @@ def main():
                     help='controller called with start/stop and JSON physics flags; required for external-server twins')
     ap.add_argument('--twins', action='store_true', help='run flags-off and flags-on sequentially and compare')
     ap.add_argument('--twin-flags', choices=('both', 'patience', 'lead'), default='both')
+    ap.add_argument('--on-only', action='store_true',
+                    help='the twins\' on run alone: LABEL_on with patience and lead adjust on (what production runs)')
     ap.add_argument('--dry-run', action='store_true', help='print the resolved scenario without starting processes')
     ap.add_argument('--report-only', default='',
                     help='redo the event report and criteria of an earlier run directory (give the run\'s own '
@@ -4033,6 +4040,8 @@ def main():
         lph.apply_scenario(args)
         if args.server_control and not args.external_server:
             raise ValueError('--server-control requires --external-server')
+        if args.on_only:
+            lph.on_only(args)
         if args.twins and not args.dry_run:
             return lph.twins(args, sys.argv[1:])
     except ValueError as e:
