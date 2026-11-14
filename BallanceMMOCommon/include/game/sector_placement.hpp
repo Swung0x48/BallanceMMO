@@ -26,10 +26,12 @@
 #include <entity/session.hpp>
 #include <physics/physics_rt_api.h>
 #include <session/placement_plan.hpp>
+#include <utility/name_filter.hpp>
 
 #include "ck_object_ids.hpp"
 #include "host_backend.hpp"
 #include "menu_driver.hpp"
+#include "script_record_reuse.hpp"
 #include "script_replay.hpp"
 
 namespace bmmo::game {
@@ -441,6 +443,10 @@ namespace bmmo::game {
             std::vector<row_record> written;
             std::vector<copy_record> records;
             size_t renamed_longest = 0;
+            // Step DWB (B1): how the copies' names are checked (BMMO_WORK_CUTS,
+            // read at begin), and verify's counts.
+            script_reuse_mode names = script_reuse_mode::on;
+            size_t names_checked = 0, names_scanned = 0, names_differing = 0;
         };
         // Puts the job's rows back, destroys what it made (and `pending`, the
         // ids an unfinished action made), logs and returns why; the job ends.
@@ -673,6 +679,7 @@ namespace bmmo::game {
         job.builder = chosen ? chosen->GetID() : 0;
         job.scene = scene->GetID();
         job.fail_at_row = hooks.fail_at_row;
+        job.names = work_cuts_from_env();
         return {};
     }
 
@@ -693,6 +700,39 @@ namespace bmmo::game {
         std::vector<row_record>& written = job.written;
         std::vector<copy_record>& records = job.records;
         size_t& renamed_longest = job.renamed_longest;
+        // Step DWB (B1): the copies' names are checked against a filter of
+        // every object's name, made at this call's first copy in one pass over
+        // the lists CK's by-name scan walks (ck_object_ids.hpp) and fed every
+        // object a copy makes and every rename; a "maybe" is settled by that
+        // scan, so the answer is the scan's (asking the scan for every name was
+        // ~240 ms of an L6 boot and ~500 ms of L13's, each a whole-world walk
+        // that found nothing).  Local to this call: between two steps a frame
+        // can make, destroy or rename objects.  Off: the scan for every name;
+        // verify: the scan for every name too, each answer compared.
+        std::optional<utility::name_filter> names;
+        const auto make_names = [&]() {
+            size_t count = 0;
+            const int classes = CKGetClassCount();
+            for (CK_CLASSID cid = 0; cid < classes; ++cid)
+                if (CKIsChildClassOf(cid, CKCID_OBJECT)) count += static_cast<size_t>(context->GetObjectsCountByClassID(cid));
+            names.emplace(count);
+            for_each_object_id(context, [&](CK_ID id) { names->add(context->GetObject(id)->GetName()); });
+        };
+        const auto name_present = [&](const std::string& name) {
+            CKSTRING key = const_cast<CKSTRING>(name.c_str());
+            const auto scan = [&]() { return context->GetObjectByNameAndParentClass(key, CKCID_OBJECT, nullptr) != nullptr; };
+            if (!names) return scan();
+            const bool maybe = names->maybe(key);
+            if (job.names != script_reuse_mode::verify) return maybe && scan();
+            const bool present = scan();
+            ++job.names_checked;
+            job.names_scanned += maybe ? 1 : 0;
+            if (present && !maybe) {
+                ++job.names_differing;
+                line("name set verify: DIFFERS: " + name + " is present, the filter said absent");
+            }
+            return present;
+        };
         const auto started = std::chrono::steady_clock::now();
         bool copied = false;
         while (job.next < job.plan.actions.size()) {
@@ -769,6 +809,12 @@ namespace bmmo::game {
                 }
             }
             if (job.fail_at_row == a.row) return refuse("test hook: step 5 refuses at this row (--placement-fail-at)");
+            if (job.names != script_reuse_mode::off) {
+                if (!names) make_names();   // this copy's objects among them
+                else
+                    for (CK_ID id: made)
+                        if (CKObject* o = context->GetObject(id)) names->add(o->GetName());
+            }
             // The limit: kPlacementMaxName (the wire's and the bridge's).
             constexpr size_t kMaxEntityName = kPlacementMaxName;
             for (size_t i = 0; i < h.size(); ++i) {
@@ -776,9 +822,9 @@ namespace bmmo::game {
                 if (name.size() > kMaxEntityName)
                     return refuse("the copy name " + name + " (" + std::to_string(name.size()) + " characters) is longer than "
                                   + std::to_string(kMaxEntityName));
-                if (context->GetObjectByNameAndParentClass(const_cast<CKSTRING>(name.c_str()), CKCID_OBJECT, nullptr))
-                    return refuse("the copy name " + name + " is already present");
+                if (name_present(name)) return refuse("the copy name " + name + " is already present");
                 hc[i]->SetName(const_cast<CKSTRING>(name.c_str()));
+                if (names) names->add(name.c_str());
                 renamed_longest = std::max(renamed_longest, name.size());
             }
             if (name_of(hc[0]) != a.name) return refuse("the copy's root is " + name_of(hc[0]) + ", the plan's " + a.name);
@@ -892,6 +938,7 @@ namespace bmmo::game {
                 r.objects.emplace_back(id, o->GetClassID());
                 const char* cls = CKClassIDToString(o->GetClassID());
                 ++census[cls ? cls : "?"];
+                if (names) names->add(o->GetName());   // what steps 6-9 made
             }
             for (const auto& [cls, n]: census) r.census += (r.census.empty() ? "" : " ") + cls + ":" + std::to_string(n);
             r.groups = group_names;
@@ -933,6 +980,10 @@ namespace bmmo::game {
                             + std::to_string(again.rewrites()) + " rewrites" + (again.error.empty() ? "" : " (" + again.error + ")"));
         }
         const size_t shares = plan.shares(), rewrites = plan.rewrites(), renamed_longest = job_->renamed_longest;
+        if (job_->names == script_reuse_mode::verify)
+            line("name set verify: " + std::to_string(job_->names_checked) + " names checked, "
+                 + std::to_string(job_->names_scanned) + " settled by CK's scan, " + std::to_string(job_->names_differing)
+                 + " differing");
         line("same-pose rows: " + (job_->same_pose.empty() ? std::string("-") : job_->same_pose));
         line("rewritten share rows: " + (job_->rewritten.empty() ? std::string("-") : job_->rewritten));
         copies_ = std::move(job_->records);

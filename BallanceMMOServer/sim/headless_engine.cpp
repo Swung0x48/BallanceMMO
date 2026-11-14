@@ -15,6 +15,7 @@ bool EditScript(CKLevel* level, const CGameConfig& config, const char* resolvedF
 #include <game/custom_map.hpp>
 #include <utility/md5.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -24,6 +25,7 @@ bool EditScript(CKLevel* level, const CGameConfig& config, const char* resolvedF
 #include <mutex>
 #include <system_error>
 #include <string_view>
+#include <vector>
 
 namespace bmmo::sim {
     namespace {
@@ -118,6 +120,45 @@ namespace bmmo::sim {
             }
             return CK_OK;
         }
+
+        // Step DWB (T2 + B4): the deterministic "Random" block (design 9.10 /
+        // Part B) patched after every file load.  CK runs the managers'
+        // PostLoad at the end of every CKFile::LoadFileData - base.cmo's and
+        // each one a script's Object Load makes (Balls.nmo, the level) - so the
+        // explosion scripts are patched in the frame that loads them, before
+        // any of their blocks can run.  tick() used to look Gameplay_Ingame up
+        // by name every frame (~6 % of a tick, the whole session long) only to
+        // know when to stop scanning for them.  A copy (CopyObjects) runs no
+        // PostLoad: the anchor (reset_session_clock) and the trafo sets patch
+        // theirs as before.  One per context, which owns and deletes it
+        // (CKContext::ClearManagersData); its only state is its engine.
+        const CKGUID kRandomBlockHookGuid(0x5d0e4b1a, 0x2c7f9e63);
+
+        class random_block_hook final : public CKBaseManager {
+        public:
+            random_block_hook(CKContext* context, const headless_engine* engine, bool verify)
+                : CKBaseManager(context, kRandomBlockHookGuid, const_cast<CKSTRING>("BallanceMMO Random Block Hook")),
+                  engine_(engine), verify_(verify) {}
+            CKDWORD GetValidFunctionsMask() override { return CKMANAGER_FUNC_PostLoad; }
+            CKERROR PostLoad() override {
+                const int patched = bmmo::physics::install_random_block(m_Context);
+                if (patched > 0) engine_->log("random block: " + std::to_string(patched) + " instances patched");
+                if (verify_ && patched > 0 && bmmo::game::script_active(m_Context, "Gameplay_Ingame"))
+                    engine_->log("random hook verify: DIFFERS: the load hook patched " + std::to_string(patched)
+                                 + " instances with Gameplay_Ingame active (the tick scan would not have)");
+                return CK_OK;
+            }
+
+        private:
+            const headless_engine* engine_;
+            bool verify_;
+        };
+
+        std::vector<CKBaseManager*> manager_order(CKContext* context) {
+            std::vector<CKBaseManager*> order;
+            for (int i = 0; i < context->GetManagerCount(); ++i) order.push_back(context->GetManager(i));
+            return order;
+        }
     }
 
     std::unique_ptr<headless_engine> headless_engine::create(const engine_options& options,
@@ -171,6 +212,38 @@ namespace bmmo::sim {
                 || !CKIpionManager::GetManager(context)) {
             error = "headless CKContext is missing a required manager";
             return nullptr;
+        }
+
+        // Step DWB (docs/realtime-design.md 'Built (the server stops work it
+        // does not need, step DWB, 2026-11-13)'), BMMO_WORK_CUTS.
+        engine->work_cuts_ = bmmo::game::work_cuts_from_env();
+        if (engine->work_cuts_ != bmmo::game::script_reuse_mode::off) {
+            // B5: no vertex-cache reordering of the render primitives' indices
+            // (CKMesh::CreateRenderGroups), read only by render paths and the
+            // memory count; m_Faces, the material groups and the hulls are
+            // unchanged.
+            context->GetRenderManager()->SetRenderOptions(const_cast<CKSTRING>("VertexCache"), 0);
+            // T2 + B4.  A manager joins the context's manager table, whose
+            // order sets the order of equal-priority managers in every function
+            // list (CKContext::BuildSortedLists): checked in every mode that
+            // the others keep theirs (logged on a difference; verify logs the
+            // pass too).  A refused registration (CKERR_ALREADYPRESENT parks
+            // the hook in the context's inactive managers, which the context
+            // still deletes) keeps the tick scan instead.
+            const bool verify = engine->work_cuts_ == bmmo::game::script_reuse_mode::verify;
+            const std::vector<CKBaseManager*> before = manager_order(context);
+            auto* hook = new random_block_hook(context, engine.get(), verify);
+            const CKERROR registered = context->RegisterNewManager(hook);
+            engine->random_hook_ = registered == CK_OK;
+            if (!engine->random_hook_)
+                engine->log("random hook: not registered (CK error " + std::to_string(registered)
+                            + "), the Random blocks are re-patched at every frame while a level loads");
+            std::vector<CKBaseManager*> after = manager_order(context);
+            after.erase(std::remove(after.begin(), after.end(), hook), after.end());
+            if (after != before || verify)
+                engine->log(std::string(verify ? "random hook verify: " : "random hook: ") + "the other "
+                            + std::to_string(before.size()) + " managers "
+                            + (after == before ? "keep their order" : "DIFFER in order"));
         }
 
         if (auto* interface_manager = InterfaceManager::GetManager(context))
@@ -318,9 +391,11 @@ namespace bmmo::sim {
         }
         // Deterministic "Random" block (design 9.10 / Part B): reroutes the
         // Random blocks inside the trafo explosion scripts once Balls.nmo
-        // has been loaded by the boot scripts.  tick() repeats this while a
-        // level is still loading; cheap (SetFunction only on a mismatch), and
-        // reset_session_clock repeats it at every anchor anyway.
+        // has been loaded by the boot scripts.  The load hook (step DWB) does
+        // this after every file load - base.cmo's included, so this finds
+        // nothing to patch unless BMMO_WORK_CUTS is off; cheap (SetFunction
+        // only on a mismatch), and reset_session_clock repeats it at every
+        // anchor anyway.
         const int patched = bmmo::physics::install_random_block(context_);
         if (patched >= 0) log("random block: " + std::to_string(patched) + " instances patched");
         else log("random block: no \"Random\" prototype registered");
@@ -347,15 +422,30 @@ namespace bmmo::sim {
         time_->SetTimeScaleFactor(1.0f);
         time_->SetMinimumDeltaTime(bmmo::session::TICK_DELTA_MS);
         time_->SetMaximumDeltaTime(bmmo::session::TICK_DELTA_MS);
-        // Re-patch the "Random" block instances while a level is still
-        // loading (design 9.10): base.cmo's own instances are already caught
-        // by finish_load, this catches whatever a level's file adds, before
-        // its scripts get a chance to draw from it.  Stops once
-        // Gameplay_Ingame is active so a long session does not keep scanning
-        // every object every tick.
-        if (!bmmo::game::script_active(context_, "Gameplay_Ingame")) {
-            const int patched = bmmo::physics::install_random_block(context_);
-            if (patched > 0) log("random block: " + std::to_string(patched) + " instances patched");
+        // Step DWB: the load hook (random_block_hook) patches whatever a
+        // level's file adds.  Off: re-patch the "Random" block instances at
+        // every frame while a level is still loading (design 9.10), until
+        // Gameplay_Ingame is active (also when the hook was not registered).
+        // Verify: that scan beside the hook, each instance it patches one the
+        // hook missed.
+        if (!random_hook_ || work_cuts_ == bmmo::game::script_reuse_mode::verify) {
+            if (!bmmo::game::script_active(context_, "Gameplay_Ingame")) {
+                const int patched = bmmo::physics::install_random_block(context_);
+                if (!random_hook_) {
+                    if (patched > 0) log("random block: " + std::to_string(patched) + " instances patched");
+                } else {
+                    ++verify_scans_;
+                    verify_scan_patched_ += patched > 0 ? static_cast<uint64_t>(patched) : 0;
+                    verify_scanning_ = true;
+                    if (patched > 0)
+                        log("random hook verify: DIFFERS: the tick scan patched " + std::to_string(patched)
+                            + " instances the load hook missed");
+                }
+            } else if (verify_scanning_) {
+                verify_scanning_ = false;
+                log("random hook verify: " + std::to_string(verify_scans_) + " tick scans, "
+                    + std::to_string(verify_scan_patched_) + " instances patched by them");
+            }
         }
         advance_level_request();
         const CKERROR processed = context_->Process();

@@ -3787,3 +3787,199 @@ record), and the arrival trace landing in `s1_quorum`; `lbm_fast_judge` failing 
 every call site's count equal to its kind's); the gate script's marker-based server-journal pick (changed after the
 gate ran); a run with snapshots on; the fast LBM's arms at the default log level; the wire check (no wire change);
 the 8845HS cost.
+
+## Built (the server stops work it does not need, step DWB, 2026-11-13)
+
+**Why.** The audit of 2026-11-13 (`.local-tools/work/DWA/`: `census.md` the 8845HS PMU profile, `design.md`,
+`skeptic.md` the corrected plan) found work the headless engine does that nothing reads. The user approved the clean
+approaches only, and asked for thread safety where it is cheap: new state lives in the world, the CK context or a
+manager instance - no new process global, no mutable function-local static, no lazily initialised shared table. A
+world boot runs on the one simulation thread and stalls every other session for its whole length, so the boot items
+are worst-case items, not only boot time. This step is the skeptic's stages 0 and 1: the baseline at `18f1a3bb`
+(`.local-tools/work/DWB/`: its A/B harness `ab_hash.sh` / `ab_cmp.py` / `ab_ticks.py` / `pmc_dwb.sh`) and four cuts in
+BMMO's own code (no submodule edit).
+
+**The switch.** `BMMO_WORK_CUTS` = `on` | `off` | `verify`, on when unset (`work_cuts_from_env`,
+`game/script_record_reuse.hpp`), read where the state it decides is made - a placement job at `begin`, a headless
+engine at `create` - and kept there. `off` restores the old paths of B1, T2 + B4 and B5 (B2 has no off: its sources
+keep no bytes in every mode); `verify` runs the old path beside the new one and logs each difference and a count.
+
+**B1, the sector placement's rename check** (`game/sector_placement.hpp`; shared, the retail client runs it in
+`core_host.cpp`'s placement slices). Step 5 asked CK for every copied name (`GetObjectByNameAndParentClass` with
+`CKCID_OBJECT`: every class list, exact `strcmp`), a walk of every object that found nothing - 157 ms of an L6 boot
+and 350 ms of L13's on the 8845. Now each `step` call, at its first copy, makes a `utility::name_filter`
+(`utility/name_filter.hpp`: two bits per name in a power-of-two table of at least 32 bits per name, no allocation per
+name) in one pass over the lists that scan walks (`for_each_object_id`, `ck_object_ids.hpp`: a dead id skipped as the
+scan skips it, objects pending deletion that are still in the lists included), and feeds it every object each copy
+makes (after the copy, and again after steps 6-9) and every rename. A name the filter has not seen is absent; a
+"maybe" (a held name, or a collision: about 0.4 % when full) goes to CK's scan, so the answer is the scan's whatever
+the filter over-holds - a destroyed or renamed object's stale bits cost a scan, never another answer, so nothing is
+erased on a refusal or an undo. The filter lives on that call's stack: a frame between two retail slices, which can
+make, destroy or rename objects, finds nothing left over. Verify asks the scan for every name and prints
+`name set verify: N names checked, M settled by CK's scan, D differing` at `finish` (each difference at once). On
+the retail client the filter is exact by the same argument only if retail's own CK2.dll finds a name the way the
+Ballanced source does (`CKObjectManager.cpp` 428-449: the same class lists, the same `GetObject`, exact `strcmp`).
+Checked against the 2002 CK2.dll retail loads (sha256 ac409e88...): `CKObjectManager::GetObjectByNameAndParentClass`
+(0x2400ef78) walks the class table at 0x2405f850 child class by child class and compares each name with the call
+at 0x2400f0e1, a thunk (0x2403b91a) to MSVCRT `strcmp` (IAT 0x2403f0a8) - exact, case-sensitive, as the
+reimplementation; `GetObjectByName` (0x2400ee97) uses the same `strcmp`. Retail verify agrees (in 2 x 503 retail
+names nothing was present and no "maybe" came up). Had retail's scan matched a name the filter never held, production
+would make a duplicate name where the old check refused the copy - a difference a verify run would print as `DIFFERS`.
+
+**T2 + B4, the Random blocks patched at load** (`sim/headless_engine.cpp`). `tick()` looked `Gameplay_Ingame` up by
+name every frame (5.3 % of an L6 replay tick, 6.1 % of L13's, the whole session long) only to know when to stop
+re-patching the deterministic Random block (design 9.10) into a level's explosion scripts. Now a manager,
+`random_block_hook` (PostLoad only), made right after `CKCreateContext` and owned by the context
+(`CKContext::ClearManagersData` deletes it; its only state is its engine pointer and the verify flag), calls
+`install_random_block` at the end of every `CKFile::LoadFileData` - base.cmo's and every Object Load a script runs
+(Balls.nmo, the level) - in the frame that loads them, before any of their blocks can run; `tick()` no longer scans.
+A copy (`CopyObjects`) runs no PostLoad: the anchor (`reset_session_clock`) and the trafo sets patch theirs as
+before. The log keeps its `random block: N instances patched` lines, the same kinds and counts (the hook prints the
+level's in its loading frame; finish_load's still reads 0). A manager joins the context's manager table, whose
+iteration order sets the order of equal-priority managers in every function list (`CKContext::BuildSortedLists`):
+every engine with the cuts on checks at `create` that the other 23 managers keep their order and logs `random hook: the other N
+managers DIFFER in order` if they do not (observed, not guaranteed: the hook is the table's 24th entry, exactly its
+pool at 32 buckets, so a 25th manager in the headless registry would rehash it; the fast LBM's judge fails a twin on
+that line). `create` registers the hook itself and checks the result: a refusal (`CKERR_ALREADYPRESENT` parks the
+manager in the context's inactive list, which the context still deletes, and PostLoad never reaches it) logs
+`random hook: not registered` and keeps the old per-tick scan for that engine. Verify logs the order check's pass
+too, keeps the old per-tick scan (an instance it patches is one the hook missed) and flags a hook patch made with
+Gameplay_Ingame active (one the old scan would not have made); the fast LBM's judge fails a twin on any
+`verify: DIFFERS` line. A level reset (`CKBehavior::Load` resets a behaviour's function from its GUID on any state
+chunk read, and no PostLoad fires there) was the one window the old scan covered that the hook might not: client 3
+sending "Reset Level" at tick 600 under verify (`dwbrr`, both twins) reopened the old scan's window for 11 frames
+(522 -> 533 tick scans) and those scans patched 0 instances, so the hook alone gives the old answer there.
+SimTool's `tick_debug` never scanned; it now gets the load hook's patches too (a diagnostic path).
+
+**B2, silent sources** (`sim/null_managers.cpp`). Every sound of a boot was allocated and zeroed in full, and every
+minion play (`DuplicateSource`) copied its bytes, for a buffer nothing reads. A source keeps its size, format,
+settings and play position (`GetWaveSize` gives a sound's length); `Lock` returns the region a source would give (the
+same counts, the same `+ write_cursor`) in scratch the manager owns: two slots taken in turn
+(`CKWaveSound::ReallocSource` locks two sources and copies one region into the other), each at least the largest
+source made so far (that copy is the new source's whole size, and the new source is made before either lock),
+allocated without zeroing, grown only at its own lock, never read back.
+
+**B5, no vertex-cache pass** (`headless_engine::create`): `SetRenderOptions("VertexCache", 0)` right after the
+context is made. `CKMesh::CreateRenderGroups` then skips `VertexCacheOptimizer` over the render primitives' index
+lists, which only render paths and the memory count read; `m_Faces`, the material groups (`GetMaterial`) and the hulls
+are unchanged.
+
+**Thread safety.** The filter is a local of one `step` call; the hook and the scratch slots are members of a
+per-context manager; the switch is read into the job and the engine. No process state is added. One RLO global
+(`.local-tools/work/RLO/census.md` section 2B) is on a cut's path and stays as it was: `g_set_position_original`
+(`physics_state.cpp`), which `install_random_block` sets once to the same value (the census's benign race); the hook
+calls it on the simulation thread like the scan did. Taking the function from the prototype instead would change
+retail's physics_RT and could differ from the instances' under a mod that hooks the prototype, so it is not
+result-neutral by construction. The baseline's two-session run found another, on no cut's path, fixed in this
+step (next paragraph).
+
+**The event log's dangling manager** (`physics/physics_state.cpp`, the process-wide `event_log_listener`). The
+listener kept `CKIpionManager* manager` for a birth's creation parameters (engine change #19), set by
+`drain_event_log` - which the server calls at every world's boot - and read by `record_recipe` at every body birth in
+every environment the listener was installed on. After the newest world's teardown it pointed at freed memory, and
+the next birth in another world read it (rc 139 in the harness: a second world booted at L6's tick 12017 and
+destroyed 300 ticks later, `apply_event` -> `physicalize` -> `IVP_Polygon` -> `record_recipe`); with two worlds alive
+it formatted the newest world's creation into another world's birth line. Now the manager is kept with the
+environment it was drained with (`manager_environment`); `record_recipe` reads it only for a birth in that
+environment (`event->environment`, which every IVP creation fills), and `event_environment_deleted` clears the pair
+when that environment goes, comparing pointers only - every manager teardown (`~CKIpionManager`, `OnCKEnd`, the
+resets) deletes its environment first (`DestroyEnvironment`), so the pointer cannot outlive its manager. The same
+kind of slot, cleared for whichever environment went: the listener's `environment` and the psi probe's are now
+cleared only when their own environment goes (before, a second world's teardown cleared the running world's, and
+its next drain installed the listener on it a second time). The recipe text is unchanged wherever the old pointer was
+alive: a recipe was written only while the drained manager's `m_CurrentCreate` was set, i.e. while that manager was
+making the body, on one thread in its own environment - the one it was drained with, since a manager re-creates its
+environment only after deleting the old one, and the listener reaches the new one only through a drain. No host reads
+a second world's recipes (the server's world reads only the trace's constraint / birth / psi / force
+lines). Retail code changes: `physics_state.cpp` is in the physics_RT bridge. Listed, not fixed (RLO's per-environment
+listener, design.md 'Event listener'): the listener and its `text`, `muted`, `keep_muted_recipes` and `diagnostics`
+stay one process-wide object shared by every world (unsynchronised; the server runs its worlds on one thread);
+`drain_event_log` still re-adds the listener (`add_listener_object_global`, `add_listener_PSI`, which do not
+de-duplicate) when the last drained environment is another one, so two worlds drained in turn (the server's trace)
+install it again at every drain; `psi_watches` is still cleared at any environment's deletion (diagnostics,
+`BMMO_PSI_PROBE`). The watch vectors' raw object pointers are erased at every body's deletion, which an environment's
+teardown also fires. Checked (`.local-tools/work/DWB/evt/`: `chain_dwbe.sh`, `8845_chain_dwbe.log`; no unit test
+reaches it, the test binary links no IVP): x64 and 861/861; on the 8845, L6's journal replayed with a second world
+(L13, L6, L7) booted at tick 12017 and destroyed at 12317, three runs each - HEAD's diag build `srvjd` rc 139 in 9/9
+(the first tick missing 12328, 12394 or 12492, every record before the crash equal to its one-world run), an intermediate tree's (`dwbed`: the cuts and the fix, before the review's fixes) ran
+9/9 to the recording's end, every record of the running world equal to its one-world run and the summary line
+unchanged, its one-world run equal to HEAD's; HEAD `srvj` against that tree's `dwbe` on the four journals,
+both orders, 12/12 AB-EQUAL. On the final tree (`dwbrd`, the results below): the same second world (L13, L6, L7)
+destroyed at 12317, two runs each, 6/6 to the recording's end (rc 3), every record equal to its one-world run, the
+summary line unchanged. The recipe text a single-world host reads was argued unchanged from the code; the final
+gate measured it where hosts read it: the fast LBM's and the L6 re-drive's headless clients (their birth feed reads
+the recipe lines) gave journals equal to JNL's, and retail (physics_RT with the fix, rollback re-creates bodies from
+the recipes) gave FINAL rows bit-equal to r6on's.
+
+**Retail.** B1 changes retail code (the shared header in the retail client's placement slices); T2 + B4, B2 and B5
+are the headless engine's and the null managers', which retail does not run. The event-log fix changes the
+physics_RT bridge retail loads (one world: the same recipe lines).
+
+**Results** (`.local-tools/work/DWB/`: `gate/run_gate.sh` and `gate/gate.log` the final gate, `fix/` the review's
+reruns and the 8845's aggregates `fix/8845_chain_dwbr.log` / `fix/8845_an_dwbr.log` / `fix/8845_dwbrt13x.log` / `fix/8845_dwbrh3.log`,
+`fix/8845/chain_dwbr.sh` / `an_dwbr.sh`; the baseline's `8845_chain_dwb1.log`; `gate_pre/` the builder's runs, which
+predate the event-log fix and the review's fixes). Every run below is on the final tree; the product files equal the
+tree the 8845 package was built from (`fix/tree_hashes.txt`), and each build's `physics_state.cpp` object (x64, the
+x86 physics_RT bridge, the Arch server) is newer than the fix (the dirty build id is the same string before and
+after it). Gate (one script): 861/861 (one new test, `PlacementNameFilter`); x64, x86 and the Arch server. Fast LBM
+as shipped (`dwbrf1`): 38/38 twins FINAL exact, rows equal to JNL's `jnlf6`, 178/178 journals equal to `jnlf6`'s in
+run mode, the `random block:` lines equal in kind and count (178 + 178), no `random hook` line. The L6 re-drive
+(`pf_dwbr1_1`): mism 0 on 13/13 clients, 72 749 rewinds (`pf_jnl3_1`: 72 749), the 14 journals equal to
+`pf_jnl3_1`'s in run mode, the placement line (25 copies, signature `51c8b1bba2f16934`) in all 14 logs. Retail at
+K = 20, L12 and L11 at human key rates as shipped (`dwbg_l12_h_150_1`, `dwbg_ctl_h_150_1`; the two game copies'
+physics_RT.dll and .bmodp byte-equal to the build): 0 mismatches, FINAL rows bit-equal to r6on's (L11's 32 trafo
+pieces), the placement lines (62 and 53 copies) and signatures equal to JNL's; L12 again with
+`BMMO_WORK_CUTS=verify` (`dwbrg_l12_h_150_v`, reaching the two retail clients, not the WSL server): `503 names
+checked, 0 settled by CK's scan, 0 differing` on each, FINAL rows bit-equal. Before the gate, in verify: the fast LBM
+(`dwbrv1`) 38/38 twins FINAL exact, every one of the 178 engines (the 38 servers and 140 headless clients) printed
+`the other 23 managers keep their order` and a tick-scan count (92 916 scans, 0 instances patched), no difference
+line (B1 does not run there: the arena pools nothing); the L6 re-drive (`pf_dwbrv_1`) with B1 beside CK's scan on
+the server and the 13 headless clients: `204 names checked, 0 settled by CK's scan, 0 differing` on all 14, mism 0,
+72 749 rewinds, the 14 journals equal to `pf_jnl3_1`'s; the level reset (`dwbrr`, above) 2/2 twins FINAL exact.
+
+The 8845HS (vCPU 2, the public test's L6 / L13 / L7 / L8 server journals replayed by SimTool; base `srvj` = HEAD,
+final `dwbr`, their diag builds `srvjd` / `dwbrd`): every record of every replay equal - base vs final in both
+orders and each against itself (12 AB-EQUAL), in verify (4), with the cuts off (4, `dwbrh3`: the tick scan the
+off path and a refused hook take, the same `random block:` lines as the base, no `random hook` line), the timing
+runs (12 + 3), the kept second worlds (4) and the destroyed ones against their one-world run (6), 45 AB-EQUAL and no
+difference line; verify on all four: 0
+difference lines, the managers keep their order, 0 instances patched by 542-552 tick scans, 204 / 402 / 210 / 283
+names checked, 0 settled by the scan, 0 differing; as shipped no `random hook` line and the same two `random block:`
+lines as the base. PMU totals from base and final run back to back in one chain (`rn*` / `rk*`), and the baseline
+chain's base run (`n*`) beside them, since one base run's cycles:u vary by up to 7 % (L8: 155.72 vs 144.20 G);
+instructions:u agree within 0.1 % across base runs:
+
+| | L6 | L13 | L7 | L8 |
+|---|---|---|---|---|
+| instructions:u, base -> final | 86.35 -> 81.12 G (-6.1 %) | 232.94 -> 215.88 G (-7.3 %) | 115.30 -> 109.01 G (-5.5 %) | 224.68 -> 211.37 G (-5.9 %) |
+| cycles:u, base (`rn` / `n`) -> final | 56.86 / 60.49 -> 51.89 G (-8.7 / -14.2 %) | 158.81 / 160.46 -> 144.35 G (-9.1 / -10.0 %) | 78.25 / 79.87 -> 72.29 G (-7.6 / -9.5 %) | 144.20 / 155.72 -> 135.20 G (-6.2 / -13.2 %) |
+| mean tick, live-equivalent (A/B pairs) | -9.6 %, -6.4 % | -6.2 %, -9.2 %, -9.7 %, -8.5 % | -10.7 %, -13.2 % | -7.1 %, -9.3 % |
+| boot (cold process), base -> final | 531 / 454 -> 278 / 285 ms | 815 / 790 / 805 / 808 -> 422 / 431 / 413 / 424 ms | 472 / 481 -> 291 / 294 ms | 536 / 525 -> 290 / 328 ms |
+| a second world booted at L6's tick 12017, kept | 359 -> 212 ms | 642 -> 363 ms | 368 -> 223 ms | 417 -> 241 ms |
+| the same, destroyed at 12317 (final, two runs) | 217 / 216 ms | 365 / 360 ms | 226 / 218 ms | - |
+
+The second boot is the stall every other session waits through: at 15.15 ms a tick, about 24 -> 14 ticks for an L6,
+42 -> 24 for an L13. The tails (p99, p999, max) move within the A-vs-A noise. One tick of one final L13 run went
+over 15.15 ms (tick 15337, 15.61 ms): it is one of the replay's heaviest ticks in every run (6.3-8.6 ms in the seven
+others, base and final), and a second L13 pair (`dwbrt13x`) gave final 7.70 / 7.81 ms max and base 8.46 / 14.07 ms,
+so a one-off on the shared machine, either build. No other tick over 15.15 ms in either build. The baseline's sampled
+boot (1M-cycle samples, L6 / L13, on the builder's tree with the same four cuts): user samples 1809 -> 919 and 3492 ->
+1555; CK's by-name scan under `sector_placement::step` 713 -> 0 and 1591 -> 0 (the filter 2 and 4),
+`install_random_block` 75 -> 5 and 65 -> 5, `VertexCacheOptimizer` 39 -> 0 and 116 -> 0, the null sound manager 11 ->
+0 and 7 -> 0; the tick frame outside `CKContext::Process` (T2's scan) 5.33 % -> 0.03 % and 6.09 % -> 0.03 % of a
+replay tick. With the cuts off (B2 alone, the builder's tree) instructions:u were equal to the base (86.38 / 233.13 G).
+
+**Not exercised:** the hook's refused registration (`random hook: not registered` and its tick scan: no GUID clash
+can be made without a second manager); a 25th headless manager (the order check would say it); the retail
+client's CK2.dll name compare (above: retail verify saw no present name and no "maybe"); the ESC menu's restart on a
+headless client (the reset above sends "Reset Level" only; RT2's retail `restart` is retail's path, which runs no
+headless engine), a level load while Gameplay_Ingame is active and a level change inside one engine; B1 in the fast
+LBM (no placement); the retail placement's time per slice with the filter, and a retail placement spanning several
+slices with frames between them under verify (not traced which); a filter "maybe" settled by the scan (none in the
+1 099 server, 2 652 headless-client and 1 006 retail names checked); a refusal by step 5 with the filter on;
+`ReallocSource`'s growth path with the scratch slots (not traced whether a boot's sounds reach it); `BMMO_WORK_CUTS`
+reaching the WSL server in the retail runs (no WSLENV); the server binary (the 8845 A/B replays with SimTool; the
+local runs used the Windows and Arch servers), the 8845HS live server and a second world with players; two worlds
+drained in turn under the server's trace, `BMMO_PSI_PROBE` or the hull probe with two worlds, a second world on
+another thread; the sampled boot profile and the cuts-off PMU row on the final tree; the K7 capture replay; the wire
+check (no wire change).

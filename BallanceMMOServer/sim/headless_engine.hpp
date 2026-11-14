@@ -3,7 +3,9 @@
 // Headless instance of the original game: the statically linked Ballanced
 // engine with the NULL rasterizer, a silent sound manager and a scriptable
 // input manager.  It loads base.cmo and runs the retail scripts exactly like
-// the Player does, one fixed 1/66 s behaviour frame per tick().
+// the Player does, one fixed 1/66 s behaviour frame per tick().  Render-only
+// mesh work the Player does is cut where nothing reads it (step DWB: the
+// vertex-cache pass), and the sound manager keeps no sample bytes.
 //
 // Every method must be called from the thread that created the engine.
 
@@ -15,6 +17,7 @@
 
 #include <entity/session.hpp>
 #include <game/menu_driver.hpp>
+#include <game/script_record_reuse.hpp>
 
 class CKContext;
 class CKTimeManager;
@@ -96,6 +99,16 @@ namespace bmmo::sim {
         void* game_info_ = nullptr;
         uint64_t ticks_ = 0;
         bool startup_acquired_ = false;
+        // Step DWB: BMMO_WORK_CUTS as this engine was made.  On, the Random
+        // blocks are patched after every file load (the context's load hook,
+        // headless_engine.cpp) and tick() no longer scans for Gameplay_Ingame;
+        // off, tick() scans as before and there is no hook; verify, both, with
+        // the scan's counts here (a patch it makes is one the hook missed).
+        // A hook CK did not register (random_hook_ false) scans as off does.
+        bmmo::game::script_reuse_mode work_cuts_ = bmmo::game::script_reuse_mode::on;
+        bool random_hook_ = false;
+        bool verify_scanning_ = false;
+        uint64_t verify_scans_ = 0, verify_scan_patched_ = 0;
         bmmo::game::level_request level_request_;
         bool map_redirect_pending_ = false;   // step CMAP: a custom map's request not redirected yet
         int map_redirect_waited_ = 0;

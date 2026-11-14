@@ -612,7 +612,15 @@ namespace bmmo::physics {
         public:
             std::string text;
             IVP_Environment* environment = nullptr;
-            CKIpionManager* manager = nullptr;   // for the creation parameters (engine change #19)
+            // For the creation parameters (engine change #19): the manager
+            // of the last drained environment, and that environment. A
+            // birth in any other environment (another world in the same
+            // process) gets no recipe; the pair is cleared when its
+            // environment goes, which its manager's teardown always does
+            // first (CKIpionManager::DestroyEnvironment), so the pointer
+            // never outlives its manager (step DWB).
+            CKIpionManager* manager = nullptr;
+            IVP_Environment* manager_environment = nullptr;
 
             // A replay re-executes mechanism scripts whose Physics WakeUp
             // and births would otherwise be logged as live events
@@ -685,9 +693,10 @@ namespace bmmo::physics {
             std::string muted_recipes;
             void record_recipe(IVP_Event_Object* event) {
                 std::string* sink = muted ? (keep_muted_recipes ? &muted_recipes : nullptr) : &text;
-                if (!sink || !manager || !manager->m_CurrentCreate || sink->size() > 256 * 1024) return;
+                if (!sink || !event || !event->real_object || sink->size() > 256 * 1024) return;
+                if (!manager || event->environment != manager_environment || !manager->m_CurrentCreate) return;
                 const CKIpionManager::PhysicsCreateParams& p = *manager->m_CurrentCreate;
-                if (!p.target || !event || !event->real_object) return;
+                if (!p.target) return;
                 char line[2600];
                 const int n = std::snprintf(line, sizeof(line),
                     "t=%.6f recipe %s|fixed=%d|frozen=%d|coll=%d|cmc=%d|fr=%a|el=%a|m=%a|ld=%a|rd=%a|mc=%a,%a,%a|surf=%s|convex=",
@@ -797,7 +806,13 @@ namespace bmmo::physics {
                 g_surface_memo_generation.fetch_add(1);   // step OPA
                 g_body_set_generation.fetch_add(1);
                 retire_surface_memo(deleted);
-                environment = nullptr;
+                // Pointers compared only: the dying environment's manager is
+                // not read here.
+                if (environment == deleted) environment = nullptr;
+                if (manager_environment == deleted) {
+                    manager = nullptr;
+                    manager_environment = nullptr;
+                }
             }
         };
         // Never destroyed: the IVP environment may outlive static storage at
@@ -835,7 +850,10 @@ namespace bmmo::physics {
                 }
                 v.erase(std::remove_if(v.begin(), v.end(), [](const psi_watch& w) { return w.remaining <= 0; }), v.end());
             }
-            void environment_will_be_deleted(IVP_Environment*) override { environment = nullptr; psi_watches().clear(); }
+            void environment_will_be_deleted(IVP_Environment* deleted) override {
+                if (environment == deleted) environment = nullptr;
+                psi_watches().clear();
+            }
         };
         psi_probe& g_psi_probe = *new psi_probe();
 
@@ -911,7 +929,10 @@ namespace bmmo::physics {
             g_body_set_generation.fetch_add(1);   // bodies made before the listener went unseen
             g_event_log.text += "listener installed;";
         }
-        if (environment) g_event_log.manager = physics;
+        if (environment) {
+            g_event_log.manager = physics;
+            g_event_log.manager_environment = environment;
+        }
         if (environment && g_psi_probe.environment != environment) {
             environment->add_listener_PSI(&g_psi_probe);
             g_psi_probe.environment = environment;

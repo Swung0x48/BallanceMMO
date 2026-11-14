@@ -6,12 +6,14 @@
 // (placement_plan_rows.inc, generated from those listings).
 #include <gtest/gtest.h>
 
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
 
 #include <entity/session.hpp>
 #include <session/placement_plan.hpp>
+#include <utility/name_filter.hpp>
 
 namespace {
 
@@ -228,6 +230,31 @@ TEST(PlacementPlanLevels, Level1) {
     ASSERT_TRUE(again.error.empty()) << again.error;
     EXPECT_EQ(0u, again.copies());
     EXPECT_EQ(0u, again.rewrites());
+}
+
+// Step DWB (B1): the rename check's filter says "no" only for a name never
+// added (the check's exactness rests on it: a "maybe" goes to CK's scan), and
+// says "maybe" for a name it does not hold rarely enough to save the scans.
+TEST(PlacementNameFilter, NeverMissesAndRarelyGuesses) {
+    const size_t count = 50000;
+    bmmo::utility::name_filter filter(count);
+    char name[64];
+    for (size_t i = 0; i < count; ++i) {
+        std::snprintf(name, sizeof(name), "P_Modul_%zu_Sector_%zu", i % 97, i);
+        filter.add(name);
+    }
+    for (size_t i = 0; i < count; ++i) {
+        std::snprintf(name, sizeof(name), "P_Modul_%zu_Sector_%zu", i % 97, i);
+        ASSERT_TRUE(filter.maybe(name)) << name;
+    }
+    size_t guesses = 0;
+    for (size_t i = 0; i < count; ++i) {
+        std::snprintf(name, sizeof(name), "P_Modul_%zu_Sector_%zu_R%zu", i % 97, i, i % 51);
+        guesses += filter.maybe(name) ? 1 : 0;
+    }
+    EXPECT_LT(guesses, count / 50) << guesses << " of " << count;
+    EXPECT_FALSE(filter.maybe(nullptr));
+    EXPECT_FALSE(bmmo::utility::name_filter(0).maybe("Ball_Explosion_Wood"));
 }
 
 TEST(PlacementPlanLevels, ArenaHasNothingPooled) {

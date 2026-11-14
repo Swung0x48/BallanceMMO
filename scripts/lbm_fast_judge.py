@@ -14,6 +14,8 @@ import sys
 
 W = pathlib.Path(__file__).resolve().parent.parent
 A = W / 'maps/arena-test'
+CUT_DIFF = re.compile(r'(?:name set|random hook) verify: DIFFERS[^\n]{0,120}'
+                      r'|random hook(?: verify)?: the other \d+ managers DIFFER in order')
 
 
 def judge(case, root, simtool):
@@ -37,6 +39,10 @@ def judge(case, root, simtool):
     # logs (arena_map_test's criteria_source_check); a twin whose check says otherwise fails.  No key: not
     # checked (--no-log-source-check, or no event report), said, not failed.
     out['criteria_source_check'] = summary.get('criteria_source_check')
+    # Step DWB: a work cut's verify difference (BMMO_WORK_CUTS=verify) or a manager table whose order the load hook
+    # moved, in any engine's log, fails the twin.
+    out['cut_differences'] = sorted({m.group(0) for f in sector.glob('*.log')
+                                     for m in CUT_DIFF.finditer(f.read_text(encoding='utf-8', errors='replace'))})
     servers = sorted((sector / 'journals').glob('*.bmjs'))
     clients = sorted(sector.glob('client*.bmjc'))
     if servers and clients:
@@ -75,11 +81,13 @@ def main():
                 print('    criteria from the journals: not checked against the logs', flush=True)
             elif check != 'equal':
                 print('    FAIL (not counted exact) criteria from the journals vs the logs: ' + check, flush=True)
+            for d in r.get('cut_differences', []):
+                print('    FAIL (not counted exact) ' + d[:170], flush=True)
             for l in r.get('final', []):
                 if ' PASS ' not in l:
                     print('    ' + l[:170], flush=True)
     exact = sum(1 for r in rows if r.get('final_exact') and not r.get('server_log_level')
-                and r.get('criteria_source_check') in (None, 'equal'))
+                and r.get('criteria_source_check') in (None, 'equal') and not r.get('cut_differences'))
     print('%d of %d twins FINAL exact' % (exact, len(rows)))
     (A / ('%s-lbm-fast.json' % args.labels[0].split('_')[0])).write_text(json.dumps(rows, indent=2), encoding='utf-8')
     return 0 if exact == len(rows) and rows else 1

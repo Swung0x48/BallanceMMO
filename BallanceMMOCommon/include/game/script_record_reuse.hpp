@@ -73,6 +73,14 @@ namespace bmmo::game {
         return fallback;
     }
 
+    // Step DWB (docs/realtime-design.md 'Built (the server stops work it does
+    // not need, step DWB, 2026-11-13)'): BMMO_WORK_CUTS, on when unset.  Read
+    // where the state it decides is made (a placement job, a headless engine)
+    // and kept there; nothing caches it in the process.
+    inline script_reuse_mode work_cuts_from_env() {
+        return parse_script_reuse_mode(std::getenv("BMMO_WORK_CUTS"), script_reuse_mode::on);
+    }
+
     // BMMO_SCRIPT_REUSE, read once per process; on when unset.
     inline script_reuse_mode script_reuse_mode_from_env() {
         static const script_reuse_mode mode =

@@ -4,8 +4,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
 #include <new>
-#include <vector>
 
 namespace bmmo::sim {
     namespace {
@@ -119,12 +119,17 @@ namespace bmmo::sim {
             CKBOOL cursor_ = FALSE;
         };
 
+        // A source keeps its size, format, settings and play position - what
+        // CKWaveSound reads back (GetWaveSize gives a sound's length) - and no
+        // sample bytes (step DWB: every sound of a boot was allocated and
+        // zeroed in full, and every minion play copied its bytes, for a buffer
+        // nothing reads).
         struct silent_source {
             CKWaveFormat format{};
             CK_WAVESOUND_TYPE type = CK_WAVESOUND_BACKGROUND;
             CKWaveSoundSettings settings{};
             CKWaveSound3DSettings settings_3d{};
-            std::vector<CKBYTE> bytes;
+            CKDWORD size = 0;
             int play_position = 0;
             CKBOOL playing = FALSE;
         };
@@ -143,12 +148,8 @@ namespace bmmo::sim {
                 if (!source) return nullptr;
                 source->format = *format;
                 source->type = flags;
-                try {
-                    source->bytes.resize(bytes);
-                } catch (...) {
-                    delete source;
-                    return nullptr;
-                }
+                source->size = bytes;
+                largest_source_ = std::max(largest_source_, static_cast<size_t>(bytes));
                 return source;
             }
             void* DuplicateSource(void* raw) override {
@@ -168,7 +169,7 @@ namespace bmmo::sim {
             void Pause(CKWaveSound*, void* raw) override { InternalPause(raw); }
             void SetPlayPosition(void* raw, int position) override {
                 if (auto* source = static_cast<silent_source*>(raw))
-                    source->play_position = std::clamp(position, 0, static_cast<int>(source->bytes.size()));
+                    source->play_position = std::clamp(position, 0, static_cast<int>(source->size));
             }
             int GetPlayPosition(void* raw) override {
                 auto* source = static_cast<silent_source*>(raw);
@@ -192,18 +193,32 @@ namespace bmmo::sim {
             }
             int GetWaveSize(void* raw) override {
                 auto* source = static_cast<silent_source*>(raw);
-                return source ? static_cast<int>(source->bytes.size()) : 0;
+                return source ? static_cast<int>(source->size) : 0;
             }
+            // The region a source would give (the same counts, wrapped at its
+            // size as before) lies in scratch this manager owns, never read
+            // back.  Two slots, taken in turn: CKWaveSound::ReallocSource locks
+            // two sources at once and copies one region into the other.  Each
+            // is at least the largest source made so far, since that copy is
+            // the new source's whole size (and the new source is made before
+            // either lock); a slot grows only at its own lock.
             CKERROR Lock(void* raw, CKDWORD write_cursor, CKDWORD count, void** ptr1, CKDWORD* bytes1,
                          void** ptr2, CKDWORD* bytes2, CK_WAVESOUND_LOCKMODE) override {
                 auto* source = static_cast<silent_source*>(raw);
                 if (!source || !ptr1 || !bytes1) return CKERR_INVALIDPARAMETER;
-                const CKDWORD size = static_cast<CKDWORD>(source->bytes.size());
+                const CKDWORD size = source->size;
                 if (write_cursor > size) return CKERR_INVALIDPARAMETER;
                 const CKDWORD first = std::min(count, size - write_cursor);
-                *ptr1 = source->bytes.data() + write_cursor;
+                scratch& slot = scratch_[next_slot_];
+                next_slot_ ^= 1;
+                if (const size_t need = std::max<size_t>(size, largest_source_); slot.size < need) {
+                    slot.bytes.reset(new (std::nothrow) CKBYTE[need]);   // contents never read: not zeroed, not kept
+                    slot.size = slot.bytes ? need : 0;
+                    if (!slot.bytes) return CKERR_OUTOFMEMORY;
+                }
+                *ptr1 = slot.bytes.get() + write_cursor;
                 *bytes1 = first;
-                if (ptr2) *ptr2 = first < count ? source->bytes.data() : nullptr;
+                if (ptr2) *ptr2 = first < count ? slot.bytes.get() : nullptr;
                 if (bytes2) *bytes2 = first < count ? std::min(count - first, size) : 0;
                 return CK_OK;
             }
@@ -243,6 +258,13 @@ namespace bmmo::sim {
 
         private:
             CKListenerSettings listener_{};
+            struct scratch {
+                std::unique_ptr<CKBYTE[]> bytes;
+                size_t size = 0;
+            };
+            scratch scratch_[2];
+            int next_slot_ = 0;
+            size_t largest_source_ = 0;
         };
 
         // The retail scripts store keyboard keys as the "Keyboard Key"

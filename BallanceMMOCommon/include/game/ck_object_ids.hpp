@@ -18,11 +18,29 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <utility>
 #include <vector>
 
 #include "CKAll.h"
 
 namespace bmmo::game {
+    // Every live object's id, class by class (CK's own lists, read where they
+    // lie): the objects CK's by-name lookups walk (GetObjectByNameAndParentClass
+    // with CKCID_OBJECT: every class, each list in order, a dead id skipped).
+    template <class F>
+    void for_each_object_id(CKContext* context, F&& f) {
+        const int classes = CKGetClassCount();
+        for (CK_CLASSID cid = 0; cid < classes; ++cid) {
+            if (!CKIsChildClassOf(cid, CKCID_OBJECT)) continue;
+            // CK's own buffer (on the retail client CK2.dll's heap):
+            // read, never kept.
+            const CK_ID* list = context->GetObjectsListByClassID(cid);
+            const int n = list ? context->GetObjectsCountByClassID(cid) : 0;
+            for (int i = 0; i < n; ++i)
+                if (context->GetObject(list[i])) f(list[i]);   // as the object list left a dead id out
+        }
+    }
+
     class ck_object_ids {
     public:
         explicit ck_object_ids(CKContext* context) {
@@ -47,20 +65,8 @@ namespace bmmo::game {
             const size_t i = static_cast<size_t>(id);
             return i < present_.size() && present_[i];
         }
-        // Every live object's id, class by class.
         template <class F>
-        static void each(CKContext* context, F&& f) {
-            const int classes = CKGetClassCount();
-            for (CK_CLASSID cid = 0; cid < classes; ++cid) {
-                if (!CKIsChildClassOf(cid, CKCID_OBJECT)) continue;
-                // CK's own buffer (on the retail client CK2.dll's heap):
-                // read, never kept.
-                const CK_ID* list = context->GetObjectsListByClassID(cid);
-                const int n = list ? context->GetObjectsCountByClassID(cid) : 0;
-                for (int i = 0; i < n; ++i)
-                    if (context->GetObject(list[i])) f(list[i]);   // as the object list left a dead id out
-            }
-        }
+        static void each(CKContext* context, F&& f) { for_each_object_id(context, std::forward<F>(f)); }
         std::vector<bool> present_;
     };
 }
