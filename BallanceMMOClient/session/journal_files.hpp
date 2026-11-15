@@ -23,13 +23,17 @@
 #include <session/journal.hpp>
 
 namespace bmmo::retail::journal_files {
-    // The LOCAL checkpoint cadence's ceiling (every 10 s at 66 Hz) and the
+    // The LOCAL checkpoint cadence's ceiling (every 10 s at 66 Hz) and
+    // default (every second: a divergence found against the server is placed
+    // within a second, not within the 10 s the 2026-11-08 public test's
+    // rows allowed; a checkpoint is well under a kilobyte), and the
     // number of journals kept in the directory, and of captures in theirs
     // (retail_capture.hpp).  A file is a life, and the 2026-11-08 public
     // test's players had 20-30 an afternoon: with 10 of each, by the time one
     // sent theirs the lives that froze were pruned.  A journal is ~1-8 MB, a
     // capture ~1-40 MB.
     inline constexpr uint32_t kCheckpointTicks = 10 * bmmo::session::TICK_RATE;
+    inline constexpr uint32_t kDefaultCheckpointTicks = bmmo::session::TICK_RATE;
     inline constexpr size_t kKeepFiles = 40;
     inline constexpr size_t kKeepCaptures = 20;
 

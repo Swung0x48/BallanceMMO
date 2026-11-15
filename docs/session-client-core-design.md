@@ -176,7 +176,8 @@ retail's journal:
   `directory()/file_name(...)` and prunes to 10 files before returning it:
   pruning is host code, not a core policy.
 - Cadence: `core_config.journal_checkpoint_ticks` (headless
-  `--checkpoint-ticks`, retail `BMMO_JOURNAL_CHECKPOINT_TICKS` or 660); the
+  `--checkpoint-ticks`, retail `BMMO_JOURNAL_CHECKPOINT_TICKS` or 66 - every
+  second since 2026-11-15, 660 before: the public test's 10 s rows could not place a divergence; the
   33-tick gap and the 256 MB cap are core constants.
 - `gmtime_s` is not needed in the core (the file name is the host's).
 - The bytes the headless helpers write must not change (§5.2 (2) checks

@@ -3043,11 +3043,11 @@ void BallanceMMOClient::core_host_start_capture(const std::string& start_bytes) 
 }
 
 // The journal's LOCAL checkpoint cadence: BMMO_JOURNAL_CHECKPOINT_TICKS (1 ..
-// kCheckpointTicks), else the ceiling - or, in a replay, the capture's (K7e:
+// kCheckpointTicks), else kDefaultCheckpointTicks (every second) - or, in a replay, the capture's (K7e:
 // the journal it writes is compared with the live one).
 uint32_t BallanceMMOClient::journal_checkpoint_ticks() {
     if (replay_checkpoint_ticks != 0) return replay_checkpoint_ticks;
-    uint32_t ticks = static_cast<uint32_t>(bmmo::retail::journal_files::kCheckpointTicks);
+    uint32_t ticks = static_cast<uint32_t>(bmmo::retail::journal_files::kDefaultCheckpointTicks);
     if (const char* env = std::getenv("BMMO_JOURNAL_CHECKPOINT_TICKS")) {
         const long value = std::strtol(env, nullptr, 10);
         if (value >= 1 && value <= static_cast<long>(bmmo::retail::journal_files::kCheckpointTicks))
