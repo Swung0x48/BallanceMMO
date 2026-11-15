@@ -131,12 +131,26 @@ jobs:
           vcpkgJsonGlob: vcpkg.json
           runVcpkgInstall: false
 
-      - name: Export GitHub Actions cache environment variables
-        uses: actions/github-script@v7
+      # vcpkg's binary cache. Its x-gha backend, which run-vcpkg@v11 sets, was removed from vcpkg ("The 'x-gha'
+      # binary caching backend has been removed"), so every run rebuilt protobuf, openssl and abseil from source
+      # (about 42 of the client job's 51 minutes). A files cache in the workspace instead, kept between runs by
+      # actions/cache: keyed on the vcpkg commit, the compiler and the manifest; inside it vcpkg's own ABI hashes
+      # decide what is reused, so a partial restore (restore-keys) still saves the packages that did not change.
+      - name: Restore the vcpkg binary cache
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
         with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+          path: ${{github.workspace}}/vcpkg-bincache
+          key: vcpkg-bin-server-windows-9a5dfef5-${{env.VCToolsVersion}}-${{hashFiles('vcpkg.json')}}
+          restore-keys: |
+            vcpkg-bin-server-windows-9a5dfef5-${{env.VCToolsVersion}}-
+            vcpkg-bin-server-windows-9a5dfef5-
+
+      - name: Use the files binary cache
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "${{github.workspace}}/vcpkg-bincache" | Out-Null
+          echo "VCPKG_BINARY_SOURCES=clear;files,${{github.workspace}}/vcpkg-bincache,readwrite" >> $env:GITHUB_ENV
 
 #      - name: vcpkg check / install dependencies
 #        working-directory: ${{env.VCPKG_ROOT}}
@@ -148,6 +162,14 @@ jobs:
           cmake -G Ninja -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE="${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake" -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR="${{github.workspace}}" -DYAML_BUILD_SHARED_LIBS=ON -DBUILD_SERVER=ON -DBUILD_CLIENT=OFF -DBUILD_SERVER_TESTS=ON
           echo "BMMO_VER=$(cat version.txt)" >> $env:GITHUB_ENV
           echo "SHA_SHORT=$(git rev-parse --short ${{github.sha}})" >> $env:GITHUB_ENV
+
+      # Saved right after a successful configure step (vcpkg installs there): a half-built cache never takes the key.
+      - name: Save the vcpkg binary cache
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{github.workspace}}/vcpkg-bincache
+          key: vcpkg-bin-server-windows-9a5dfef5-${{env.VCToolsVersion}}-${{hashFiles('vcpkg.json')}}
 
       - name: Build
         working-directory: ${{github.workspace}}/build
