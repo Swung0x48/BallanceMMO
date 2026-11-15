@@ -1019,7 +1019,7 @@ void BallanceMMOClient::process_level_request() {
     if (!level_request_.pending()) return;
     using status = bmmo::game::level_request::status;
     // Step CMAP: a custom map's request arms BML+'s patch before every step, so the Menu_Start press that
-    // sends "Load Level" finds it armed (BML+ clears it at OnStartLevel).
+    // sends "Load Level" finds it armed (OnStartLevel clears it).
     if (!g_request_custom_map.empty()) {
         std::string error;
         if (!bmmo::game::arm_bml_custom_level(m_bml->GetCKContext(), g_request_custom_map, level_request_.level, error)) {

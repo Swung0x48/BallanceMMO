@@ -9,6 +9,7 @@
 #include "BallanceMMOClient.h"
 #include "session/host_clock.hpp"
 #include "session/retail_capture.hpp"
+#include <game/custom_map.hpp>
 
 // ---- the inbox (K7a, docs/k7-retail-capture-design.md) ----
 // The network thread handles no message any more: on_message hands the
@@ -642,6 +643,10 @@ void BallanceMMOClient::OnStartLevel()
 {
     /*if (!connected())
         return;*/
+
+    // A custom map armed by the mod (automation `map`, the session reload) must not load again on the next
+    // level load: BML+ 0.3.14 clears its "Custom Level" flag only after its own loads.
+    bmmo::game::disarm_bml_custom_level(m_bml->GetCKContext());
 
     player_ball_ = get_current_ball();
     if (local_state_handler_ != nullptr)

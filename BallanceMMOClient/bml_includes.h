@@ -6,8 +6,8 @@
 #endif
 
 #include <BML/BMLAll.h>
-#if !defined(BML_MAJOR_VERSION) || BML_MAJOR_VERSION != 0 || BML_MINOR_VERSION != 3 || BML_PATCH_VERSION < 12
-# error "BallanceMMOClient must be compiled against the BMLPlus 0.3.12 SDK or later"
+#if !defined(BML_MAJOR_VERSION) || BML_MAJOR_VERSION != 0 || BML_MINOR_VERSION != 3 || BML_PATCH_VERSION < 14
+# error "BallanceMMOClient must be compiled against the BMLPlus 0.3.14 SDK or later"
 #endif
 
 typedef const char* BMMO_CKSTRING;

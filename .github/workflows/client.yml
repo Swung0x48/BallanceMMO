@@ -30,7 +30,9 @@ env:
   # BMLPlus SDK the mod links against (include/BML + lib/BMLPlus.lib). Only
   # BMLPlus is supported; the legacy BML 0.3.43 target was dropped along with
   # the shadow-only build.
-  BMLP_VER: '0.3.12'
+  BMLP_VER: '0.3.14'
+  # The SDK zip's SHA-256 from the release's SHA256SUMS.txt (update it with BMLP_VER).
+  BMLP_SDK_SHA256: 'bff9f8bc91841a692b48e644a2d3daa0858e5392b508709b1f21e3b23d7291a4'
 
 jobs:
   build-client:
@@ -55,6 +57,8 @@ jobs:
         shell: pwsh
         run: |
           curl -o BMLPlus-SDK.zip -L https://github.com/doyaGu/BallanceModLoaderPlus/releases/download/v${{env.BMLP_VER}}/BMLPlus-SDK-v${{env.BMLP_VER}}-Release.zip
+          $sha = (Get-FileHash BMLPlus-SDK.zip -Algorithm SHA256).Hash.ToLower()
+          if ($sha -ne '${{env.BMLP_SDK_SHA256}}') { throw "BMLPlus SDK zip SHA-256 $sha is not the release's" }
           New-Item -ItemType Directory -Path sdk/BMLPlus | Out-Null
           tar -xf BMLPlus-SDK.zip -C sdk/BMLPlus
           foreach ($f in 'sdk/BMLPlus/include/BML/BMLAll.h', 'sdk/BMLPlus/lib/BMLPlus.lib') {

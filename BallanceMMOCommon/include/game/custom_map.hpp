@@ -11,11 +11,13 @@
 // slot's row: the slot decides the start ball, the music and the sky (BML+'s CustomMap.LevelNumber).
 //
 // The two hosts reach the loader differently, each with its platform's means:
-// - retail: BML+ 0.3.12 patches Load LevelXX at load time (CustomMaps::PatchLevelLoader: a Binary Switch on a
-//   local bool "Custom Level" in front of the In link; TRUE goes straight to Object Load, skipping the row and
-//   name ops) and its map menu's LoadMap sets "Custom Level", Object Load's File source, the row and
+// - retail: BML+ patches Load LevelXX at load time (0.3.14's LevelLoader plan, 0.3.12's PatchLevelLoader: a
+//   Binary Switch on a local bool "Custom Level" in front of the In link; TRUE goes straight to Object Load,
+//   skipping the row and name ops) and its map menu sets "Custom Level", Object Load's File source, the row and
 //   CurrentLevel[0,0].  arm_bml_custom_level() sets exactly those four on BML+'s own patch (BML+ has no public
-//   map-loading call; it clears the flag itself at OnStartLevel); the menus then start the level as for a slot.
+//   map-loading call); the menus then start the level as for a slot.  The mod clears the flag at every
+//   OnStartLevel (BallanceMMOClient::OnStartLevel): BML+ 0.3.14 clears it only after its own menu / `map load`
+//   loads (0.3.12 at every start), so a load armed here would stay armed for every later level load.
 // - headless (no BML+): find_level_loader()'s `prefix`, the name op's "3D Entities\Level\" local, is pointed at
 //   a directory holding the map under the slot's own file name (headless_engine::redirect_level_file); the
 //   graph is not changed and no CK object is created, so a level loaded this way runs the world it would run
@@ -103,8 +105,8 @@ namespace bmmo::game {
         return true;
     }
 
-    // Retail: BML+'s flag back to FALSE (a custom request that failed before the level started; BML+ clears it
-    // itself at OnStartLevel).
+    // Retail: BML+'s flag back to FALSE (at every OnStartLevel, and when a custom request fails before the level
+    // starts).  Nothing without BML+'s patch (headless) has the flag.
     inline void disarm_bml_custom_level(CKContext* context) {
         level_loader loader;
         std::string ignored;

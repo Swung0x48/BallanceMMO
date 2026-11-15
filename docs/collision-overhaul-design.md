@@ -20,7 +20,7 @@
 | tick 频率 | 按原版：CK 行为帧 1/66 s。会话锚点把物理 time factor 重置为 1.0（`m_PhysicsTimeFactor = 0.001`），之后**关卡脚本照常驱动它**，两端因此完全一致：锚点后所有关卡都由 `Gameplay_Ingame` 的 init 写 2.0（每 tick 2 个 PSI，IVP `delta_PSI_time` 仍为 1/66 s；实测 Level 1/2/8 均如此），只有 Level 1 的 `Gameplay_Tutorial` 在教程期间写 0（锚点后第 9 帧写 0，服务端世界等 25 s 计时器才写回 2.0；客户端世界在玩家按 Enter 时提前解冻，并在自己的球到达每个章节点时再冻结——"两端一起冻结"只到第一次按键为止，见 `docs/record-format-gaps-design.md` 1.4 G-T。自 RK3 起（协议 20，世界选项 `WORLD_SESSION_CLOCK`）会话中每个世界都在锚点后第 10 帧之前激活教程的退出事件（`game/tutorial_exit.hpp`），退出路径在第 16 帧写回 2.0；RK3 时每个世界因此冻结锚点后第 9..15 帧这 7 个 tick，自 RK3H 起（协议 22，用户 2026-10-29 的决定 'Hold frame-9 write'）教程第 9 帧的写 0（`Gameplay_Tutorial` / `Init` 的 Set Physics Globals）在每个世界从锚点起被保持为对局值 2.0（`tutorial_factor_hold`），任何世界都不再冻结；之后教程关闭，Level 1 的教程文字与箭头不再显示）；tick 边界与 PSI 边界始终重合。会话期间**世界从不暂停**：ESC 只打开菜单 UI（输入按全零处理），暂停链对 `Gameplay_Ingame`/`Gameplay_Events` 的 `Deactivate Script`/`Activate Script` 目标在会话期间被清空（见 9.2 的暂停语义），物理与机关脚本照常步进；时钟守卫（API v8 `set_clock_guard`）的暂停传感器（`Gameplay_Ingame` 的非激活态）因此永远不会触发，它每帧只采样因子、一次都不写（详见 9.2）。 |
 | 机关 | 第一阶段镜像：机关脚本只在服务端运行；客户端挂起共享机关的本地脚本根，每 tick 把服务端机关刚体状态写入本地刚体。 |
 | 死亡 | 个人死亡不重置共享机关。 |
-| BML 版本 | 只支持最新 BMLPlus（当前 0.3.12）；不再构建 BML 0.3.43 目标。 |
+| BML 版本 | 只支持最新 BMLPlus（当前 0.3.14，自 2026-11-15；此前 0.3.12）；不再构建 BML 0.3.43 目标。 |
 | 旧协议 | 保留。房间外的玩家继续走全局影子球模式，旧客户端仍可连接。 |
 | Mod | 物理会话要求成员 Mod 一致：服务端配置白名单（mod id + 版本）。测试时两个游戏实例只保留 BallanceMMOClient。 |
 

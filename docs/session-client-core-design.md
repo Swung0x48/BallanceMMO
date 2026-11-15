@@ -4147,7 +4147,7 @@ snapshots off is `… 100000 100000 4.2`.
 
 - the Arch build id must match;
 - slot 13 must point at the arena md5;
-- BMLPlus must be 0.3.12, with the mod alone;
+- BMLPlus must be 0.3.14 (0.3.12 before 2026-11-15), with the mod alone;
 - the x86 client target must be clean after a header change;
 - runs must stay under the roughly 10-minute life of agent-launched
   processes.

@@ -337,7 +337,7 @@ mkdir -p "<game>/ModLoader/Maps"
 cp /d/repos/BallanceMMO/maps/BMMO_Mechanism_Arena.nmo "<game>/ModLoader/Maps/"
 ```
 
-and load it from BML+'s main-menu **Custom Maps** button. BML+ 0.3.12 patches the retail loader
+and load it from BML+'s main-menu **Custom Maps** button. BML+ (0.3.12 and 0.3.14) patches the retail loader
 (`Levelinit_build / Load LevelXX`: a `Custom Level` switch straight to `Object Load` with the map's file) and loads
 the map *into a level slot*: `ModLoader/Configs/BML.cfg`, `CustomMap / LevelNumber`, picks it (0 = a random slot
 2..11 on each load). The slot still decides the start ball, the music, the sky and every slot-keyed rule - in slot
@@ -388,11 +388,12 @@ existing recipe; the original Level 13 needs `--map none`.
 A real game client can join a session on this map, but three things have to be
 right and none of them is obvious.
 
-1. **The mod needs BMLPlus 0.3.12.** A game copy running plain BML 0.3.10
+1. **The mod needs BMLPlus 0.3.14** (0.3.12 before 2026-11-15). An older loader
    silently *skips* the mod — the only sign is one line in `ModLoader.log`:
-   `Mod BallanceMMOClient[BallanceMMOClient] requires BML 0.3.12`. The matching
-   runtime ships in the SDK at `<sdk>/bin/BMLPlus.dll` (file version
-   `0.3.12+6c9a693`); drop it into the game's `BuildingBlocks`.
+   `Mod BallanceMMOClient[BallanceMMOClient] requires BML 0.3.14`. The matching
+   runtime is the release's `BMLPlus-v0.3.14.zip`: `BuildingBlocks/BMLPlus.dll`
+   and `BuildingBlocks/AngelScript.dll` go in together, and the game needs the
+   x86 VC++ runtime 14.51 or newer.
 2. **Run only the BMMO mod.** With BMLPlus 0.3.12, a `DebugUtilities` built
    for 0.3.10 fails to register a command and mod init stops there — the game
    never reaches the start menu and leaves no crash dump. Move the other
