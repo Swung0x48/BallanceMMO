@@ -354,8 +354,21 @@ world's history. Cores are written directly.
     or queues.
 12. **Controllers.** Each core's `controllers_of_core` permuted to its
     descriptors (friction handles by system and part; others matched by
-    priority and name, equal keys in live relative order), then each unit's
-    `controller_cores` permuted to its descriptors. The rollback engine calls
+    priority, name and, from format 4, owner - a joint's
+    (`IVP_Constraint_Local`) or a spring's (`IVP_Actuator_Two_Point`) two
+    objects, static ones included, and any other controller's cores in its
+    unit entry, as record objects, sorted (step F3X: every ball's navigation
+    leaf is `bmmo:force/<leaf>` and every IVP joint and spring
+    `sys:unknown`, so two balls of one unit holding one key gave two entries
+    of one name, and by name alone the restore swapped them). A live
+    controller that has no owner here (its core's unit not rebuilt by a
+    lenient restore) is matched by priority and name; a recorded owner that
+    still matches several live controllers - a tie - fails a strict restore
+    and in a lenient one takes the first, counted in
+    `savestate_report::ambiguous_controllers` and noted once; a controller
+    placed by its owner where priority and name alone would have taken
+    another counts in `owner_decided`. Then each unit's `controller_cores`
+    permuted to its descriptors. The rollback engine calls
     `set_nav` (which re-creates the navigation force controllers) BEFORE
     `set_savestate`, so they are in place to be ordered.
 13. **Revive list.** `ensure_core_in_simulation_delayed()` per recorded core,

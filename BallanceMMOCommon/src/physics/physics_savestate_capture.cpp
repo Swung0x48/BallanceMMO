@@ -20,6 +20,7 @@
 #include "ivp_controller.hxx"
 #include "ivp_surface_manager.hxx"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -243,6 +244,21 @@ namespace bmmo::physics::savestate {
             return true;
         }
 
+        // A kind-1 controller's owner (controller_ref::owner, step F3X), sorted;
+        // `driven` is its unit entry's cores, null outside a unit.
+        bool describe_owner(capture_context& c, IVP_Controller* ctrl, const IVP_U_Vector<IVP_Core>* driven, controller_ref& ref) {
+            bool outside = false;
+            for_each_owner(ctrl, driven, [&](IVP_Real_Object* object) {
+                if (!object) return;
+                const int32_t o = c.live.index_of(object);
+                if (o < 0) outside = true;
+                else ref.owner.push_back(o);
+            });
+            if (outside) return c.fail("a controller's owner is outside the physics table");
+            std::sort(ref.owner.begin(), ref.owner.end());
+            return true;
+        }
+
         // ------------------------------------------------------------------
         // Friction
         // ------------------------------------------------------------------
@@ -396,6 +412,7 @@ namespace bmmo::physics::savestate {
                 if (!entry) return c.fail(at() + " has a null controller entry");
                 controller_ref ref;
                 if (!describe_controller(c, entry->l_controller, ref)) return false;
+                if (ref.kind == 1 && !describe_owner(c, entry->l_controller, &entry->cores_controlled_by, ref)) return false;
                 rec.controllers.push_back(std::move(ref));
             }
             c.world->units.push_back(std::move(rec));
@@ -431,9 +448,12 @@ namespace bmmo::physics::savestate {
                 rec.unit = unit;
             }
             rec.controllers.reserve(static_cast<size_t>(core->controllers_of_core.len()));
+            IVP_Simulation_Unit* unit = core->sim_unit_of_core;
             for (int i = 0; i < core->controllers_of_core.len(); ++i) {
+                IVP_Controller* ctrl = core->controllers_of_core.element_at(i);
                 controller_ref ref;
-                if (!describe_controller(c, core->controllers_of_core.element_at(i), ref)) return false;
+                if (!describe_controller(c, ctrl, ref)) return false;
+                if (ref.kind == 1 && !describe_owner(c, ctrl, cores_driven(unit, ctrl), ref)) return false;
                 rec.controllers.push_back(std::move(ref));
             }
             if (core->physical_unmoveable) return true;   // a static core: movement_state, unit, controllers only

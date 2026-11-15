@@ -4918,11 +4918,17 @@ namespace {
                 if (!ok && savestate_set_failures_++ < 8) logf("savestate restore failed: %s", error.c_str());
                 for (const auto& warning: report.warnings)
                     if (savestate_warning_logs_++ < 8) logf("savestate restore: %s", warning.c_str());
+                // Step F3X: a tie (two live controllers of one priority, name
+                // and owner) is logged apart from the warnings' budget.
+                if (report.ambiguous_controllers && savestate_ambiguous_logs_++ < 8)
+                    logf("savestate restore at tick %u: %u ambiguous controller(s), the first taken", current_tick(),
+                         report.ambiguous_controllers);
                 if (args_.trace)
                     logf("savestate restore at tick %u: %s objects=%u cores=%u collisions=%u contacts=%u systems=%u units=%u "
-                         "events=%u hull=%u skipped=%u unknown=%zu dropped=%zu warnings=%zu | clock before {%s} after {%s}", current_tick(),
-                         ok ? "ok" : "FAILED", report.objects, report.cores, report.collisions, report.contacts, report.systems, report.units,
-                         report.events, report.hull_entries, report.skipped, report.unknown_bodies.size(), report.contacts_dropped.size(),
+                         "events=%u hull=%u skipped=%u ambiguous=%u owner_decided=%u unknown=%zu dropped=%zu warnings=%zu | clock "
+                         "before {%s} after {%s}", current_tick(), ok ? "ok" : "FAILED", report.objects, report.cores, report.collisions,
+                         report.contacts, report.systems, report.units, report.events, report.hull_entries, report.skipped,
+                         report.ambiguous_controllers, report.owner_decided, report.unknown_bodies.size(), report.contacts_dropped.size(),
                          report.warnings.size(), savestate_clock_before_.c_str(), describe_clock().c_str());
             };
             // A body born inside the window is made again inside the replay,
@@ -5353,6 +5359,7 @@ namespace {
         uint32_t savestate_get_failures_ = 0;                // the IVP savestate: capture and restore failures (logged once per 8)
         uint32_t savestate_set_failures_ = 0;
         uint32_t savestate_warning_logs_ = 0;
+        uint32_t savestate_ambiguous_logs_ = 0;   // step F3X
         bmmo::physics::physics_direct physics_direct_;         // the binding's in-process backend (session/rollback_binding.hpp)
         std::string savestate_clock_before_;                 // describe_clock() just before the last savestate restore (--trace)
         uint32_t savestate_dump_logs_ = 0;                   // --dump-savestate write failures logged (the first 3)                // report warnings logged so far (the first 8)

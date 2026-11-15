@@ -35,6 +35,9 @@
 #include "ivp_time.hxx"
 #include "ivp_sim_unit.hxx"
 #include "ivu_min_list.hxx"
+#include "ivp_controller.hxx"
+#include "ivp_constraint_local.hxx"
+#include "ivp_actuator.hxx"
 
 #include <cstdint>
 #include <cstring>
@@ -175,9 +178,11 @@ namespace bmmo::physics::savestate {
 
     constexpr uint32_t kMagic = 0x53565349u;     // "ISVS"
     // 3 (step SPGH2): the spawn ghost's per-group state after the tables
-    // (world_record::spawn_ghost).  2 is still read (no spawn ghost section:
-    // an old journal's RESYNC blob).
-    constexpr uint32_t kFormatVersion = 3u;
+    // (world_record::spawn_ghost).  4 (step F3X): every kind-1 controller's
+    // owner (controller_ref::owner), in a section after that.  2 and 3 are
+    // still read (an old journal's RESYNC blob; no owners: the restore
+    // matches those controllers on priority and name alone).
+    constexpr uint32_t kFormatVersion = 4u;
     constexpr uint32_t kFormatVersionOldest = 2u;
 
     // ------------------------------------------------------------------
@@ -199,7 +204,50 @@ namespace bmmo::physics::savestate {
         uint8_t part = 0;         // kind 0: 0 = static handle (priority 0), 1 = the system itself (600), 2 = energy handle (2000)
         int32_t priority = 0;     // kind 1: get_controller_priority()
         std::string name;         // kind 1: get_controller_name()
+        // kind 1 (format 4, step F3X): its owner (for_each_owner) as
+        // objects[], sorted; empty when it has none.  Which controller it is
+        // where several share a priority and name: every ball's navigation
+        // leaf is "bmmo:force/<leaf>", so two balls in one unit holding one
+        // key give two entries of one (priority, name), and every IVP joint
+        // and spring is "sys:unknown".
+        std::vector<int32_t> owner;
     };
+
+    // The cores `c` drives in `unit` (its controller_cores entry), or null.
+    inline const IVP_U_Vector<IVP_Core>* cores_driven(IVP_Simulation_Unit* unit, IVP_Controller* c) {
+        for (int i = 0; unit && i < unit->controller_cores.len(); ++i) {
+            IVP_Sim_Unit_Controller_Core_List* entry = unit->controller_cores.element_at(i);
+            if (entry && entry->l_controller == c) return &entry->cores_controlled_by;
+        }
+        return nullptr;
+    }
+
+    // A kind-1 controller's owner, the same at the capture and the restore
+    // (step F3X): `f` gets each of its objects, null for one it lacks.  A
+    // joint (IVP_Constraint_Local) and a spring (IVP_Actuator_Two_Point) are
+    // owned by the objects they attach, static ones included: one body's two
+    // joints drive the same core and differ in the other body.  Any other
+    // controller by the first object of each core `driven` lists (its unit
+    // entry's cores_controlled_by); false when that is null - outside a unit
+    // it has no owner.
+    template <class F>
+    bool for_each_owner(IVP_Controller* c, const IVP_U_Vector<IVP_Core>* driven, F&& f) {
+        if (auto* joint = dynamic_cast<IVP_Constraint_Local*>(c)) {
+            f(joint->get_objectR());
+            f(joint->get_objectA());
+            return true;
+        }
+        if (auto* spring = dynamic_cast<IVP_Actuator_Two_Point*>(c)) {
+            for (int k = 0; k < 2; ++k) f(spring->get_actuator_anchor(k)->l_anchor_object);
+            return true;
+        }
+        if (!driven) return false;
+        for (int k = 0; k < driven->len(); ++k) {
+            IVP_Core* core = driven->element_at(k);
+            f(core && core->objects.len() ? core->objects.element_at(0) : nullptr);
+        }
+        return true;
+    }
 
     struct core_record {
         uint8_t movement_state = 0;        // IVP_Movement_Type

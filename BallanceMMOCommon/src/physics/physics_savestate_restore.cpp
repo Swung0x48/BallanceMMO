@@ -148,7 +148,7 @@ namespace bmmo::physics::savestate {
 
         struct restore_counts {
             uint32_t objects = 0, cores = 0, collisions = 0, contacts = 0, systems = 0, units = 0, events = 0,
-                     hull_entries = 0, skipped = 0;
+                     hull_entries = 0, skipped = 0, ambiguous_controllers = 0, owner_decided = 0;
         };
 
         class restorer {
@@ -190,6 +190,7 @@ namespace bmmo::physics::savestate {
             live_world live_;
             IVP_Environment* env_ = nullptr;
             std::vector<int32_t> live_of_;      // record object -> live index, -1 = absent or skipped
+            std::vector<int32_t> record_of_;    // live index -> record object, -1 = none
             std::vector<uint8_t> unknown_;      // live index -> no record of that name at all
             mute_guard guard_;
 
@@ -267,6 +268,25 @@ namespace bmmo::physics::savestate {
                 return lo ? lo->core : nullptr;
             }
             bool present(int32_t rec) const { return live_object_of(rec) != nullptr; }
+            // A controller's owner in record objects, sorted (step F3X): the
+            // live objects the record maps (false: it has none here, outside
+            // a unit), and the recorded ones the world has.
+            bool live_owner(IVP_Controller* c, const IVP_U_Vector<IVP_Core>* driven, std::vector<int32_t>& out) const {
+                out.clear();
+                const bool known = for_each_owner(c, driven, [&](IVP_Real_Object* object) {
+                    const int32_t li = object ? live_.index_of(object) : -1;
+                    if (in(li, record_of_.size()) && record_of_[static_cast<size_t>(li)] >= 0)
+                        out.push_back(record_of_[static_cast<size_t>(li)]);
+                });
+                std::sort(out.begin(), out.end());
+                return known;
+            }
+            std::vector<int32_t> recorded_owner(const std::vector<int32_t>& owner) const {
+                std::vector<int32_t> out;
+                for (int32_t o : owner)
+                    if (present(o)) out.push_back(o);
+                return out;
+            }
             const IVP_Compact_Edge* resolve(const edge_ref& ref) const {
                 if (!in(ref.object, live_of_.size())) return nullptr;
                 const int32_t li = live_of_[static_cast<size_t>(ref.object)];
@@ -302,8 +322,8 @@ namespace bmmo::physics::savestate {
             bool events();
             bool friction();
             bool controllers();
-            template <class E>
-            bool order_controllers(IVP_U_Vector<E>& vec, IVP_Controller* (*controller_of)(E*),
+            template <class E, class Cores>
+            bool order_controllers(IVP_U_Vector<E>& vec, IVP_Controller* (*controller_of)(E*), Cores cores_of,
                                    const std::vector<controller_ref>& refs, const std::string& owner);
             bool revive();
             bool physics_rt();
@@ -515,6 +535,7 @@ namespace bmmo::physics::savestate {
         bool restorer::map_objects() {
             set_step(0, "objects");
             live_of_.assign(world_.objects.size(), -1);
+            record_of_.assign(live_.objects.size(), -1);
             unknown_.assign(live_.objects.size(), 1);
             std::map<std::string, size_t> occurrences;   // travelling: records of each (renamed) name so far
             for (size_t i = 0; i < world_.objects.size(); ++i) {
@@ -569,6 +590,7 @@ namespace bmmo::physics::savestate {
                     continue;
                 }
                 live_of_[i] = li;
+                record_of_[static_cast<size_t>(li)] = static_cast<int32_t>(i);
                 ++counts_.objects;
             }
             return true;
@@ -1643,8 +1665,17 @@ namespace bmmo::physics::savestate {
             }
         }
 
-        template <class E>
-        bool restorer::order_controllers(IVP_U_Vector<E>& vec, IVP_Controller* (*controller_of)(E*),
+        // A kind-1 entry is matched on priority and name and, from format 4
+        // on, on its owner (controller_ref::owner, step F3X): two balls of
+        // one unit holding one key each have a "bmmo:force/<leaf>" there, and
+        // taking the first of that name put the other ball's controller in
+        // its place - the unit's order was rebuilt core by core, not as it
+        // was - so a ball's pushes added up in another order.  An entry with
+        // an owner that still matches more than one live controller (a tie:
+        // two controllers the blob cannot tell apart) fails a strict restore;
+        // a lenient one takes the first, counts it and notes the first.
+        template <class E, class Cores>
+        bool restorer::order_controllers(IVP_U_Vector<E>& vec, IVP_Controller* (*controller_of)(E*), Cores cores_of,
                                          const std::vector<controller_ref>& refs, const std::string& owner) {
             const int n = vec.len();
             std::vector<E*> live;
@@ -1670,12 +1701,30 @@ namespace bmmo::physics::savestate {
                         continue;
                     }
                 } else {
-                    for (int i = 0; i < n && found < 0; ++i) {
+                    const std::vector<int32_t> want = recorded_owner(ref.owner);
+                    std::vector<int32_t> have;
+                    int by_name = -1, matches = 0;
+                    for (int i = 0; i < n; ++i) {
                         if (used[static_cast<size_t>(i)]) continue;
                         IVP_Controller* c = controller_of(live[static_cast<size_t>(i)]);
                         if (!c || friction_handles_.count(c)) continue;
-                        if (static_cast<int32_t>(c->get_controller_priority()) == ref.priority && name_of_controller(c) == ref.name)
-                            found = i;
+                        if (static_cast<int32_t>(c->get_controller_priority()) != ref.priority || name_of_controller(c) != ref.name)
+                            continue;
+                        if (by_name < 0) by_name = i;
+                        // A live controller without an owner here (its core's
+                        // unit not rebuilt by a lenient restore) is matched
+                        // by priority and name alone.
+                        if (!ref.owner.empty() && live_owner(c, cores_of(live[static_cast<size_t>(i)]), have) && have != want)
+                            continue;
+                        if (found < 0) found = i;
+                        ++matches;
+                    }
+                    if (found >= 0 && found != by_name) ++counts_.owner_decided;
+                    if (matches > 1 && !ref.owner.empty()) {
+                        const std::string line = owner + ": " + std::to_string(matches) + " live controllers '" + ref.name
+                            + "' (priority " + std::to_string(ref.priority) + ") of one owner; the first is taken";
+                        if (strict_) return fail(line);
+                        if (counts_.ambiguous_controllers++ == 0) note(line);
                     }
                     if (found < 0) {
                         if (!problem(owner + ": no live controller '" + ref.name + "' (priority " + std::to_string(ref.priority) + ")"))
@@ -1712,14 +1761,19 @@ namespace bmmo::physics::savestate {
                 const object_record& r = world_.objects[o];
                 IVP_Core* core = core_of(static_cast<int32_t>(o));
                 if (!core || !r.movable || core->physical_unmoveable || !done.insert(core).second) continue;
-                if (!order_controllers(core->controllers_of_core, &controller_identity, r.core.controllers, "core of '" + r.name + "'"))
+                const auto driven = [core](IVP_Controller* c) { return cores_driven(core->sim_unit_of_core, c); };
+                if (!order_controllers(core->controllers_of_core, &controller_identity, driven, r.core.controllers,
+                                       "core of '" + r.name + "'"))
                     return false;
             }
             for (size_t u = 0; u < built_units_.size(); ++u) {
                 IVP_Simulation_Unit* unit = built_units_[u];
                 if (!unit) continue;
                 const std::string owner = "simulation unit " + std::to_string(u);
-                if (!order_controllers(unit->controller_cores, &controller_of_entry, world_.units[u].controllers, owner))
+                const auto driven = [](IVP_Sim_Unit_Controller_Core_List* e) -> const IVP_U_Vector<IVP_Core>* {
+                    return e ? &e->cores_controlled_by : nullptr;
+                };
+                if (!order_controllers(unit->controller_cores, &controller_of_entry, driven, world_.units[u].controllers, owner))
                     return false;
                 // sim_unit_sort_controllers asserts this in debug builds.
                 for (int i = 0; i + 1 < unit->controller_cores.len(); ++i) {
@@ -2101,6 +2155,8 @@ namespace bmmo::physics::savestate {
             report_->events = counts_.events;
             report_->hull_entries = counts_.hull_entries;
             report_->skipped = counts_.skipped;
+            report_->ambiguous_controllers = counts_.ambiguous_controllers;
+            report_->owner_decided = counts_.owner_decided;
             report_->excluded = excluded_;
             report_->renamed = renamed_;
         }

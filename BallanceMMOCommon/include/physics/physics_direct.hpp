@@ -122,7 +122,8 @@ namespace bmmo::physics {
             if (unknown_bodies) *unknown_bodies = last_report.unknown_bodies;
             if (summary) {
                 *summary = "skipped=" + std::to_string(last_report.skipped) + " excluded=" + std::to_string(last_report.excluded)
-                         + " renamed=" + std::to_string(last_report.renamed);
+                         + " renamed=" + std::to_string(last_report.renamed)
+                         + " ambiguous=" + std::to_string(last_report.ambiguous_controllers);   // step F3X
                 for (size_t i = 0; i < last_report.warnings.size() && i < 16; ++i) *summary += " | " + last_report.warnings[i];
             }
             return ok;

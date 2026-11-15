@@ -468,6 +468,16 @@ namespace {
         std::vector<second_move> second_moves;
         struct drop_again { double at[3] = {}; long long tick = 0; };
         std::vector<drop_again> drops_again;
+        // --hold PLAYER LEAF TICK, repeatable (step F3X): from world tick
+        // TICK on, PLAYER holds navigation leaf LEAF too (with the leaves its
+        // earlier holds pressed), its camera turned so the new leaf pushes
+        // toward the other players' balls (their centre at that tick,
+        // horizontal; a force keeps the direction of its press, as the
+        // retail SetPhysicsForce does), the input constant afterwards.  Two
+        // balls pushed together share one simulation unit; holding one leaf
+        // gives that unit two controllers of one name.
+        struct hold { uint32_t player = 0; int leaf = 0; long long tick = 0; };
+        std::vector<hold> holds;
         std::string placement_trace;
         bool placement_trace_ball = false;
         // The networked invariant (design 7.4 "L8 invariant (networked)",
@@ -810,6 +820,18 @@ namespace {
             out.drop_second_ball = std::atoi(v);
             if (out.drop_second_ball < 0) return false;
             for (float& k: out.drop_second_at) { if (!(v = next())) return false; k = static_cast<float>(std::atof(v)); }
+        }
+        else if (arg == "--hold") {   // step F3X
+            arguments::hold h;
+            if (!(v = next())) return false;
+            const long long player = std::atoll(v);
+            if (!(v = next())) return false;
+            h.leaf = std::atoi(v);
+            if (!(v = next())) return false;
+            h.tick = std::atoll(v);
+            if (player < 1 || player > 0xffffffffLL || h.leaf < 0 || h.leaf > 3 || h.tick < 0) return false;
+            h.player = static_cast<uint32_t>(player);
+            out.holds.push_back(h);
         }
         else if (arg == "--probe-trace") out.probe_trace = true;
         else if (arg == "--script-feeds") out.script_feeds = true;
@@ -2596,6 +2618,61 @@ namespace {
         ~globals_trace_guard() { close_globals_trace(); }
     };
 
+    // Step F3X: --hold's input.  The leaf's direction is in the camera's
+    // frame (x right, z forward, y up); the camera stays upright and turns
+    // about y so that direction lands on `toward`, the horizontal way to the
+    // other balls' centre.
+    bool start_hold(bmmo::sim::physics_world& world, const arguments::hold& h, uint8_t keys, std::string& error) {
+        const auto& leaves = world.navigation().leaves;
+        const auto leaf = std::find_if(leaves.begin(), leaves.end(), [&](const auto& l) { return l.index == h.leaf; });
+        const std::string own = world.player_ball_entity(h.player);
+        CKContext* context = world.engine().context();
+        const auto position = [context](const std::string& name, VxVector& at) {
+            auto* ball = CK3dEntity::Cast(context->GetObjectByNameAndParentClass(const_cast<CKSTRING>(name.c_str()),
+                                                                                 CKCID_3DENTITY, nullptr));
+            if (ball) ball->GetPosition(&at);
+            return ball != nullptr;
+        };
+        VxVector self, centre(0.0f, 0.0f, 0.0f), other;
+        int others = 0;
+        for (uint32_t id: world.player_ids()) {
+            const std::string name = world.player_ball_entity(id);
+            if (id == h.player || name.empty() || !position(name, other)) continue;
+            centre += other;
+            ++others;
+        }
+        if (leaf == leaves.end() || own.empty() || !position(own, self) || others == 0) {
+            error = "--hold " + std::to_string(h.player) + " " + std::to_string(h.leaf) + " " + std::to_string(h.tick)
+                  + ": no such leaf, no ball of the player's or no other ball";
+            return false;
+        }
+        centre /= static_cast<float>(others);
+        float wx = centre.x - self.x, wz = centre.z - self.z;
+        float dx = leaf->direction.x, dz = leaf->direction.z;
+        const float wn = std::sqrt(wx * wx + wz * wz), dn = std::sqrt(dx * dx + dz * dz);
+        if (wn <= 0.0f || dn <= 0.0f) {
+            error = "--hold: the balls are stacked or the leaf has no horizontal direction";
+            return false;
+        }
+        wx /= wn; wz /= wn; dx /= dn; dz /= dn;
+        // forward (a, 0, b), right = up x forward = (b, 0, -a): dx * right + dz * forward = toward.
+        const float a = dz * wx - dx * wz, b = dx * wx + dz * wz;
+        bmmo::session::input_frame input{};
+        input.keys = keys;
+        input.flags = bmmo::session::INPUT_FLAG_PHYSICALIZED | bmmo::session::INPUT_FLAG_NAV_ACTIVE;
+        const float right[3] = {b, 0.0f, -a}, up[3] = {0.0f, 1.0f, 0.0f}, forward[3] = {a, 0.0f, b};
+        for (int k = 0; k < 3; ++k) {
+            input.cam_right[k] = right[k];
+            input.cam_up[k] = up[k];
+            input.cam_dir[k] = forward[k];
+        }
+        world.set_input(h.player, input);
+        std::printf("tick=%lld player %u holds leaf %d toward (%.3f,%.3f) from (%.3f,%.3f,%.3f)\n", h.tick, h.player, h.leaf,
+                    static_cast<double>(wx), static_cast<double>(wz), static_cast<double>(self.x),
+                    static_cast<double>(self.y), static_cast<double>(self.z));
+        return true;
+    }
+
     // One world tick of the drop scene: the second player's --second-move
     // passes and the ball's --drop-again due before this tick, the tick, then
     // the trace's lines for it.
@@ -2633,6 +2710,13 @@ namespace {
                 return false;
             }
             std::printf("tick=%u ball %s dropped again at (%.3f,%.3f,%.3f)\n", tick, ball.c_str(), d.at[0], d.at[1], d.at[2]);
+        }
+        for (const arguments::hold& h: args.holds) {
+            if (h.tick != static_cast<long long>(tick)) continue;
+            uint8_t keys = 0;   // every leaf this player's holds pressed so far
+            for (const arguments::hold& k: args.holds)
+                if (k.player == h.player && k.tick <= h.tick) keys |= static_cast<uint8_t>(1u << k.leaf);
+            if (!start_hold(world, h, keys, error)) return false;
         }
         if (!world.tick(error)) return false;
         if (const auto& trace = scene_trace()) {
@@ -3704,6 +3788,12 @@ namespace {
         // at the restore and put back where its Physicalize found it
         // (put_back_birth), and made again by the replayed module script.
         const uint32_t window_t0 = world->tick_index();
+        for (const arguments::hold& h: args.holds)
+            if (h.tick >= static_cast<long long>(window_t0)) {   // step F3X: the input is constant inside the window
+                std::fprintf(stderr, "--hold %u %d %lld starts at or after the window (%u); start it in the --savestate-lead\n",
+                             h.player, h.leaf, h.tick, window_t0);
+                return 2;
+            }
         std::map<uint32_t, std::vector<int>> window_moves;   // world tick -> sectors player 2 reports before it
         for (const arguments::second_move& m: args.second_moves) {
             if (m.tick < static_cast<long long>(window_t0)) continue;   // made by the scene or the lead
@@ -3926,6 +4016,7 @@ namespace {
         std::vector<std::vector<uint8_t>> replayed_blobs;   // the blob after each replayed step
         std::string restore_error, capture_error, engine_log;
         bool restore_refused = false;
+        uint64_t owner_decided = 0, owner_ambiguous = 0;   // step F3X: the restores' savestate_report counts, summed
         bmmo::physics::physics_direct backend(physics);
         bmmo::session::rollback_binding_options binding_options;
         binding_options.delta_ms = bmmo::session::TICK_DELTA_MS;
@@ -3980,6 +4071,8 @@ namespace {
             if (frames) world->place_probes();
         };
         binding_options.on_savestate_restored = [&](bool ok, const std::string& error, const bmmo::session::savestate_outcome&) {
+            owner_decided += backend.last_report.owner_decided;
+            owner_ambiguous += backend.last_report.ambiguous_controllers;
             if (!ok) {
                 restore_refused = true;
                 restore_error = error;
@@ -4567,6 +4660,30 @@ namespace {
             }
         }
         const double straight_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        // Step F3X: the controller census of the kept records.  A tie (one
+        // priority, name and owner twice in one list) is two controllers no
+        // restore can tell apart, so one fails the check; --hold's scene must
+        // reach a list holding one name under two owners, or it passes
+        // vacuously.
+        int census_records = 0, census_shared = 0, census_ties = 0;
+        for (const straight_tick& rec: straight) {
+            if (!rec.kept) continue;
+            bmmo::physics::savestate_controller_census census;
+            std::string census_error;
+            if (!bmmo::physics::savestate_census(rec.blob.data(), rec.blob.size(), census, census_error)) {
+                std::fprintf(stderr, "savestate-check: a kept record is unreadable: %s\n", census_error.c_str());
+                return 3;
+            }
+            ++census_records;
+            census_shared += census.shared ? 1 : 0;
+            census_ties += census.ties ? 1 : 0;
+        }
+        std::printf("savestate-check: controllers (step F3X): %d of %d kept records hold one controller name under two owners,"
+                    " %d a tie\n", census_shared, census_records, census_ties);
+        if (!args.holds.empty() && census_shared == 0) {
+            std::fprintf(stderr, "savestate-check: --hold's scene never put two owners of one controller name in a list\n");
+            return 2;
+        }
         pristine = engine;
         // RC2 (b) (step RCB): the capture cache's counts over the straight
         // pass and every round (each round starts from `pristine`).
@@ -5302,9 +5419,14 @@ namespace {
                         static_cast<unsigned long long>(j.missing), static_cast<unsigned long long>(j.unmatched),
                         static_cast<unsigned long long>(j.reordered), static_cast<unsigned long long>(j.order_failed));
         }
+        std::printf("savestate-check: owners (step F3X): %llu restored controller(s) placed by their owner where priority and"
+                    " name alone would have taken another, %llu ambiguous\n", static_cast<unsigned long long>(owner_decided),
+                    static_cast<unsigned long long>(owner_ambiguous));
+        const bool owners_ok = census_ties == 0 && owner_ambiguous == 0 && (args.holds.empty() || owner_decided > 0);
         const bool pass = failed == 0 && run == static_cast<int>(schedule.size()) && (!trafo || trafo->failures() == 0)
                        && (!passes || ((passes_made > 0 || window_moves.empty()) && pass_recreate_failures == 0
-                                       && pass_missing == 0 && fixed_births_missing == 0));
+                                       && pass_missing == 0 && fixed_births_missing == 0))
+                       && owners_ok;
         if (frames) {
             const auto& m = bmmo::game::script_replay::membership();
             std::printf("savestate-check: owner membership at round ends (step RLM): %d of %d round(s) differ from the straight"
@@ -10306,6 +10428,11 @@ int main(int argc, char** argv) {
             "            --v14 means something to --savestate-check only, other modes ignore it)\n"
             "           [--savestate-rounds T:D[:F],...]  (step B2SX: these rounds - anchor tick T, depth D - instead of\n"
             "            the seeded ones, each followed by F live frames compared with the straight pass; needs --frames)\n"
+            "           [--hold PLAYER LEAF TICK ...]  (step F3X: from world tick TICK, before the window, the player also\n"
+            "            holds that navigation leaf, pushed toward the other balls; the owner check's scene:\n"
+            "            --level 13 --frames --drop A01_Floor_01 1 --drop-player-at -1297 15 944 --drop-second-ball 1\n"
+            "            -1291 15 944 --ticks 40 --rounds 40 --max-depth 12 --savestate-lead 44 --hold 1 0 35 --hold 1 1 70\n"
+            "            --hold 1 2 71 --hold 2 0 72)\n"
             "           (IVP savestate robustness check: chained seeded rollbacks must reproduce the straight run's\n"
             "            savestate blobs byte for byte; exit 0 PASS, 3 FAIL, 2 vacuous scene)\n"
             "       BallanceMMOSimTool --root <game dir> --level N --portable-scripts-check [--drop-settle N] [--verbose]\n"

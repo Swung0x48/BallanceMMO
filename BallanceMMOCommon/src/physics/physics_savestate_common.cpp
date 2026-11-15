@@ -570,6 +570,7 @@ namespace bmmo::physics::savestate {
                         if (!in(c.system, n_systems)) return fail(what + " controller system", c.system);
                         if (c.part > 2) return fail(what + " controller part", c.part);
                     }
+                    if (!list(c.owner, n_objects, what + " controller owner")) return false;
                 }
                 return true;
             }
@@ -662,6 +663,20 @@ namespace bmmo::physics::savestate {
         };
     }
 
+    namespace {
+        // Format 4 (step F3X): every kind-1 controller's owner, the objects'
+        // lists in object order, then the units' in unit order.
+        template <class IO>
+        void io_owners(IO& s, world_record& world) {
+            const auto refs = [&s](std::vector<controller_ref>& list) {
+                for (controller_ref& c : list)
+                    if (c.kind == 1) io(s, c.owner);
+            };
+            for (object_record& o : world.objects) refs(o.core.controllers);
+            for (unit_record& u : world.units) refs(u.controllers);
+        }
+    }
+
     void write_world(writer& w, const world_record& world) {
         w.u32(kMagic);
         w.u32(kFormatVersion);
@@ -671,6 +686,7 @@ namespace bmmo::physics::savestate {
         // Format 3: the spawn ghost section.
         io(o, const_cast<uint8_t&>(world.spawn_ghost_present));
         io(o, const_cast<std::vector<spawn_ghost_group_record>&>(world.spawn_ghost));
+        io_owners(o, const_cast<world_record&>(world));
     }
 
     bool read_world(reader& r, world_record& world, std::string& error) {
@@ -699,6 +715,7 @@ namespace bmmo::physics::savestate {
             io(i, world.spawn_ghost_present);
             io(i, world.spawn_ghost);
         }
+        if (version >= 4u) io_owners(i, world);
         if (!r.ok()) {
             error = "savestate truncated or corrupt at byte " + std::to_string(r.pos) + " of " + std::to_string(r.size);
             world = world_record{};
@@ -832,13 +849,15 @@ namespace bmmo::physics::savestate {
                 }
                 return out + "]";
             }
-            static std::string controllers(const std::vector<controller_ref>& v) {
+            std::string controllers(const std::vector<controller_ref>& v) const {
                 std::string out = "[";
                 for (size_t i = 0; i < v.size(); ++i) {
                     const controller_ref& c = v[i];
                     if (i) out += ',';
                     out += "{k" + std::to_string(static_cast<unsigned>(c.kind)) + " s" + std::to_string(c.system) + " p"
-                         + std::to_string(static_cast<unsigned>(c.part)) + " " + std::to_string(c.priority) + " " + c.name + "}";
+                         + std::to_string(static_cast<unsigned>(c.part)) + " " + std::to_string(c.priority) + " " + c.name;
+                    for (size_t k = 0; k < c.owner.size(); ++k) out += (k ? "," : " @") + obj(c.owner[k]);
+                    out += "}";
                 }
                 return out + "]";
             }
@@ -948,7 +967,7 @@ namespace bmmo::physics::savestate {
                 e.put("calm_position0", hex_list(c.calm_position[0]));
                 e.put("calm_position1", hex_list(c.calm_position[1]));
                 e.put("unit", c.unit);
-                e.put("controllers", emitter::controllers(c.controllers));
+                e.put("controllers", e.controllers(c.controllers));
 
                 e.rec("hull", o.name);
                 e.putd("last_vpsi_time", o.last_vpsi_time);
@@ -1095,7 +1114,7 @@ namespace bmmo::physics::savestate {
                 e.put("just_slowed_down", u.just_slowed_down);
                 e.put("next_movement_check", u.next_movement_check);
                 e.put("in_still_slot", u.in_still_slot);
-                e.put("controllers", emitter::controllers(u.controllers));
+                e.put("controllers", e.controllers(u.controllers));
             }
 
             e.rec("revive", "-");
@@ -1292,6 +1311,29 @@ namespace bmmo::physics {
         return savestate::describe_world(world);
     }
 
+    bool savestate_census(const uint8_t* data, size_t size, savestate_controller_census& out, std::string& error) {
+        out = {};
+        static const uint8_t empty = 0;
+        savestate::reader r(data ? data : &empty, data ? size : 0);
+        savestate::world_record world;
+        if (!savestate::read_world(r, world, error)) return false;
+        const auto count = [&out](const std::vector<savestate::controller_ref>& list) {
+            std::map<std::pair<int32_t, std::string>, std::set<std::vector<int32_t>>> owners;
+            bool shared = false, tie = false;
+            for (const savestate::controller_ref& c : list) {
+                if (c.kind != 1) continue;
+                std::set<std::vector<int32_t>>& seen = owners[{c.priority, c.name}];
+                if (!seen.insert(c.owner).second) tie = true;
+                else if (seen.size() > 1) shared = true;
+            }
+            out.shared += shared ? 1u : 0u;
+            out.ties += tie ? 1u : 0u;
+        };
+        for (const savestate::object_record& o : world.objects) count(o.core.controllers);
+        for (const savestate::unit_record& u : world.units) count(u.controllers);
+        return true;
+    }
+
     std::string diff_savestate(const uint8_t* a, size_t a_size, const uint8_t* b, size_t b_size, bool ignore_ov,
                                int max_differences, bool ignore_order) {
         static const uint8_t empty = 0;
@@ -1327,8 +1369,38 @@ namespace bmmo::physics {
         savestate::reader rb(b ? b : &empty, b_size);
         if (!savestate::read_world(rb, wb, error)) { out.where = "savestate b unreadable: " + error; return out; }
 
-        const auto same = [](const savestate::controller_ref& x, const savestate::controller_ref& y) {
-            return x.kind == y.kind && x.system == y.system && x.part == y.part && x.priority == y.priority && x.name == y.name;
+        // An owner is objects[] of its own record (step F3X): compared and
+        // carried over by (name, occurrence) - the k-th object of a name,
+        // objects being sorted by name and then entity id - so two bodies of
+        // one name (Level 8's two P_Modul_30_Wippe) stay apart and the two
+        // blobs may come from two processes, as b_index below assumes.
+        using object_key = std::pair<std::string, size_t>;
+        const auto keys_of = [](const savestate::world_record& w) {
+            std::vector<object_key> keys;
+            std::map<std::string, size_t> seen;
+            for (const savestate::object_record& o : w.objects) keys.emplace_back(o.name, seen[o.name]++);
+            return keys;
+        };
+        const std::vector<object_key> a_keys = keys_of(wa), b_keys = keys_of(wb);
+        const auto owner_keys = [](const std::vector<object_key>& keys, const std::vector<int32_t>& owner) {
+            std::vector<object_key> out;
+            for (int32_t o : owner) out.push_back(o >= 0 && static_cast<size_t>(o) < keys.size() ? keys[static_cast<size_t>(o)] : object_key{});
+            return out;
+        };
+        const auto same = [&](const savestate::controller_ref& x, const savestate::controller_ref& y) {
+            return x.kind == y.kind && x.system == y.system && x.part == y.part && x.priority == y.priority && x.name == y.name
+                && owner_keys(a_keys, x.owner) == owner_keys(b_keys, y.owner);
+        };
+        std::map<object_key, int32_t> a_index;
+        for (size_t i = 0; i < a_keys.size(); ++i) a_index.emplace(a_keys[i], static_cast<int32_t>(i));
+        const auto adopt = [&](std::vector<savestate::controller_ref>& to, const std::vector<savestate::controller_ref>& from) {
+            to = from;
+            for (savestate::controller_ref& c : to)
+                for (int32_t& o : c.owner) {
+                    const auto it = o >= 0 && static_cast<size_t>(o) < b_keys.size() ? a_index.find(b_keys[static_cast<size_t>(o)])
+                                                                                       : a_index.end();
+                    o = it == a_index.end() ? -1 : it->second;
+                }
         };
         const auto list = [](const std::vector<std::string>& names) {
             std::string text = "[";
@@ -1358,7 +1430,7 @@ namespace bmmo::physics {
             ++out.named_cores;
             named_names.insert(named_names.end(), only_a.begin(), only_a.end());
             named_names.insert(named_names.end(), only_b.begin(), only_b.end());
-            o.core.controllers = other.core.controllers;
+            adopt(o.core.controllers, other.core.controllers);
         }
         // Step 2: a unit's controller_cores holds the same controllers; a
         // unit (by index - the numbering is the order bookkeeping) whose list
@@ -1368,7 +1440,7 @@ namespace bmmo::physics {
                 std::vector<std::string> only_a, only_b;
                 if (outside_controllers::force_only_delta(wa.units[k].controllers, wb.units[k].controllers, same, only_a, only_b,
                                                           &named_names))
-                    wa.units[k].controllers = wb.units[k].controllers;
+                    adopt(wa.units[k].controllers, wb.units[k].controllers);
             }
         out.where = savestate::diff_world(wa, wb, ignore_ov, max_differences, ignore_order);
         if (!out.where.empty()) return out;

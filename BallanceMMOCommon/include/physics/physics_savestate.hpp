@@ -82,6 +82,13 @@ namespace bmmo::physics {
         uint32_t events = 0;        // queued time events (PSI event included)
         uint32_t hull_entries = 0;  // hull-manager listener entries over all objects
         uint32_t skipped = 0;       // records the restore could not apply (lenient mode)
+        // Step F3X: recorded controllers with an owner that matched more than
+        // one live one of the same priority, name and owner (a tie: strict
+        // fails, lenient takes the first), and recorded controllers whose
+        // owner chose another live one than priority and name alone would
+        // have (the case the owner is there for).
+        uint32_t ambiguous_controllers = 0;
+        uint32_t owner_decided = 0;
         // A travelling blob (savestate_travel): records left out by an
         // excluded prefix, and blob objects found under a renamed name.
         uint32_t excluded = 0, renamed = 0;
@@ -136,6 +143,15 @@ namespace bmmo::physics {
     // indices, wherever a record refers to an object), for traces and for
     // `diff_savestate`.  Floats are printed as hex so a one-ulp change shows.
     std::string describe_savestate(const uint8_t* data, size_t size);
+
+    // Step F3X: a blob's controller lists (every core's and every unit's)
+    // that hold one kind-1 (priority, name) under two owners - the case the
+    // owner tells apart - and those that hold one (priority, name, owner)
+    // twice - two controllers no restore can tell apart (a tie).
+    struct savestate_controller_census {
+        uint32_t shared = 0, ties = 0;
+    };
+    bool savestate_census(const uint8_t* data, size_t size, savestate_controller_census& out, std::string& error);
 
     // The first difference between two blobs as one line ("" when the blobs
     // are identical): the record kind, the object or pair it belongs to, the

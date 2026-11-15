@@ -22,8 +22,11 @@ namespace bmmo::physics {
             position_ = position;
             force_ = force;
             // One name per leaf: the savestate matches a controller by
-            // (priority, name) to put the core's controller order back, and
+            // (priority, name, owner) to put the controller orders back, and
             // two held keys are two controllers of one priority on one core.
+            // Every ball's leaf has this name, so in a simulation unit of
+            // several balls the owner (the cores it drives, step F3X) tells
+            // them apart.
             std::snprintf(name_, sizeof(name_), "bmmo:force/%d", leaf);
             if (core_) IVP_Controller_Manager::add_controller_to_core(this, core_);
         }

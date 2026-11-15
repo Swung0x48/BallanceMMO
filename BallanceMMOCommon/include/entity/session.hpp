@@ -299,7 +299,14 @@ namespace bmmo::session {
     //      trafo-replication design 2.6): a relayed Trafo event carries its
     //      life's join order (session_event_msg::join_order), and the
     //      resync ledger each entry's.  A 38 peer seeds by player id.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 39;
+    //  40  A SessionResyncState's (and a join's) blob is savestate format 4
+    //      (step F3X: every controller's owner, so a restore puts two balls'
+    //      same-named navigation controllers back in their places).  No
+    //      message layout changed; a 39 peer would refuse the blob at its
+    //      first resync, so it is refused at the handshake instead.  The
+    //      journal format is unchanged (the RESYNC blob is opaque; the reader
+    //      takes formats 2 to 4).
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 40;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
     // The protocol whose SessionStart carries `mechanism_slots` (step Q7).

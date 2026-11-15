@@ -4373,3 +4373,154 @@ verify`, a capture whose frame loop runs on another thread than the one that bui
 (`measured_now` / `measured_flag` make no owner check, as `sync_report_clock`), a SessionStart replaced inside
 `core_host_frame` while no capture runs (its start read real, its end read recorded: detected, not silent; left
 unguarded so a live window's samples do not change), the 8845.
+
+## Built (a restore puts two balls' same-named controllers back in their places, step F3X, 2026-11-15)
+
+**Why.** The RCP correctness check (`.local-tools/work/RCP`, F3) found a deterministic client / server fork inside a
+coordinated re-drive that passed with mism 0: rcp8c (the 8-member recipe) had clients 5 and 7 off the server's FULL
+rows from tick 640 (~1e-9 m on their own balls, 0.1-0.7 mm by 1030), the other six exact, bit-identical on reruns.
+The diagnosis (`.local-tools/work/F3X`): the records were right and the restore of them was wrong. Balls 3, 5 and 7
+touched, so they shared one simulation unit; every ball's navigation leaf is named `bmmo:force/<leaf>`
+(`ball_navigation.cpp`), and the record described a unit's (and a core's) controllers by (priority, name) only. The
+restore rebuilds a unit with `sim_unit_calc_redundants`, which walks the cores in reverse, and then gave each recorded
+entry the first unused live controller of that priority and name - so restoring tick 639's record, where the unit
+held ball 5's and ball 7's leaf-1 controllers, the two traded places and ball 5's pushes were summed in another
+order. One ulp a tick, carried to ball 7 and then ball 3 by the contacts. The six "exact" clients were exact only
+because their sparse capture rebased them to 636. The server never restores, so only clients left the server's
+world; retail is exposed the same way (the bridge's restore, its own ball and every mirror driven through
+`bmmo:force/<leaf>`). (The diagnosis also named a restore of 638 as inexact; the data review found only one
+`force/1` in the final 638 record - a later rewind may have re-recorded it - and confirmed the restore of 639. Not
+resolved; the fix covers both.)
+
+**The owner.** Savestate format 4: every kind-1 `controller_ref` carries `owner`, as record objects, sorted (one world
+gives one blob whatever order the engine built a list in), for a unit's list and a core's list alike
+(`for_each_owner`, `physics_savestate_internal.hpp`, the one rule the capture and the restore share): a joint
+(`IVP_Constraint_Local`) or a spring (`IVP_Actuator_Two_Point`) is owned by the two objects it attaches, static ones
+included - every IVP joint and spring is `sys:unknown`, and one body's two joints drive the same core and differ only
+in the other body; any other controller by the cores of its unit entry (`cores_controlled_by`; a core's controller
+looks its entry up, and outside a unit it has no owner). The owners are written in their own section after the spawn
+ghost's (all objects' lists in object order, then the units'), so everything before it is laid out as in format 3;
+formats 2 and 3 are still read, with no owners. `restorer::order_controllers` matches a kind-1 entry on priority,
+name and owner: the live controller's owner mapped to record objects (`record_of_`, the reverse of `live_of_`)
+against the recorded one's objects the world still has, so a travelling blob's excluded and renamed bodies are taken
+care of by the mapping the restore already made. An entry without an owner (an old blob, a controller outside a
+unit) matches on priority and name, as before, and so does a live controller without one here (its core's unit not
+rebuilt by a lenient restore: the code review's defect 4, which had made those fail to match). An entry with an owner
+that still matches more than one live controller is a **tie** - two controllers the blob cannot tell apart - and
+fails a strict restore; a lenient one takes the first, counts it in `savestate_report::ambiguous_controllers` and
+notes the first of them (one note, not one per tie, against the eight-line warning budget). `owner_decided` counts the
+entries the owner placed where priority and name alone would have taken another live controller - the case the owner
+exists for. Both are printed: the headless client logs a restore with ties apart from the warnings' budget (`N
+ambiguous controller(s), the first taken`, eight at most) and with `--trace` both counts on its restore line; the
+bridge's and `physics_direct`'s travelling summaries carry `ambiguous=N` after `renamed=` (log text only; the
+regular retail restore has no summary and is not changed). `--savestate-describe` / `diff_savestate` print an owner
+as ` @name,name` after the controller's name; the named difference (`diff_savestate_named`) compares and carries
+owners by (name, occurrence) - the k-th object of a name, objects being sorted by name and then entity id - so two
+bodies of one name stay apart and the two blobs may come from two processes. The stale comment at
+`physics_state.cpp`'s `same_key` now says the joint ledger's place (`place_in`) is an order counted by priority and
+name, not the savestate's identity. Capture gains no failure in practice: an owner object outside the live table
+fails the capture, and the table (`index_live_world`) holds every real object of the environment's cluster tree -
+the manager's physics objects and IVP's own static object - so every object a joint or spring attaches is in it (0
+"savestate capture failed" lines in the full gate's client logs, core_ref_s20's and retail's). Blob size: the LBM
+arena's resyncs (the same coordinated runs) 2.1-3.8 % larger (106 004 -> 108 240, 127 960 -> 132 848 bytes);
+core_ref_s20's resync blobs about 1.2-2.1 % larger than s19's (different live runs, so approximate).
+
+**Protocol 40 and bridge API 40.** `entity/session.hpp` protocol 40 (no message layout changed, but a
+SessionResyncState's or a join's blob is format 4, which a 39 peer would refuse at its first resync, so the handshake
+refuses it instead, as protocol 15 did for format 3), and `BMMO_PHYSICS_API_VERSION` 40 (`physics_rt_api.h`; the
+code review's defect 1): the savestate lives in physics_RT.dll and the mod checks the DLL by the exact API version
+only, so the new mod with an old DLL would have passed the protocol handshake and then refused every format-4 blob
+while its own restores kept the F3 bug. The journal format is unchanged (the RESYNC record's blob is opaque; the
+reader takes 2 to 4).
+
+**The census: no tie on any level.** SimTool `--savestate-check` now reads every kept straight record's controller
+lists (`savestate_census`, `physics_savestate.hpp`) and prints `controllers (step F3X): N of M kept records hold one
+controller name under two owners, T a tie`, and `owners (step F3X): D restored controller(s) placed by their owner
+where priority and name alone would have taken another, A ambiguous`; a tie in any kept record or an ambiguous
+restore fails the check, and with `--hold` the scene must hold a shared name (exit 2 otherwise) and the restores
+must have placed at least one controller by its owner (the code review's point: the shared name proves the
+precondition, not that the test bites). Run on every sector 1-9 of levels 1-12 (`--drop-sector S --drop-settle 60
+--ticks 60 --rounds 10 --max-depth 12`, `F3X/g2/census.sh`) and the arena's sectors 1-4 (`--level 13 --drop
+A01_Floor_01 1`, 20 rounds): 68 scenes ran, every one PASS with **0 ties**; 39 of them hold a shared name in all 60
+kept records (joints and springs of one name under two owners: levels 2, 3, 5, 7-12 and the arena's sector 3), with
+`owner_decided` 0 - their name-only order happened to be right. 44 level/sector pairs exit 2 silently after the
+scene's settle, on HEAD's SimTool too (level 1 sector 1 compared): a scene limitation, not judged. A temporary
+diagnostic (reverted, not in the tree) counted, over 36 of those scenes, the ties the fixer's movable-cores-only
+owner would have had: none. So the code review's defect 3 (two joints of one movable body tie on a cores-only
+owner) was latent, not observed; the joints' objects make it impossible but for two joints between the same two
+objects, which a tie now reports.
+
+**The regression test.** No unit test reaches IVP, so it is a SimTool `--savestate-check` scene, in the fast gate's
+part 2 (about 1 s): `--hold PLAYER LEAF TICK` (new; before the window) makes a player hold a navigation leaf too,
+its camera turned so the leaf pushes toward the other balls, the force fixed at its press as the retail block's is.
+Level 13, two stone balls dropped 6 m apart outside the spawn areas, ball 1 holds leaf 0 from 35, the balls meet and
+fuse into one unit at ~68, then ball 1 presses leaves 1 and 2 (70, 71) and ball 2 leaf 0 (72): the unit holds ball
+1's leaves 0, 1, 2 and then ball 2's leaf 0, and by name alone the restore gave ball 2's leaf 0 the first slot.
+Before the fix: `FAIL rounds=40 failed=11` (the first: round 0, anchor 79, depth 12, `Ball_Stone_BMMO_1 rot_speed`
+one ulp). After: `PASS rounds=40 failed=0`, 40 of 40 kept records with a shared name, 0 ties, 24 controllers placed
+by their owner, 0 ambiguous.
+
+**The repro and the owner leg.** `.local-tools/work/F3X/f3x_leg.sh LABEL [OUT] [BIN]` - RCP's rcpchk_d2 run (m8nav,
+coordinated, snapshots off, hints on, a checkpoint every 2 ticks to 1 744) with client 0 restoring from a whole record
+of every tick (`--sparse-capture 1`) and `BMMO_LIVE_RECORD_MS=1000000` set inside (the heavy-frame test reads a wall
+clock, and the gate's lane P runs below normal priority: a light record would move the anchors off 639), then
+`journal_judge.py --no-replay`. On HEAD d25ea319's binaries (`build-agent-f3xh`, `f3x_g2_head`): judge FAIL, 5 of 8
+bodies exact - clients 0, 5 and 7 526 differing mirror rows each - with mism 0 on all 8. On this build
+(`f3x_g2_fix`): PASS, 8 of 8, mism 0 x 8, 1 040 FINAL rows per client, the server to tick 2 088.
+
+**What the fix moved.** Nothing in core_ref_s19 but the protocol number: the protocol-40 build replaying s19's
+captures with `NEW_EXTRA="--accept-protocol 39"` gave all 58 journals IDENTICAL and every send equal but each
+client's SessionReady (type 8, 75 bytes; 57 traces, fan_dr's client 3 twice for its rejoin). No row moved anywhere
+the gates look: the fast LBM's value rows are byte-equal to jn2g's (6 524 lines), the L6 re-drive's 14 journals equal
+pf_dwbr1_1's, retail's FINAL rows bit-equal to r6on's. What moved is the blob's bytes where a journal holds them: 15
+of the fast LBM's 89 journals, in 6 arms with resyncs (a10x_on clients 0-3 and its server, a5d_resync_on client 2,
+a6_drop_on client 2, a8_r1/r2/r3_on client 3, and those five arms' servers) - in each client journal exactly one
+record, the RESYNC (its blob, first differing byte just after the script bytes), in each server journal the resync
+note (`... N savestate bytes`, 151 215 -> 156 119 for a10x_on) and the stat record beside it (its size field), two
+records per resyncing player (`F3X/g2/journal_moves.py jn2g f3xg1 ARM...`, `F3X/g2/lbm_moves.txt`).
+
+**References.**
+- **core_ref_s20** (`maps/arena-test/core_ref_s20/README.md`): s19's twelve arms re-recorded with S18/record.py's
+  recipe unchanged by this build (rS20 + the Arch server, 01:42-01:59), strict replay 57/57 captures and 58/58 journals
+  ALL SAME, wire check ALL SAME (57 sends + 58 journals, 0 skipped), 541 249 sends with 796 SessionTelemetry,
+  pins.json equal to s19's, PLAYER-DATA: NONE (405 files + the 46-file case directory, removed after), SHA256SUMS. The
+  default of `wire_check.sh` (s18 rules for `core_ref_s20*`) and `fast_gate.sh` (57 / 58).
+- **The fast LBM**: the on-only reference is the full gate run `f3xg1` (`full_gate.sh`'s LBM_REF default, its arms
+  in maps/arena-test/f3xg1_*; rows `.local-tools/work/JN2/rows_f3xg1_values.txt`, byte-equal to jn2g's). The twins
+  reference jn2t (TWINS=1) predates format 4: its resync arms' journals will differ the same way (not run).
+- **L6**: pf_dwbr1_1 unchanged (its 14 journals equal).
+
+**The oracle** (`.local-tools/full_gate.sh`, `fast_gate.sh`; local files).
+- The L6 leg also runs `journal_judge.py --no-replay` on `pf_LABEL_1`: PASS with 13 'bodies exact' PASS.
+- The dense L6 leg (`F3X/dense_l6.sh pfd_LABEL 5000`, the L6 recipe to 5 000 with a checkpoint every 2 ticks): judge
+  PASS with 13 of 13, and now (the code review's defect 5) 13 clients 'mism': 0 and the run reaching its end - the
+  server journal to tick 5 000 or later and every client at least 2 400 FINAL rows (`reach()`), since a run that died
+  early has clean rows too.
+- The owner leg (defect 6, `F3X/f3x_leg.sh pfo_LABEL`, after the dense leg in lane P, port 27290): judge PASS with 8
+  of 8, mism 0 x 8, the server to 1 744 or later, every client at least 800 FINAL rows. It is the gates' one end-to-end
+  case of this class (the L6 legs were exact before the fix).
+- Ties: no client log of the L6, dense, owner and LBM runs logs an ambiguous controller (104 logs).
+- `judge()` prints the verdict and the number of clients whose bodies are exact; each caller compares it with its own
+  count (`PASS 13`, `PASS 8`). The label-in-use and reference checks cover the new legs and their inputs (`E3/pt/l6all.bmrp`, `F3X/dense_l6.sh`, `F3X/f3x_leg.sh`, `F3X/m8nav.bmrp`).
+
+**Gate** (`full_gate.sh f3xg2`, FULL-GATE: PASS, 1 226 s; the first run `f3xg1` failed only on the LBM journals
+against jn2g, the RESYNC differences above, and became the reference): builds x64, x86 and the Arch server, unit
+tests 862/862, the owner check PASS 40/40 (24 placed by their owner, 0 ambiguous); core_ref_s20 strict replay 12 arms,
+57 captures, 58 journals ALL SAME, wire check ALL SAME (57 + 58, 0 skipped); fast LBM 19 of 19 on runs FINAL exact,
+rows equal to rows_f3xg1_values.txt, 89/89 journals equal to f3xg1's; L6 re-drive 13 clients rc 0, mism 0 x 13,
+judge PASS 13/13 bodies exact, 14/14 journals equal to pf_dwbr1_1's, placement equal, 72 749 rewinds; dense L6 PASS
+13/13, mism 0 x 13, the server to 5 245, at least 2 610 FINAL rows; owner leg PASS 8/8, mism 0 x 8, the server to 2 088,
+1 040 FINAL rows; ties 0 of 104 client logs; retail L12 + L11 at K = 20, human keys, FINAL rows bit-equal (L12 ball
+2/2 and body 14/14, L11 ball 2/2, body 23/23 and its 32/32 trafo pieces), mismatches 0, placement equal; the tree
+unchanged during the gate.
+
+**Not exercised:** a tie (none met anywhere; the strict failure and the lenient note are unrun), a lenient restore
+with a unit not rebuilt (defect 4's path), a join's blob, the twins LBM (TWINS=1, reference jn2t now stale for its
+resync arms), the K7 retail captures (protocol-39 handshakes: they need a re-record), retail play with two balls
+holding one key in one unit, the regular retail restore's ambiguity (no summary there), the 44 census scenes that exit
+2 (all of level 1 among them: no evidence there on ties or on the capture's owner lookup), the order of cores inside a unit entry (rebuilt, not recorded), the capture cache with owners (no hit in the scenes
+tried), the capture and restore cost of the owners (`cores_driven` per kind-1 controller of a core, a `dynamic_cast`
+per kind-1 controller, `live_owner` per same-named candidate; unmeasured) and the 8845. Open, not caused by this
+fix: the live Level 13 run with a forced resync (`f3x_rs1`, s19's resync_at150 arm) parts from the server from tick
+2 078 when the balls enter the airship zone, with or without the owner match - s19 / s20 end just after 2 078, and
+`journal_judge.py`'s `trim()` leaves airship-zone ball rows out, so neither the arms nor the judge cover it.

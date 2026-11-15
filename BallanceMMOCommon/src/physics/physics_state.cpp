@@ -2671,8 +2671,12 @@ namespace bmmo::physics {
             return beh;
         }
 
-        // The key the savestate blob matches controllers by (priority and
-        // name; physics_savestate_restore.cpp order_controllers).
+        // Priority and name: a joint's place among its core's controllers of
+        // one priority and name (place_in), which joint_block_set puts it
+        // back to.  The savestate matches by more since step F3X (the owner,
+        // a joint's two bodies; physics_savestate_restore.cpp
+        // order_controllers), so a place counted here is an order, not an
+        // identity.
         bool same_key(IVP_Controller* x, IVP_Controller* c) {
             if (!x || !c || x->get_controller_priority() != c->get_controller_priority()) return false;
             const char* a = x->get_controller_name();

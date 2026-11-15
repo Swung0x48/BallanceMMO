@@ -778,7 +778,8 @@ namespace {
         join_into(unknown, unknown_size, report.unknown_bodies, overflow);
         if (summary && summary_size) {
             std::string line = "skipped=" + std::to_string(report.skipped) + " excluded=" + std::to_string(report.excluded)
-                             + " renamed=" + std::to_string(report.renamed);
+                             + " renamed=" + std::to_string(report.renamed)
+                             + " ambiguous=" + std::to_string(report.ambiguous_controllers);   // step F3X
             // A name list that does not fit the caller's buffer is a
             // reporting limit, not a failed restore: the world is restored.
             if (!overflow.empty()) line += " | " + overflow;
