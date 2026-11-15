@@ -118,7 +118,8 @@ TEST(VirtualClock, IdleIsExactAcrossNotifyAndAdvance) {
         work = 1;
     }
     clock.notify(clock_site::runner_wait, cv);
-    EXPECT_FALSE(clock.idle()) << "woken, not yet run: not idle";
+    // (No idle() check here: the woken worker may already have handled the work and waited again,
+    // which is idle - a race the Windows CI hit. wait_idle() below waits for exactly that.)
     EXPECT_EQ(clock.wait_idle(), t0 + 15ms);
     EXPECT_EQ(handled.load(), 1) << "idle only after the worker handled it and waited again";
     clock.advance_to(t0 + 15ms);
