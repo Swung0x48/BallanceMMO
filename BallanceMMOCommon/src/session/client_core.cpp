@@ -11,6 +11,7 @@
 
 #include "message/session_ready_msg.hpp"
 #include "message/session_resync_msg.hpp"
+#include "session/resync_rules.hpp"
 #include "session/spawn_impulse.hpp"
 
 #include <cstdarg>
@@ -265,7 +266,7 @@ namespace bmmo::session {
             reconcile_remote_lives(anchor, now, ended, out);
         };
         world_hooks_.row_entity = [this](bmmo::session::body_kind kind, uint32_t owner, uint32_t tick) -> std::string {
-            if (kind != bmmo::session::body_kind::Ball) return s.mechanism_tracking_.entity_of(owner);
+            if (kind != bmmo::session::body_kind::Ball) return snapshot_mechanism_entity(owner);
             if (owner == s.own_id_) return {};
             const auto it = s.remotes_.find(owner);
             if (it == s.remotes_.end() || !it->second.physicalized || !it->second.navigation
@@ -273,6 +274,12 @@ namespace bmmo::session {
                 return {};
             return it->second.entity;
         };
+    }
+
+    std::string session_client_core::snapshot_mechanism_entity(uint32_t owner) const {
+        std::string entity = s.mechanism_tracking_.entity_of(owner);
+        if (bmmo::session::keep_local_body(entity)) entity.clear();
+        return entity;
     }
 
     // Every movable body but the balls (step P): the balls are the own

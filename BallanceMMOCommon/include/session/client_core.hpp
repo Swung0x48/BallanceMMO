@@ -2215,6 +2215,12 @@ namespace bmmo::session {
         bool own_out_of_sync_at(uint32_t tick) const {
             return s.own_airship_tick_ != 0 && static_cast<int32_t>(tick - s.own_airship_tick_) >= 0;
         }
+        // Step L13X: the local body a snapshot row of a mechanism names, ""
+        // when none - another sector's, or a keep-local body (the balloon and
+        // its airship, resync_rules.hpp keep_local_body), which every world
+        // runs for itself: no row of the server's corrects it, as no resync
+        // takes it.  By the resolved entity, since a delta row has no name.
+        std::string snapshot_mechanism_entity(uint32_t owner) const;
         // A restore's destroy_body (core_world_hooks::destroy_own_birth): a
         // moved own birth whose body the replay makes again at its applied
         // tick is taken out here.  True when `entity` at `birth_tick` is one

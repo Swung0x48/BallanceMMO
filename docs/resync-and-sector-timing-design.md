@@ -268,7 +268,15 @@ Fix: §2.4, `keep_local`, until the trafo replication lands (§8 T2).
   scripts whose owner name starts `PE_Balloon`) stay local to each player.
   - A resync never imports their server state into a world that has its own
     (§2.4, §2.6.3).
-  - No check compares them.
+  - No check compares them. That includes the snapshot correction (step L13X,
+    2026-11-15): a mechanism row whose resolved local body is keep-local
+    (`resync_rules.hpp keep_local_body`) maps to no body
+    (`session_client_core::snapshot_mechanism_entity`, used by the rollback
+    compare, `row_entity`, the legacy full-snapshot resync and the
+    `--no-rollback` blend). Before the step a snapshots-on session compared
+    the server's airship with the client's own, rolled the world back to the
+    rows every 2-4 ticks from the zone on, and parted every client from the
+    server (docs/realtime-design.md, 'Built (..., step L13X)').
   - Their activation follows their sector's pass in that world, like every
     other module's.
 

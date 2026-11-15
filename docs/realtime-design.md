@@ -4524,6 +4524,8 @@ per kind-1 controller, `live_owner` per same-named candidate; unmeasured) and th
 fix: the live Level 13 run with a forced resync (`f3x_rs1`, s19's resync_at150 arm) parts from the server from tick
 2 078 when the balls enter the airship zone, with or without the owner match - s19 / s20 end just after 2 078, and
 `journal_judge.py`'s `trim()` leaves airship-zone ball rows out, so neither the arms nor the judge cover it.
+(Resolved by step L13X below: no resync fork - `f3x_rs1`'s harness server ran snapshots on, and the snapshot
+correction compared the per-world airship; the judge did see it.)
 
 
 ## Built (player intents in the journal, step INT, 2026-11-15)
@@ -4682,3 +4684,77 @@ countdown, console, the -1 / -2 player mapping), a reset before the first own bi
 a reset, SimTool `--replay-session` re-issuing intents, the session pause modules ported, the K7 mouse gap, the K7
 captures' re-record (owed since protocol 40), the twins LBM (TWINS=1; its reference jn2t predates format 4 and the
 intent kinds).
+
+## Built (no snapshot correction takes the per-world airship, step L13X, 2026-11-15)
+
+**Why.** F3X left one open finding (above): a live Level 13 run with a forced resync (`f3x_rs1`) parted every client
+from the server from tick 2 078, the airship zone. It was not a resync fork. `arena_map_test.py` runs snapshots on
+whenever `--scenario` is absent, so `f3x_rs1`'s own server ran them (its clients took 1 648-2 031 snapshots against the
+s21 arm's 4); with snapshots off, resync or not, in the zone or not, every client stays exact (L13X diagnosis runs
+`l13x_c1` / `c2` / `c3` / `w2`: mism 0 x 4, no differing row). With snapshots on and no resync (`l13x_s0`, `l13x_s1`
+equal to it row for row) the parting is the snapshot correction's:
+1. at 2 008 the first mismatch names only `PE_Balloon_Platte01..08`: every world runs its own airship (I3,
+   resync design 1), so the server's differs from the client's by design;
+2. the rollback compare mapped every mechanism row through `mechanism_tracking_.entity_of` with no keep-local filter
+   (the resync path has one, `client_core_resync.cpp`), and the server's rows carry every movable body;
+3. each correction wrote the server's awake rows over every awake body, the airship included, from rows that carry no
+   record extra: equal poses at 2 008-2 012, every awake body off by about 1e-9 at 2 014 (the Bridge at x = 319 too),
+   40-47 m after repeated corrections;
+4. the row written into the anchor's record (`rollback.hpp`, `existing->second = item.state`) took `state_of`'s
+   zeroed name and flags, so every correction anchor journalled its rows without `collision_enabled` (flags 1 against
+   the server's 3) - wrong journal data only.
+`journal_judge.py` saw it (bodies exact FAIL at 2 008 / 2 102); its `trim()` leaves out only a ball inside its own
+airship span (BALA, per world by design) and is unchanged. The gap was that no gated run had snapshots on through the
+zone.
+
+**The change.** `session_client_core::snapshot_mechanism_entity(owner)` (`client_core.hpp` / `client_core.cpp`): the
+registry's resolved entity, "" when it is keep-local (`resync_rules.hpp keep_local_body`, by the resolved name, since a
+delta row has none). It replaces `mechanism_tracking_.entity_of` at the four row-to-body maps: the rollback compare's
+`entity_of` (`client_core_messages.cpp`, the cause), `row_entity` (`client_core.cpp`, so a replay's row re-write
+cannot route a row onto the airship), the legacy full-snapshot resync and the `--no-rollback` blend. A row with no
+body is skipped and the body rewinds from its own record, as for another sector's instance. The registry is
+untouched (its `resolved()` feeds the level-reset guard and the STATUS stat, so snapshots-off journals do not move).
+In `rollback.hpp` a row written into the anchor's record keeps the record's own name, `movable` and
+`collision_enabled` (its capture of the same lifetime, which a pose write does not change) and takes `movement_state`
+as read back after the write (the row's sleep, as a capture would read it); pose, velocities and sleep stay the row's.
+The server still sends airship rows (its FULL rows are the journal's), the wire is unchanged, no protocol bump.
+
+**Checks.** `.local-tools/work/L13X/l13x_leg.sh LABEL` (about 20 s, run pinned): the snapshots-on repro (4 clients,
+coordinated, drive + keep-lane, 150 ms, a checkpoint every 2 ticks), PASS = judge rc 0, every client mism 0, bodies
+exact, no differing row but the keep-local bodies' and the own ball's from its zone tick, with snapshots applied >= 300
+and airship ball rows left out > 0 per client (a snapshots-off or zone-less run cannot pass); the full gate runs it
+in lane P after the intent leg (`full_gate.sh`, run `pfl_LABEL`), and its run joins the ties and no-intents checks.
+Unit tests: `SessionClientCoreSnapshot.AKeepLocalMechanismRowIsNoCorrection` (the cause's site: with snapshots on, an
+airship row 5 m off rolls nothing back, the same row of the Bridge does; fails with the compare's `entity_of`
+put back), `RollbackEngine.ARowWrittenIntoTheAnchorRecordKeepsTheBodysFlags` (the flags and the name; the engine
+test's fake `get_body` now fills the name), `SessionClientCore.RowEntityIsTheBodyTheServerIdentityHasAtTheTick`
+extended (a keep-local mechanism maps to no body while the registry still resolves it).
+
+| run | build | mism per client | differing rows (not keep-local, not own-in-zone) | judge | snapshots applied | level finished at |
+|---|---|---|---|---|---|---|
+| `l13x_pre` | INT tree (before) | 224 / 7 / 7 / 221 | 3 372 / 1 948 / 1 948 / 3 287 | FAIL | 1 599 / 1 515 / 1 515 / 1 574 | 3 170 / 3 004 / 3 004 / 3 122 |
+| `l13x_fix2` | L13X | 0 x 4 | 0 x 4 | PASS | 1 131 / 1 070 / 1 070 / 1 139 | 2 269 / 2 153 / 2 153 / 2 281 |
+| `l13x_off1` | L13X, snapshots off + `--ignore-snapshots` | 0 x 4 | 0 x 4 | PASS | - | 2 269 / 2 153 / 2 153 / 2 281 |
+
+`l13x_fix2`'s client FINAL rows and server FULL rows equal `l13x_off1`'s row for row, airship included (0 of
+1 111 / 1 053 / 1 053 / 1 127 / 1 117 ticks differ): with the fix, snapshots on changes nothing in this scene. Builds
+x64, x86 (physics_RT + client), Arch server. The entity filter acts only where a snapshot
+corrects; the record-flags write also runs under a resync's rows (the shipped path). Measured on that path: the L13X
+diagnosis run `l13x_c3` (snapshots off, the shipped client path, resyncs inside the zone: client 1 at 2 110, client 3
+at 2 100), re-run on this build as `l13x_c3fix` - every client's FINAL rows and the server's FULL rows equal the
+pre-fix run's (0 of 1 110 / 979 / 1 052 / 1 054 / 1 116 ticks differ; the row-diff files byte-equal). The
+record-flags write in live snapshot corrections: the same scene with snapshots on and `--no-savestate` (row writes at
+genuine mismatches outside the zone, e.g. P_Ball_Paper_MF at anchor 1 164) journals the anchors' rows with the
+server's flags (2 / 2, 3 / 3) where the pre-fix build journalled 15 rows flags 3 against 1 with identical poses, the
+world otherwise unchanged; under `--capture-cache verify` the cache counted 30 083 - 42 305 hits per client and 0
+differences over those row-written records. Every core_ref_s21 arm and every LBM / L6 reference run is snapshots off
+or takes its few snapshots for their names only (at most 60 per client, no snapshot rollback), so no reference is
+expected to move.
+
+**Not exercised / open:** retail (the shipped server runs snapshots off and retail sets `body_set_corrections =
+false`; a server with snapshots at 2 / 66 reaches retail through the same code), the public-test server's
+`snapshot_interval` (the 8845 was off limits), the legacy full-snapshot resync and `--no-rollback` paths, an
+original level's airship zone (no driven recipe reaches one; the arena loaded in slot 1 does, and passes). Open, not
+changed: any in-tolerance
+snapshot correction still writes awake rows without their record extra and parts a world by about 1e-9 (L13X
+diagnosis, item 3); `arena_map_test.py`'s snapshots-on default without `--scenario`.

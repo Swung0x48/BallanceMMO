@@ -2137,7 +2137,22 @@ namespace bmmo::session {
                 // prediction we just discarded and rolls back again.
                 if (!item.from_row) continue;
                 auto existing = at->bodies.find(entity);
-                if (existing != at->bodies.end()) existing->second = item.state;
+                if (existing != at->bodies.end()) {
+                    // The row's pose, velocities and sleep; the name and the
+                    // flags a row does not carry (state_of leaves them zero)
+                    // this record's own capture of the same lifetime, which
+                    // a pose write does not change, or the record - the
+                    // client journal's FINAL row of T - says "no collision"
+                    // (step L13X).  The movement state is the body's as the
+                    // write left it (the row's sleep), as a capture reads it.
+                    bmmo_physics_body_state written = item.state;
+                    std::memcpy(written.name, existing->second.name, sizeof written.name);
+                    written.movable = existing->second.movable;
+                    written.collision_enabled = existing->second.collision_enabled;
+                    bmmo_physics_body_state after{};
+                    if (world.get_body(entity, after)) written.movement_state = after.movement_state;
+                    existing->second = written;
+                }
                 // ...and stays so in every later replay that crosses T (step
                 // RR): kept with T's record, written again after T's step.
                 // (Not a resync's: S is the history's oldest tick, and its

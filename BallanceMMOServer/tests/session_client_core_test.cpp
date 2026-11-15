@@ -546,6 +546,20 @@ namespace {
         remote.navigation = true;
         remote.physicalized = false;
         EXPECT_EQ(row_entity(body_kind::Ball, 4, 130), "") << "no body";
+        // Step L13X: a resolved mechanism is its body; a keep-local one (the
+        // airship, every world's own) is none, as for the snapshot compare.
+        auto& registry = state_of(core).mechanism_tracking_;
+        bmmo::session::body_state row;
+        row.kind = body_kind::Mechanism;
+        for (const auto& [owner, name]: {std::pair<uint32_t, const char*>{7, "P_Modul_25_Bridge"}, {8, "PE_Balloon_Platte01"}}) {
+            row.owner = owner;
+            registry.note_name(owner, name);
+            registry.note_row(130, row);
+        }
+        registry.resolve(130, [](const char*, bmmo_physics_body_state&) { return true; });
+        ASSERT_EQ(registry.resolved(), 2u) << "the registry still knows both";
+        EXPECT_EQ(row_entity(body_kind::Mechanism, 7, 130), "P_Modul_25_Bridge");
+        EXPECT_EQ(row_entity(body_kind::Mechanism, 8, 130), "") << "a keep-local body takes no row";
     }
 
     TEST(SessionClientCore, CapabilitiesDefaultToCannot) {
@@ -3777,6 +3791,93 @@ namespace {
                                                 "runs without snapshots (step DEP)") != calls.end();
             EXPECT_EQ(logged, !a.rolls);
             EXPECT_EQ(std::find(calls.begin(), calls.end(), "keep_live_cells:exit:rolled back") != calls.end(), a.rolls);
+        }
+    }
+
+    // Step L13X: a snapshot row of a keep-local body (the balloon and its
+    // airship, resync_rules.hpp keep_local_body) is no correction: every world
+    // runs its own, so the server's row is no measure of this one's.  With
+    // snapshots on, the row of the airship 5 m off rolls nothing back (before
+    // the fix it did, every 2-4 ticks through Level 13's airship zone), the
+    // same row of another mechanism does.
+    TEST(SessionClientCoreSnapshot, AKeepLocalMechanismRowIsNoCorrection) {
+        struct arm {
+            uint32_t owner;
+            const char* name;
+            bool rolls;
+        };
+        for (const arm a: {arm{8, "PE_Balloon_Platte01", false}, arm{7, "P_Modul_25_Bridge", true}}) {
+            SCOPED_TRACE(a.name);
+            flow_fake fake;
+            fake.driven = "Ball_Wood";
+            auto platform = fake.make_flow();
+            auto bodies = std::make_shared<std::map<std::string, bmmo_physics_body_state>>();
+            for (const char* entity: {"Ball_Wood", "P_Modul_25_Bridge", "PE_Balloon_Platte01"}) {
+                auto& body = (*bodies)[entity];
+                body.movable = true;
+                body.collision_enabled = true;
+                body.simulated = true;
+                body.rotation[3] = 1.0;
+            }
+            platform.bind_world = [&fake, bodies](const bmmo::session::core_world_hooks&) {
+                fake.calls.push_back("bind_world");
+                bmmo::session::rollback_world world;
+                world.get_body = [bodies](const std::string& entity, bmmo_physics_body_state& out) {
+                    const auto it = bodies->find(entity);
+                    if (it == bodies->end()) return false;
+                    out = it->second;
+                    return true;
+                };
+                world.set_body = [bodies](const std::string& entity, const bmmo_physics_body_state& state,
+                                          bmmo::session::wake_mode, bool) {
+                    const auto it = bodies->find(entity);
+                    if (it == bodies->end()) return false;
+                    it->second = state;
+                    return true;
+                };
+                world.get_nav = [](const std::string&, bmmo_physics_nav_state&) { return false; };
+                world.step = []() { return true; };
+                return world;
+            };
+            session_client_core core(std::move(platform), session_capabilities{});
+            run_to_tick_125(core, fake);
+            core.config.rollback = true;
+            state_of(core).snapshot_interval_ = 2;   // snapshots on
+            state_of(core).own_physicalized_ = true;
+            // Both mechanisms resolved to their bodies here, as a full
+            // snapshot's names and the frame's resolve pass leave them.
+            auto& registry = state_of(core).mechanism_tracking_;
+            bmmo::session::body_state named;
+            named.kind = bmmo::session::body_kind::Mechanism;
+            named.rotation[3] = 1.0;
+            for (const auto& [owner, name]: {std::pair<uint32_t, const char*>{7, "P_Modul_25_Bridge"}, {8, "PE_Balloon_Platte01"}}) {
+                named.owner = owner;
+                registry.note_name(owner, name);
+                registry.note_row(118, named);
+            }
+            registry.resolve(118, [bodies](const char* entity, bmmo_physics_body_state& out) {
+                const auto it = bodies->find(entity);
+                if (it == bodies->end()) return false;
+                out = it->second;
+                return true;
+            });
+            ASSERT_EQ(registry.resolved(), 2u);
+            bmmo::session::rollback_tracked tracked;
+            tracked.own_entity = "Ball_Wood";
+            tracked.mechanisms = {"P_Modul_25_Bridge", "PE_Balloon_Platte01"};
+            for (uint32_t tick = 118; tick <= 125; ++tick)
+                state_of(core).rollback_.record(core.platform().bind_world(bmmo::session::core_world_hooks{}), tick, tracked, {});
+            // The server had the own ball where this world has it and the
+            // mechanism 5 m away at tick 122 (a delta: its rows carry no name).
+            bmmo::session::body_state row = named;
+            row.owner = a.owner;
+            row.position[0] = 5.0;
+            row.flags = bmmo::session::BODY_FLAG_SIMULATED;
+            core.on_session_snapshot(snapshot_message(9, 122, false, {ball_row(3, 0.0, true), row}));
+            EXPECT_EQ(state_of(core).snapshots_applied_, 1u);
+            EXPECT_EQ(state_of(core).rollback_.stats().snapshots, 1u) << "compared";
+            EXPECT_EQ(state_of(core).snapshot_rollbacks_, a.rolls ? 1u : 0u);
+            EXPECT_EQ(bodies->at(a.name).position[0], a.rolls ? 5.0 : 0.0) << "the server's row written or not";
         }
     }
 

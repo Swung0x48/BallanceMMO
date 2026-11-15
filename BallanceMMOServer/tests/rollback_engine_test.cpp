@@ -53,6 +53,10 @@ namespace {
         // current_speed / abs_omega.
         double contact_energy = 0.0;
         uint32_t pair_age = 0;
+        // The flags a body state carries beside its sleep, read back as set
+        // (step L13X); a snapshot row carries none of them.
+        bool movable = false;
+        bool collision_enabled = false;
     };
 
     const char* mode_name(wake_mode mode) {
@@ -169,8 +173,11 @@ namespace {
                     out.position[k] = it->second.position[k];
                     out.linear[k] = it->second.linear[k];
                 }
+                std::snprintf(out.name, sizeof out.name, "%s", entity.c_str());
                 out.rotation[3] = 1.0;
                 out.simulated = it->second.simulated;
+                out.movable = it->second.movable;
+                out.collision_enabled = it->second.collision_enabled;
                 return true;
             };
             // The call log carries the mode and the recheck request, in that
@@ -2764,6 +2771,36 @@ TEST(RollbackEngine, OnlyAWriteThatMovesTheBodyAsksForAContactRecheck) {
                                        mechanism_row("Post", 40.002, 0.0f, true)});
     EXPECT_TRUE(engine.on_snapshot(world.adapter(), moved, 4, entity_of_named, no_input));
     EXPECT_EQ(world.count("set_body Post wake recheck"), 1);
+}
+
+// Step L13X: a row written over the anchor's record keeps the flags a row does
+// not carry.  The record of T is the client journal's FINAL row of T; with the
+// row's zeroed flags every correction anchor journalled its rows "without
+// collision" (Level 13 with snapshots on: flags 1 against the server's 3).
+TEST(RollbackEngine, ARowWrittenIntoTheAnchorRecordKeepsTheBodysFlags) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Post"].position[0] = 40.0;
+    world.bodies["Post"].movable = true;
+    world.bodies["Post"].collision_enabled = true;
+    rollback_engine engine;
+    rollback_tracked tracked;
+    tracked.own_entity = "Own";
+    tracked.mechanisms = {"Post"};
+    record_ticks(world, engine, tracked, 1, 4);
+
+    fake_body server_own;
+    server_own.position[0] = 0.5;   // the ball breaches; the awake Post row is a restore source
+    const auto snapshot = snapshot_of(2, {ball_body(1, server_own), mechanism_row("Post", 40.001, 0.25f, true)});
+    ASSERT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 4, entity_of_named, no_input));
+    bmmo_physics_body_state post{};
+    ASSERT_TRUE(engine.recorded_body_state("Post", 2, post));
+    EXPECT_EQ(post.position[0], 40.001) << "the row's pose";
+    EXPECT_EQ(post.linear[0], 0.25f);
+    EXPECT_TRUE(post.simulated);
+    EXPECT_TRUE(post.movable) << "the body's flags, not the row's zeros";
+    EXPECT_TRUE(post.collision_enabled);
+    EXPECT_STREQ(post.name, "Post") << "the record's name, not the row's empty one";
 }
 
 // A shared mechanism row and a ball row are judged by the same tolerance:

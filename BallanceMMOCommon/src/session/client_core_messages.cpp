@@ -93,7 +93,7 @@ namespace bmmo::session {
                         target = it->second.entity.c_str();
                     }
                 } else {
-                    mechanism_entity = s.mechanism_tracking_.entity_of(body.owner);
+                    mechanism_entity = snapshot_mechanism_entity(body.owner);
                     if (mechanism_entity.empty()) continue;   // another sector's instance
                     target = mechanism_entity.c_str();
                 }
@@ -168,7 +168,7 @@ namespace bmmo::session {
                 // Design 9.25: the resolved local body, "" when this client
                 // has none (another sector) or the identity guard refused
                 // the pick - the mod does exactly the same.
-                return s.mechanism_tracking_.entity_of(body.owner);
+                return snapshot_mechanism_entity(body.owner);   // step L13X: never a keep-local body
             };
             // Only an exact hit counts, like the mod: the engine feeds a
             // relayed frame instead of the recorded prediction when this
@@ -300,7 +300,7 @@ namespace bmmo::session {
             // locally simulated mechanism through a body_corrector instead.
             if (snapshot.full && !body.name.empty()) s.mechanism_tracking_.note_name(body.owner, body.name);
             s.mechanism_tracking_.note_row(snapshot.tick, body);
-            const std::string entity = s.mechanism_tracking_.entity_of(body.owner);
+            const std::string entity = snapshot_mechanism_entity(body.owner);
             if (entity.empty()) continue;
             const bool wake = (body.flags & bmmo::session::BODY_FLAG_SIMULATED) != 0;
             bmmo_physics_body_state local{};
