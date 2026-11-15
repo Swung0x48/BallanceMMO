@@ -36,6 +36,7 @@
 #include "rollback.hpp"
 #include "proximity_rules.hpp"
 #include "trafo_input.hpp"
+#include "intent.hpp"
 #include "../entity/session.hpp"
 #include "../physics/physics_rt_api.h"
 #include "../physics/outside_controllers.hpp"
@@ -308,6 +309,15 @@ namespace bmmo::session {
         bool cam_valid = false;
         bool nav_active = false;
         bool paused = false;
+        // Step INT: what opened the pause `paused` is in (the pause_enter
+        // intent's source; retail: BMMO's own restart front or the ESC key).
+        intent_source pause_source = intent_source::unknown;
+    };
+
+    // Step INT: what a live frame did to the level (game/level_intents.hpp).
+    struct level_intents_poll {
+        bool reset = false;       // the frame delivered "Reset Level" to Level
+        bool menu_dead = false;   // Menu_Dead is active after it
     };
 
     // A mirror's body (design 2.2 make_mirror; E6): the entity the host named
@@ -578,9 +588,16 @@ namespace bmmo::session {
         // rewind anchored earlier keeps them live).
         std::function<void(uint32_t tick)> note_script_resets;
         // The retail sector resets kept neutralized before the frame's
-        // rewinds (E9; pre_step step 4).  `resolved`: the client resolved a
-        // mechanism of its own (the sector is up).
-        std::function<void(uint32_t tick, bool resolved)> script_guards;
+        // rewinds (E9; pre_step step 4).  `sector_up`: the session's sector
+        // is up - the client resolved a mechanism of its own, or its own ball
+        // was born since the anchor (step INT: after the level start's Init
+        // Ingame site, with or without snapshot names).
+        std::function<void(uint32_t tick, bool sector_up)> script_guards;
+        // Optional (step INT): after a live frame, what it did to the level
+        // (the shared game::level_intent_watch); the core journals and sends
+        // the intents it shows.  A host without it records no reset or game
+        // over.
+        std::function<level_intents_poll(uint32_t tick)> poll_level_intents;
 
         // ---- writing the world (design 2.2; E4) ----
         // Beam a body to the pose and overwrite its speeds; `wake` wakes it, a

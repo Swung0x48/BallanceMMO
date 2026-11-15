@@ -83,6 +83,10 @@ namespace bmmo::session {
         leave,               // server: a member out of the session, and why
         session_end,         // server: the session's end counters (the end line's)
         base_due,            // server: a late joiner's start correction (when its base was due)
+        // Step INT (session/intent.hpp): the player intents.
+        intent,              // client: an intent of this member, at the session tick it applies at
+        member_intent,       // server: a member's SessionIntent as received
+        room_intent,         // server: a room or legacy request about a running session (restart votes, requests)
         count
     };
 
@@ -168,6 +172,27 @@ namespace bmmo::session {
                                               {"rejected", 'i'}, {"restamped", 'i'}, {"superseded", 'i'}};
         constexpr stat_field base_due[] = {{"player", 'i'}, {"base", 'i'}, {"due_us", 'i'}, {"rtt_us", 'i'},
                                            {"offset_us", 'i'}};
+        // Step INT.  `tick`: the live session tick the intent applies at (a
+        // reset: the tick whose frame delivered "Reset Level" to Level; a game
+        // over: the tick Menu_Dead became active in; a pause edge: the frame
+        // whose observed pause changed; an exit: the core's tick at the
+        // request, a label - the exit takes effect at the server's removal);
+        // `request`: the live tick a BMMO trigger asked at, -1 for a menu;
+        // `arg`: the requester's / countdown sender's connection, or -1;
+        // `kind` / `source`: intent_kind_name / intent_source_name.
+        constexpr stat_field intent[] = {{"tick", 'i'}, {"request", 'i'}, {"life", 'i'}, {"kind", 's'},
+                                         {"source", 's'}, {"arg", 'i'}};
+        // `player`: the sender; `arg` mapped to that session's player id (-1:
+        // none, or not a member; -2: the server console).  A session's
+        // player ids are its members' connections, so a member's arg equals
+        // the client record's.
+        constexpr stat_field member_intent[] = {{"player", 'i'}, {"life", 'i'}, {"kind", 's'}, {"source", 's'},
+                                                {"tick", 'i'}, {"request", 'i'}, {"arg", 'i'}};
+        // `what`: level_restarted, restart_request, restart_request_failed,
+        // vote, unvote, restart, countdown; players are the session's (-1:
+        // not a member, -2: the server console); `detail`: the votes after
+        // the change ("votes/needed"), a countdown's switches.
+        constexpr stat_field room_intent[] = {{"player", 'i'}, {"what", 's'}, {"other", 'i'}, {"detail", 's'}};
     }
 
 #define BMMO_STAT_KIND(name, klass, side) \
@@ -219,6 +244,13 @@ namespace bmmo::session {
         BMMO_STAT_KIND(leave, raw, STAT_SERVER),
         BMMO_STAT_KIND(session_end, raw, STAT_SERVER),
         BMMO_STAT_KIND(base_due, raw, STAT_SERVER),
+        // Step INT.  The client's at the tick it names, live only (a replayed
+        // tick writes none).  The server's two are written where the message
+        // is handled, at the tick the runner simulates next (raw, as leave):
+        // their `tick` field is the member's, which a recipe reads.
+        BMMO_STAT_KIND(intent, logical, STAT_CLIENT),
+        BMMO_STAT_KIND(member_intent, raw, STAT_SERVER),
+        BMMO_STAT_KIND(room_intent, raw, STAT_SERVER),
     };
 #undef BMMO_STAT_KIND
     static_assert(sizeof(kStatKinds) / sizeof(kStatKinds[0]) == static_cast<size_t>(stat_kind::count),

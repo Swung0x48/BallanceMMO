@@ -2699,6 +2699,7 @@ namespace bmmo::session {
         if (spawn) event.flags |= bmmo::session::PHYSICALIZE_FLAG_SPAWN;
         event.recipe = report.recipe;
         send_event(event);
+        s.own_born_ = true;   // step INT: the level-reset guard's sector_up
         // The birth as the history keeps it: what the server makes when
         // its echo says it applied the event later (record_own_birth).
         record_own_birth(event, report.entity);

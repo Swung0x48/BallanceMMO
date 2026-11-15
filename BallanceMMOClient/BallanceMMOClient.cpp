@@ -425,7 +425,10 @@ void BallanceMMOClient::OnPostExitLevel() {
     // a session) leaves the level and goes on; any other exit ends a session
     // (FULL step RTDF: already at OnPreExitLevel, with a leave; this end is
     // the fallback for an exit that did not pass there).
-    if (!core_host_reload_exit()) core_host_end_local("left the level", true);
+    if (!core_host_reload_exit()) {
+        core_host_record_exit();   // step INT: the fallback's exit intent (none if OnPreExitLevel recorded it)
+        core_host_end_local("left the level", true);
+    }
     core_host_release_placement("the level exit");   // step SP10: the sector placement's copies go with the level
     // The guard's callback hangs on a level script, so the teardown destroys it
     // with the script; disabling it here hands the time factor back anyway.
@@ -2410,7 +2413,7 @@ void BallanceMMOClient::handle_message(const bmmo::net::message& received) {
                 // writes the energy array. That belongs on the game thread, so
                 // copy what it needs (the receive buffer dies with this call)
                 // and hand it over.
-                utils_.run_on_game_thread([this,
+                utils_.run_on_game_thread([this, sender = static_cast<uint32_t>(msg->content.sender),
                         force_restart = bool(msg->content.force_restart),
                         restart_level = bool(msg->content.restart_level),
                         map_matches = (msg->content.map == current_map_)] {
@@ -2435,7 +2438,7 @@ void BallanceMMOClient::handle_message(const bmmo::net::message& received) {
                     max_sector_ = 1;
                     if (restart_level) {
                         countdown_restart_ = true;
-                        restart_current_level();
+                        restart_current_level(bmmo::session::intent_source::countdown, sender);
                     }
                     else if (auto* array_energy = static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(energy_array_))) {
                         int points = (current_map_.level == 1) ? initial_points_ : initial_points_ - 1;
@@ -2859,7 +2862,7 @@ void BallanceMMOClient::handle_message(const bmmo::net::message& received) {
             // game thread, like the identical call in the Countdown handler
             utils_.run_on_game_thread([this, requester = msg.content.requester] {
                 if (m_bml->IsIngame() && !spectator_mode_)
-                    restart_current_level();
+                    restart_current_level(bmmo::session::intent_source::restart_request, requester);
                 else {
                     send(bmmo::owned_simple_action_msg{.content = {
                         .type = bmmo::owned_simple_action_type::RestartRequestFailed,

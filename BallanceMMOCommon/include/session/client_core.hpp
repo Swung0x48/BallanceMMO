@@ -105,6 +105,8 @@
 #include "../message/session_start_msg.hpp"
 #include "../message/session_clock_ack_msg.hpp"
 #include "../message/session_telemetry_msg.hpp"
+#include "../message/session_intent_msg.hpp"
+#include "intent.hpp"
 #include "../message/session_start_at_msg.hpp"
 #include "../message/session_start_status_msg.hpp"
 #include "start_handshake.hpp"
@@ -554,6 +556,31 @@ namespace bmmo::session {
         uint64_t spawn_forgets_replayed_ = 0, spawn_forgets_restored_ = 0, spawn_forgets_server_ = 0;
         uint64_t spawn_forgets_dropped_ = 0, spawn_forget_rewinds_ = 0;
         bool own_physicalized_ = false;
+        // Step INT: an own ball born since the anchor (commit_own_birth, any
+        // birth): the level start's Init Ingame site has run, so the
+        // level-reset guard engages without snapshot names.  Cleared only by
+        // the anchor (a resync keeps it).
+        bool own_born_ = false;
+        // Step INT: the intents (session/intent.hpp).  A reset BMMO asked for
+        // (note_reset_request) until a frame delivers it; the pause the
+        // frames showed and what opened it; Menu_Dead's last state (primed by
+        // the first poll after the anchor) and whether it rose since the last
+        // reset; whether the own Finish went out.
+        struct pending_reset {
+            bool armed = false;
+            intent_source source = intent_source::unknown;
+            uint32_t request = INTENT_NONE;
+            uint32_t arg = INTENT_NONE;
+        };
+        pending_reset pending_reset_;
+        bool last_paused_ = false;
+        bool pause_primed_ = false;
+        intent_source pause_source_ = intent_source::unknown;
+        bool menu_dead_ = false;
+        bool menu_dead_primed_ = false;
+        bool game_over_seen_ = false;
+        bool finished_seen_ = false;
+        bool level_exit_recorded_ = false;
         bool assigned_ = false;
         uint32_t last_assign_first_tick_ = 0;  // the assignment applied last: its redundant copies are ignored
         uint64_t duplicate_assigns_ = 0;
@@ -1702,6 +1729,22 @@ namespace bmmo::session {
         // the frame that stepped T, stamped T + 1.
         void request_beam(const double position[3]);
 
+        // ---- the intents (step INT, session/intent.hpp) ----
+        // A level reset a BMMO trigger asked for (retail's restart, the
+        // headless test switch, recipe v4): noted at the last live tick; the
+        // caller sends "Reset Level" (game::send_reset_level) or runs its own
+        // front.  The frame that delivers it records the intent with this
+        // source; one not delivered within 5 s is dropped (a log line, no
+        // record).
+        void note_reset_request(intent_source source, uint32_t arg = INTENT_NONE);
+        bool reset_request_pending() const { return s.pending_reset_.armed; }
+        // The level left: the exit_level intent at current_tick(), recorded
+        // and sent now, before the host ends the core and sends the room
+        // Leave.  `source` unknown: the core's own state names it (dead_menu
+        // after a game over, finish_menu after the own Finish, pause_menu
+        // when the last frame was paused).  Once per anchor.
+        void request_level_exit(intent_source source);
+
         // ---- the tick (E9, client_core_frame.cpp; design 1.3) ----
         // The tick pre_step prepares: the tick base on the first frame
         // after the anchor or an assignment.
@@ -2573,6 +2616,12 @@ namespace bmmo::session {
         // Step DX3: design 9.3 (b)'s precondition, every recorded tick (the
         // host's outside_forces; nothing without it).
         void check_outside_forces(uint32_t tick);
+        // Step INT: journal one intent at `tick` and send it (SessionIntent).
+        void record_intent(intent_kind kind, intent_source source, uint32_t tick, uint32_t request, uint32_t arg);
+        // After the live frame `tick`: its reset delivery and game over
+        // (the platform's poll_level_intents).  `paused_before`: the frame
+        // before was paused.
+        void poll_level_intents(uint32_t tick, bool paused_before);
         void write_own_matrices(uint32_t tick);
         void apply_own_due(uint32_t tick);
         // FULL step ODM: the moved own deaths queued for `tick`, applied

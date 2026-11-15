@@ -129,13 +129,19 @@ SessionTelemetry as received; raw), `s5` (an event's intake-to-send delay, writt
 relayed; class 1), `ghost` (a ball's spawn ghost made / solid); from step JNL2: `boot` (us from the boot
 request to world ready, the members; class 1), `leave` (a member out of the session: player, why, resyncs; raw),
 `session_end` (the end line's ticks, lives, resyncs, events flagged / rejected / re-stamped, births superseded;
-raw), `base_due` (a late joiner's start correction: base, due instant, rtt, offset; raw). Client kinds: `rewind` (what a rewind was asked:
+raw), `base_due` (a late joiner's start correction: base, due instant, rtt, offset; raw); from step INT:
+`member_intent` (a member's SessionIntent as received: player, life, kind, source, the member's tick, request, arg;
+raw) and `room_intent` (a room or legacy request about a running session - level_restarted, restart_request,
+restart_request_failed, vote, unvote, restart, countdown - with the session's player ids, -1 not a member, -2 the
+console, and its detail; raw). Client kinds: `rewind` (what a rewind was asked:
 anchor, tick, cause code, the ball an input correction names), `rewind_base` (right after it: the base its restore
 was and the ticks it re-simulated; raw - step LVR's wall-clock gate can restore a light anchor's whole record
 before the one asked), `window` (the 60-tick window line's numbers and its per-player tails), `status` (the status
 line's counters but `resim=`, at the session's end before the journal closes), `status_clock` (`resim=`, the clock
 values and the whole line, at the end and at each headless 5 s report; raw), `own_death` (each outcome line of a
-late own death), `stall` (a headless `--stall-ms` stall).
+late own death), `stall` (a headless `--stall-ms` stall), and from step INT `intent` (a player intent: the session
+tick it applies at, the live tick a BMMO trigger asked at or -1, life, kind, source, arg; live ticks only - see
+docs/realtime-design.md 'Built (player intents in the journal, step INT, 2026-11-15)' for the tick rules).
 
 The resync note keeps its rows and bytes; its capture and coding times (raw reads that differed between any two
 runs) moved to `resync_cost`.
@@ -145,7 +151,10 @@ directories; nothing to compare is an error) walks the records decompressed and 
 `run` (two runs on the virtual clock: a real-clock run's header `utc_ms` and TICK `ms` are the wall clock's) skips
 CLOCK, masks the build id and drops a pre-step resync note's times; `replay` (a capture replay) skips only class-2
 CLOCK; `legacy` (against a journal written before the step) skips the three tags as well; `--checkpoint-sets`
-compares a checkpoint's bodies as a set (a retail capture replay numbers the objects in another order). `scripts/session_facts.py` reads the typed records (and
+compares a checkpoint's bodies as a set (a retail capture replay numbers the objects in another order);
+`--ignore-kind NAME` (repeatable, step INT; `JOURNAL_IGNORE_KINDS=a,b` in the environment for every comparer that
+goes through `journal_trace.compare`) leaves a kind's SCHEMA entry and records out, so a build that adds kinds is
+compared with a reference recorded before them. `session_facts.py --intents` lists a journal's intents. `scripts/session_facts.py` reads the typed records (and
 renders them as the lines the log readers parse); `scripts/pubtest_report.py` and `scripts/telemetry_report.py`
 read journals only.
 

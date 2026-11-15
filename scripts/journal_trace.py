@@ -1093,8 +1093,14 @@ _BUILD_ID = re.compile(rb"(\+bmmo-)[0-9a-f]{12}")
 
 COMPARE_MODES = ("run", "replay", "legacy")
 
+# Step INT: typed kinds a compare leaves out - their SCHEMA entries and their STAT / CLOCK records - so a build that
+# adds kinds (intent, member_intent, room_intent) is proven to have moved nothing else against a reference recorded
+# before them.  journal_compare.py --ignore-kind NAME; every other comparer that goes through compare() (the gates'
+# arm_journals_id.py, journal_replay_compare.py) reads the environment's JOURNAL_IGNORE_KINDS (comma-separated).
+IGNORE_KINDS = frozenset(k for k in os.environ.get("JOURNAL_IGNORE_KINDS", "").split(",") if k)
 
-def canonical(path, mode="run", checkpoint_sets=False):
+
+def canonical(path, mode="run", checkpoint_sets=False, ignore_kinds=None):
     """The records a compare looks at, as (tag, tick or None, kind name or None, bytes), in file order.
 
     run: every record but CLOCK, the build id masked and a pre-step resync note's times dropped - two runs of
@@ -1105,9 +1111,11 @@ def canonical(path, mode="run", checkpoint_sets=False):
     file against one written before step JNL.  checkpoint_sets: a CHECKPOINT's bodies compared as a set - a retail
     capture replay's order follows the game's object ids, which another process numbers differently (K7); for the
     same reason a TICK whose probe is not a Ball_ body (the first movable object, physics_state.cpp) leaves its probe
-    name, position and speed out (K7G: an L12 replay's probe was Rope003 where the live run's was Rope002)."""
+    name, position and speed out (K7G: an L12 replay's probe was Rope003 where the live run's was Rope002).
+    ignore_kinds: kind names left out (SCHEMA entries and records; default IGNORE_KINDS, step INT)."""
     if mode not in COMPARE_MODES:
         raise ValueError(mode)
+    ignore = IGNORE_KINDS if ignore_kinds is None else frozenset(ignore_kinds)
     schema = {}
     out = []
     for tag, payload in records(path):
@@ -1121,11 +1129,14 @@ def canonical(path, mode="run", checkpoint_sets=False):
             # mode skips - a new CLOCK kind among them - leaves two files of one tree and of the tree before equal.
             payload = (_U32.unpack_from(payload, 0)[0],
                        tuple((i, k["name"], k["class"], tuple(k["fields"])) for i, k in sorted(schema.items())
-                             if k["class"] == STAT_LOGICAL or (mode == "replay" and k["class"] == STAT_CLOCK_SITE)))
+                             if (k["class"] == STAT_LOGICAL or (mode == "replay" and k["class"] == STAT_CLOCK_SITE))
+                             and k["name"] not in ignore))
         elif tag in (TAG_STAT, TAG_CLOCK):
             kind = schema.get(_U16.unpack_from(payload, 4)[0]) if len(payload) >= 6 else None
             name = kind["name"] if kind else "?"
             if mode == "legacy" or (tag == TAG_CLOCK and (mode == "run" or not kind or kind["class"] == STAT_RAW)):
+                continue
+            if name in ignore:
                 continue
         elif tag == TAG_HEADER:
             payload = _BUILD_ID.sub(rb"\1????????????", payload, count=1)
@@ -1145,9 +1156,9 @@ def canonical(path, mode="run", checkpoint_sets=False):
     return out
 
 
-def compare(path_a, path_b, mode="run", checkpoint_sets=False):
+def compare(path_a, path_b, mode="run", checkpoint_sets=False, ignore_kinds=None):
     """None when the two are equal under `mode`, else a text naming the first differing record."""
-    a, b = canonical(path_a, mode, checkpoint_sets), canonical(path_b, mode, checkpoint_sets)
+    a, b = canonical(path_a, mode, checkpoint_sets, ignore_kinds), canonical(path_b, mode, checkpoint_sets, ignore_kinds)
     for index, (x, y) in enumerate(zip(a, b)):
         if x != y:
             return "record %d differs: %s tick %s%s vs %s tick %s%s (%d of %d / %d records differ by position)" % (

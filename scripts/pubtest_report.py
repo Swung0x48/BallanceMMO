@@ -234,6 +234,10 @@ def summarize(s):
     end = stats.get('session_end')
     row['flagged'] = '%d/%d' % (end[-1]['values']['flagged'], end[-1]['values']['rejected']) if end else None
     row['leaves'] = collections.Counter(r['values']['why'] or 'other' for r in stats.get('leave', []))
+    # Step INT: the members' intents by kind and source, the room's restart requests and votes by what.
+    row['intents'] = collections.Counter('%s/%s' % (r['values']['kind'], r['values']['source'])
+                                         for r in stats.get('member_intent', []))
+    row['room_intents'] = collections.Counter(r['values']['what'] for r in stats.get('room_intent', []))
     row['resync_players'] = collections.Counter(p for p, _ in resynced)
     return row
 
@@ -264,6 +268,7 @@ def main(argv=None):
         'sid', 'lvl', 'start', 'min', 'N0', 'peak', 'dly', 'rtt', 'pl-h', 'resync', 'tight', 'MB', 'subst', 'run>=132',
         'stp50/99', 'stpmax', 'raise', 'boot', 'flg/rej', 'end'))
     tot, tot_leaves = collections.Counter(), collections.Counter()
+    tot_intents, tot_room = collections.Counter(), collections.Counter()
     for r in rows:
         stp = r['step']
         P('%3d %3d %14s %6.1f %4d %5d %4d %4s %6.2f %6d %5d %6s %6s %8s %13s %7s %5d %5s %7s %s%s' % (
@@ -277,12 +282,18 @@ def main(argv=None):
             tot[key] += r[key]
         tot['wire_mb'] += r['wire_mb'] or 0.0
         tot_leaves.update(r['leaves'])
+        tot_intents.update(r['intents'])
+        tot_room.update(r['room_intents'])
     runs = [n for r in rows for n in r['run_lengths']]
     P('TOTAL sessions=%d minutes=%.1f player-hours=%.2f resyncs=%d tight=%d MB=%s subst_ticks=%d runs>=132=%d' % (
         len(rows), tot['minutes'], tot['player_hours'], tot['resyncs'], tot['tight'],
         '%.1f' % tot['wire_mb'] if any(r['wire_mb'] is not None for r in rows) else '-', tot['subst'], tot['runs132']))
     if tot_leaves:
         P('leaves by reason: %s' % ', '.join('%s %d' % kv for kv in sorted(tot_leaves.items())))
+    if tot_intents:
+        P('intents by kind/source (member_intent, step INT): %s' % ', '.join('%s %d' % kv for kv in sorted(tot_intents.items())))
+    if tot_room:
+        P('room requests (room_intent, step INT): %s' % ', '.join('%s %d' % kv for kv in sorted(tot_room.items())))
     if runs:
         P('substitution run length (merged) n=%d p50=%s p90=%s p99=%s max=%s; >=66: %d; >=300: %d' % (
             len(runs), pct(runs, 50), pct(runs, 90), pct(runs, 99), max(runs), sum(1 for x in runs if x >= 66),

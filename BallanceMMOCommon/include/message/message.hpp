@@ -124,6 +124,9 @@ namespace bmmo {
         BallStateMute,
         // Protocol 38 (step A6): a member's frame times and rewinds for the server's log (session_telemetry_msg.hpp).
         SessionTelemetry,
+        // Protocol 41 (step INT): a member's player intent with its session tick, for the server's journal
+        // (session_intent_msg.hpp).
+        SessionIntent,
     };
 
     template<typename T, opcode C = None>

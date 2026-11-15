@@ -19,6 +19,7 @@
 #include "server_data.hpp"
 #include "config_manager.hpp"
 #include "room/room_manager.hpp"
+#include <session/intent.hpp>   // step INT: the intents' names (SessionIntent)
 #include <session/io_pool.hpp>   // the session journals' pool (step SIO) and the log's (step IOX)
 #include <session/session_clock.hpp>   // step K1: the main loop and the time broadcast read it in every build
 #include <session/capture_seams.hpp>   // step K4b-ii: --capture-inbound / --replay-inbound
@@ -2446,6 +2447,37 @@ public:
                                 stat_int(m.inbound_p50), stat_int(m.inbound_p99), stat_int(m.inbound_max), stat_int(ping)});
     }
 
+    // Step INT (protocol 41): a member's player intent, journaled as
+    // received (member_intent) with its arg mapped to the session's player
+    // id; nothing else - no world, relay or schedule reads it.  One from a
+    // connection that is not a member of the session it names, or with a
+    // kind or source this build has no name for, is dropped (counted).
+    void handle_session_intent(bmmo::net::connection c, const bmmo::session_intent_msg& m) {
+        using bmmo::session::intent_kind;
+        using bmmo::session::intent_source;
+        auto cs = client_session_.find(c);
+        if (cs == client_session_.end() || cs->second != m.session || !runner_
+                || m.kind >= static_cast<uint8_t>(intent_kind::count) || m.source >= static_cast<uint8_t>(intent_source::count)) {
+            ++dropped_intents_;
+            Printf(kVerbose, "Physics session %u: SessionIntent from %s (#%u) dropped (kind %u, source %u; %llu dropped).",
+                   m.session, get_client_name(c), c, m.kind, m.source, static_cast<unsigned long long>(dropped_intents_));
+            return;
+        }
+        const auto kind = static_cast<intent_kind>(m.kind);
+        const auto source = static_cast<intent_source>(m.source);
+        Printf(kVerbose, "Physics session %u: %s intent %s (%s) at tick %u (request %d, life %u).", m.session,
+               get_client_name(c), bmmo::session::intent_kind_name(kind), bmmo::session::intent_source_name(source), m.tick,
+               m.request == bmmo::session::INTENT_NONE ? -1 : static_cast<int>(m.request), m.life);
+        bmmo::session::journal_stat_value kind_text, source_text;
+        kind_text.type = source_text.type = 's';
+        kind_text.s = bmmo::session::intent_kind_name(kind);
+        source_text.s = bmmo::session::intent_source_name(source);
+        runner_->journal_clock(m.session, bmmo::session::stat_kind::member_intent,
+                               {stat_int(c), stat_int(m.life), kind_text, source_text, stat_int(m.tick),
+                                stat_int(m.request == bmmo::session::INTENT_NONE ? -1 : static_cast<int64_t>(m.request)),
+                                stat_int(m.arg == bmmo::session::INTENT_NONE ? -1 : intent_player(m.session, m.arg))});
+    }
+
     // (Protocol 14-16's SessionGhostPose relay, step BALA, is retired at 17
     // (step BALL): an airship ghost is shown at its owner's legacy ball
     // stream, which tick() relays room-scoped like every other legacy
@@ -3753,6 +3785,73 @@ public:
     }
 #endif
 
+    // Step INT (stat kind room_intent): a room or legacy request about a
+    // running physics session, into that session's journal - with state_mutex_
+    // held (on_message, a console command).  The players are the session's
+    // ids, its members' connections: -1 for a connection that is not a member
+    // of it, -2 for the server console (connection 0).  Nothing without
+    // physics sessions.
+    uint32_t intent_session(bmmo::net::connection c) const {   // the session c is a member of, or 0
+#if BMMO_BUILD_SIM
+        const auto it = client_session_.find(c);
+        return it != client_session_.end() ? it->second : 0;
+#else
+        (void) c;
+        return 0;
+#endif
+    }
+    int64_t intent_player(uint32_t session, bmmo::net::connection c) const {
+        if (c == bmmo::net::kInvalidConnection) return -2;
+        return session && intent_session(c) == session ? static_cast<int64_t>(c) : -1;
+    }
+    void journal_room_intent(uint32_t session, int64_t player, const char* what, int64_t other,
+                             const std::string& detail = {}) {
+#if BMMO_BUILD_SIM
+        if (!session || !runner_) return;
+        bmmo::session::journal_stat_value what_text, detail_text;
+        what_text.type = detail_text.type = 's';
+        what_text.s = what;
+        detail_text.s = detail;
+        runner_->journal_clock(session, bmmo::session::stat_kind::room_intent,
+                               {stat_int(player), what_text, stat_int(other), detail_text});
+#else
+        (void) session; (void) player; (void) what; (void) other; (void) detail;
+#endif
+    }
+    // A RestartRequest relayed (from a member, or the console with requester
+    // 0), in the victim's session.
+    void journal_restart_request(bmmo::net::connection requester, bmmo::net::connection victim) {
+        std::lock_guard lk(state_mutex_);
+        const uint32_t session = intent_session(victim);
+        journal_room_intent(session, intent_player(session, requester), "restart_request", intent_player(session, victim));
+    }
+    // The restart votes of a room's running session after a change: "votes/needed".
+    std::string restart_tally(uint32_t room) {
+        const auto* r = rooms_.find(room);
+        int votes = 0, needed = 0;
+        if (r)
+            for (const auto& m: r->members)
+                if (in_room_session(*r, m.id)) {
+                    ++needed;
+                    if (m.vote) ++votes;
+                }
+        return std::to_string(votes) + "/" + std::to_string(needed);
+    }
+    // A countdown's Go that restarts the level, in every running session.
+    void journal_countdown(bmmo::net::connection sender, const std::string& detail) {
+#if BMMO_BUILD_SIM
+        for (const auto& [id, s]: physics_sessions_)
+            journal_room_intent(id, intent_player(id, sender), "countdown", -1, detail);
+#else
+        (void) sender; (void) detail;
+#endif
+    }
+    // The server console's countdown-forced Go (console thread).
+    void journal_console_countdown() {
+        std::lock_guard lk(state_mutex_);
+        journal_countdown(bmmo::net::kInvalidConnection, "restart_level=1 force_restart=1");
+    }
+
     void handle_room_request(client_data_collection::iterator client_it,
             const bmmo::room_request_msg& msg) {
         using bmmo::room::action;
@@ -3989,6 +4088,9 @@ public:
                 }
                 auto err = rooms_.set_vote(c, msg.action == action::VoteRestart);
                 if (err != error_code::None) { send_room_event(c, event_type::RequestDenied, err, room); break; }
+                if (const uint32_t session = intent_session(c))   // step INT
+                    journal_room_intent(session, intent_player(session, c),
+                                        msg.action == action::VoteRestart ? "vote" : "unvote", -1, restart_tally(room));
                 send_room_event(c, event_type::RequestAccepted, error_code::None, room, c);
                 send_room_state_to_room(room);
                 break;
@@ -4022,6 +4124,10 @@ public:
                 start.room = room;
                 start.mode = r->mode;
                 Printf("Room %u: restart voted by everyone in the session.", room);
+                // Step INT: in the old session's journal, before the Start
+                // ends it (the runner takes the two in order).
+                if (const uint32_t session = intent_session(c))
+                    journal_room_intent(session, intent_player(session, c), "restart", -1, restart_tally(room));
                 handle_room_request(client_it, start);
                 break;
             }
@@ -4816,6 +4922,10 @@ protected:
                         }
                         msg->content.restart_level = config_.restart_level;
                         msg->content.force_restart |= config_.force_restart_level;
+                        if (msg->content.restart_level)   // step INT: every member in a level restarts on it
+                            journal_countdown(networking_msg->conn,
+                                              std::string("restart_level=1 force_restart=")
+                                                  + (msg->content.force_restart ? "1" : "0"));
                         for (auto& i: clients_) {
                             i.second.ready = i.second.dnf = false;
                         }
@@ -5110,6 +5220,8 @@ protected:
                         break;
                     }
                     case sa::LevelRestarted: {
+                        if (const uint32_t session = intent_session(networking_msg->conn))   // step INT
+                            journal_room_intent(session, intent_player(session, networking_msg->conn), "level_restarted", -1);
                         if (!config_.log_level_restarts)
                             break;
                         char text[256];
@@ -5133,6 +5245,9 @@ protected:
                     case osa::RestartRequestFailed: {
                         Printf(bmmo::ansi::Italic, "(#%u, %s)'s restart request failed.",
                             msg->content.player_id, get_client_name(msg->content.player_id));
+                        if (const uint32_t session = intent_session(networking_msg->conn))   // step INT: the victim's
+                            journal_room_intent(session, intent_player(session, networking_msg->conn),
+                                                "restart_request_failed", intent_player(session, msg->content.player_id));
                         if (!client_exists(msg->content.player_id, true)
                                 && msg->content.player_id != bmmo::net::kInvalidConnection)
                             break;
@@ -5219,6 +5334,7 @@ protected:
                     networking_msg->conn, client_it->second.name,
                     msg.content.victim, clients_[msg.content.victim].name);
                 msg.content.requester = networking_msg->conn;
+                journal_restart_request(msg.content.requester, msg.content.victim);   // step INT
                 broadcast_message(msg);
                 break;
             }
@@ -5303,6 +5419,12 @@ protected:
                 bmmo::session_telemetry_msg msg{};
                 msg.raw.write(static_cast<const char*>(networking_msg->data), networking_msg->size);
                 if (msg.deserialize()) handle_session_telemetry(networking_msg->conn, msg);
+                break;
+            }
+            case bmmo::SessionIntent: {   // protocol 41, step INT
+                bmmo::session_intent_msg msg{};
+                msg.raw.write(static_cast<const char*>(networking_msg->data), networking_msg->size);
+                if (msg.deserialize()) handle_session_intent(networking_msg->conn, msg);
                 break;
             }
 #endif
@@ -5466,6 +5588,7 @@ protected:
     std::map<uint32_t, physics_session_state> physics_sessions_;        // by session id (state_mutex_)
     std::unordered_map<uint32_t, uint32_t> room_session_;               // room -> session
     std::unordered_map<bmmo::net::connection, uint32_t> client_session_;  // member -> session
+    uint64_t dropped_intents_ = 0;   // step INT: SessionIntents not journaled (not a member, unknown kind or source)
     uint32_t next_session_id_ = 1;
     // The runner's seed (runner_config::seed): every world's spawn impulse
     // and trafo seeds derive from it, so SessionStart carries this value.
@@ -6014,6 +6137,7 @@ int main(int argc, char** argv) {
         msg.content.map.type = bmmo::map_type::OriginalLevel;
         for (int i = 3; i >= 0; --i) {
             msg.content.type = static_cast<bmmo::countdown_type>(i);
+            if (i == 0) server.journal_console_countdown();   // step INT: every member in a level restarts on it
             server.broadcast_message(msg, bmmo::net::kSendReliable);
             Printf(bmmo::color_code(msg.code), "[[Server]]: Countdown%s - %s",
                 msg.content.mode == bmmo::level_mode::Highscore ? " <HS>" : "",
@@ -6128,6 +6252,7 @@ int main(int argc, char** argv) {
         if (clients.empty()) return;
         for (const auto& client: clients) {
             bmmo::restart_request_msg msg{.content = {.victim = client}};
+            server.journal_restart_request(msg.content.requester, client);   // step INT: requester 0, the console
             server.broadcast_message(msg);
             Printf(bmmo::color_code(msg.code), "Requested to restart %s's current level.", server.get_client_name(client));
         }

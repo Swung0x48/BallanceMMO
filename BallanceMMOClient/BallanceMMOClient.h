@@ -21,6 +21,8 @@
 #include "physics/physics_view.hpp"
 #include "session/core_host.hpp"
 #include <game/menu_driver.hpp>
+#include <game/level_intents.hpp>
+#include <session/intent.hpp>
 #include <game/script_state.hpp>
 #include <fstream>
 #include <physics/tick_record.hpp>
@@ -576,6 +578,11 @@ private:
 	void core_host_end_local(const std::string& reason, bool level_gone = false);   // level_gone: after the level's teardown
 	bool core_host_running() const;   // a core session is between its SessionStart and its end
 	bool core_host_session_running() const;   // ... and anchored, the core running it (the legacy phase 'running')
+	// Step INT: the intents' host half (session/core_host.cpp): a reset BMMO asked for noted in the running core,
+	// the automation exitlevel's exit, and the exit_level intent recorded before the core ends.
+	void core_host_note_reset_request(bmmo::session::intent_source source, uint32_t arg);
+	void core_host_note_automation_exit();
+	void core_host_record_exit();
 	bmmo::session::pacer_slew* core_host_pacer();   // R5: the tick driver's slew while a core session runs, else nullptr
 	std::string core_host_status_text();
 	std::string core_host_overlay_text();
@@ -1112,7 +1119,7 @@ private:
 
 #ifdef DEBUG
 		if (input_manager->IsKeyPressed(CKKEY_5)) {
-			restart_current_level();
+			restart_current_level(bmmo::session::intent_source::debug_key);
 		}
 
 		if (input_manager->IsKeyPressed(CKKEY_6)) {
@@ -1308,7 +1315,13 @@ private:
 		db_.set_client_id(bmmo::net::kInvalidConnection + ((rand() << 16) | rand())); // invalid id indicates server
 	}
 
-	void restart_current_level() {
+	// The level reset BMMO's triggers ask for (the countdown's Go, a RestartRequest, the automation verb restart,
+	// the debug key, the session's own restart at its start): the pause menu's front (ESC), then after 3 frames
+	// "Reset Level" (game/level_intents.hpp) and the menu's restart output.  Step INT: in a running core session
+	// the request is noted with its source first; the frame that delivers the message records the intent.
+	void restart_current_level(bmmo::session::intent_source source = bmmo::session::intent_source::unknown,
+	                           uint32_t arg = bmmo::session::INTENT_NONE) {
+		core_host_note_reset_request(source, arg);
 		/*m_bml->OnBallNavInactive();
 		m_bml->OnPreResetLevel();
 		CK3dEntity* curBall = static_cast<CK3dEntity*>(m_bml->GetArrayByName("CurrentLevel")->GetElementObject(0, 1));
@@ -1343,11 +1356,7 @@ private:
 		esc->Activate();
 
 		m_bml->AddTimer(CKDWORD{3}, [this] {
-			CKMessageManager* mm = m_bml->GetMessageManager();
-
-			CKMessageType reset_level_msg = mm->AddMessageType("Reset Level");
-			mm->SendMessageSingle(reset_level_msg, static_cast<CKBeObject*>(m_bml->GetCKContext()->GetObjectByNameAndParentClass("Level", CKCID_BEOBJECT, nullptr)));
-			mm->SendMessageSingle(reset_level_msg, static_cast<CKBeObject*>(m_bml->GetCKContext()->GetObjectByNameAndParentClass("All_Balls", CKCID_BEOBJECT, nullptr)));
+			bmmo::game::send_reset_level(m_bml->GetCKContext());
 
 			auto* beh = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(restart_level_));
 			auto* output = beh->GetOutput(0);

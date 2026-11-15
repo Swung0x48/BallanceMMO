@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare session journals record by record (step JNL).
 
-    journal_compare.py A B [--mode run|replay|legacy] [--checkpoint-sets] [--quiet]
+    journal_compare.py A B [--mode run|replay|legacy] [--checkpoint-sets] [--ignore-kind NAME ...] [--quiet]
 
 A and B are two journals, or two directories whose journals (*.bmjs, *.bmjc,
 *.bmjr, at any depth) are paired by their path under each.  The records are
@@ -17,6 +17,10 @@ changing every compressed byte after it:
           records skipped - a clock site's value must replay exactly.
   legacy  a journal against one written before step JNL: the SCHEMA, STAT
           and CLOCK records skipped as well, so the rest is proven unchanged.
+
+--ignore-kind NAME (repeatable; step INT) leaves a typed kind out - its SCHEMA entry and its STAT / CLOCK records -
+so a build that adds kinds is proven to have moved nothing else against a reference recorded before them (default:
+the environment's JOURNAL_IGNORE_KINDS, comma-separated, which the other comparers read too).
 
 --checkpoint-sets compares a CHECKPOINT's bodies as a set (a retail capture
 replay numbers the game's objects in another order) and leaves out a TICK's
@@ -50,6 +54,8 @@ def main(argv=None):
     parser.add_argument("--mode", choices=jt.COMPARE_MODES, default="run")
     parser.add_argument("--checkpoint-sets", action="store_true", help="a checkpoint's bodies as a set (retail replays)")
     parser.add_argument("--quiet", action="store_true", help="print the differing pairs and the total only")
+    parser.add_argument("--ignore-kind", action="append", default=None, metavar="NAME",
+                        help="leave this typed kind out (repeatable; step INT)")
     args = parser.parse_args(argv)
     if os.path.isdir(args.a):
         pairs = [(pathlib.Path(args.a) / rel, pathlib.Path(args.b) / rel, str(rel)) for rel in journals(args.a)]
@@ -62,7 +68,7 @@ def main(argv=None):
         if not b.exists():
             problems.append("%s: missing in %s" % (label, args.b))
             continue
-        why = jt.compare(a, b, args.mode, args.checkpoint_sets)
+        why = jt.compare(a, b, args.mode, args.checkpoint_sets, args.ignore_kind)
         if why is None:
             equal += 1
             if not args.quiet:

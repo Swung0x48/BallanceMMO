@@ -16,6 +16,7 @@
 // include order in message_all.hpp), so pull in the aggregate
 #include <message/message_all.hpp>
 #include <message/message_utils.hpp>
+#include <session/intent.hpp>
 #include <session/lifecycle.hpp>
 #include <session/event_piggyback.hpp>
 
@@ -188,7 +189,7 @@ TEST(SessionStartMsg, MechanismSlots) {
 // option WORLD_SESSION_CLOCK (bit 3) round-trips with the others.
 TEST(SessionStartMsg, SessionClockBitRoundTrips) {
     EXPECT_EQ(1u << 3, bmmo::session::WORLD_SESSION_CLOCK);
-    EXPECT_EQ(40u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
+    EXPECT_EQ(41u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
     bmmo::session_start_msg msg{};
     msg.mode = bmmo::room::mode::Physics;
     msg.world_options = bmmo::session::WORLD_SESSION_CLOCK | bmmo::session::WORLD_PLACEMENT_CLONES;
@@ -2384,6 +2385,34 @@ TEST(SessionTelemetryMsg, RoundTripAndSchema) {
     bmmo::session_telemetry_msg cut{};
     cut.raw.str(full.substr(0, full.size() - 1));
     EXPECT_FALSE(cut.deserialize());
+}
+
+// Step INT (protocol 41): a player intent round-trips; another schema or a
+// cut message is refused; the names cover every kind and source.
+TEST(SessionIntentMsg, RoundTripAndSchema) {
+    bmmo::session_intent_msg msg{};
+    msg.session = 4; msg.tick = 1001; msg.request = 1000; msg.arg = bmmo::session::INTENT_NONE; msg.life = 2;
+    msg.kind = static_cast<uint8_t>(bmmo::session::intent_kind::reset_level);
+    msg.source = static_cast<uint8_t>(bmmo::session::intent_source::test_flag);
+    const auto back = round_trip(msg);
+    EXPECT_EQ(back.session, 4u); EXPECT_EQ(back.tick, 1001u); EXPECT_EQ(back.request, 1000u);
+    EXPECT_EQ(back.arg, bmmo::session::INTENT_NONE); EXPECT_EQ(back.life, 2); EXPECT_EQ(back.kind, msg.kind);
+    EXPECT_EQ(back.source, msg.source);
+    bmmo::session_intent_msg once{};
+    once.serialize();
+    const std::string full = once.raw.str();
+    std::string bytes = full;
+    bytes[sizeof(bmmo::opcode)] = static_cast<char>(bmmo::session_intent_msg::kSchema + 1);
+    bmmo::session_intent_msg other{};
+    other.raw.str(bytes);
+    EXPECT_FALSE(other.deserialize());
+    bmmo::session_intent_msg cut{};
+    cut.raw.str(full.substr(0, full.size() - 1));
+    EXPECT_FALSE(cut.deserialize());
+    EXPECT_STREQ("reset_level", bmmo::session::intent_kind_name(bmmo::session::intent_kind::reset_level));
+    EXPECT_STREQ("game_over", bmmo::session::intent_kind_name(bmmo::session::intent_kind::game_over));
+    EXPECT_STREQ("debug_key", bmmo::session::intent_source_name(bmmo::session::intent_source::debug_key));
+    EXPECT_STREQ("?", bmmo::session::intent_source_name(bmmo::session::intent_source::count));
 }
 
 TEST(BallStateMuteMsg, RoundTripCapAndFilter) {

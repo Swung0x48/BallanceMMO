@@ -5,6 +5,8 @@ the analyses read the journal.
     session_facts.py JOURNAL [JOURNAL ...]            what each journal records
     session_facts.py JOURNAL --lines client|server    the lines a log reader read, from the journal
     session_facts.py JOURNAL [...] --gate             the gate's counters (status, rewinds, resyncs)
+    session_facts.py JOURNAL [...] --intents          the player intents (step INT: a client's intent records,
+                                                      a server's member_intent and room_intent records)
 
 A journal written from step JNL on carries a SCHEMA and typed records
 (journal_stats.hpp): STAT for logical kinds, CLOCK for clock and link kinds.
@@ -245,6 +247,48 @@ def server_lines(facts):
 
 
 # --------------------------------------------------------------------------
+# The intents (step INT)
+
+INTENT_FIELDS = ('tick', 'request', 'life', 'kind', 'source', 'arg')
+
+
+def intents(facts):
+    """The player intents a journal records, in file order: a client's `intent` records and a server's
+    `member_intent` records as {'player' (None for a client's own), 'tick', 'request', 'life', 'kind', 'source',
+    'arg'}, and a server's `room_intent` records as {'what', 'player', 'other', 'detail'}.  ([], []) when the
+    kinds are not in the SCHEMA (a journal before step INT)."""
+    own, room = [], []
+    for item in facts.items:
+        if item[0] != 'stat':
+            continue
+        r = item[1]
+        v = r['values']
+        if r['name'] == 'intent':
+            own.append(dict({k: v[k] for k in INTENT_FIELDS}, player=None))
+        elif r['name'] == 'member_intent':
+            own.append(dict({k: v[k] for k in INTENT_FIELDS}, player=v['player']))
+        elif r['name'] == 'room_intent':
+            room.append(dict(v, at=r['tick']))
+    return own, room
+
+
+def intent_lines(facts):
+    """intents() as text lines (session_facts.py --intents)."""
+    own, room = intents(facts)
+    lines = []
+    for i in own:
+        lines.append('%sintent %s (%s) at tick %d request %d life %d arg %d' % (
+            '' if i['player'] is None else 'p%d ' % i['player'], i['kind'], i['source'], i['tick'], i['request'],
+            i['life'], i['arg']))
+    for r in room:
+        lines.append('room %s player %d other %d%s (runner tick %d)' % (r['what'], r['player'], r['other'],
+                                                                         ' ' + r['detail'] if r['detail'] else '', r['at']))
+    if not facts.recorded('intent') and not facts.recorded('member_intent'):
+        lines.append('intents: not recorded (a journal before step INT)')
+    return lines
+
+
+# --------------------------------------------------------------------------
 # The gate's counters
 
 def gate(facts):
@@ -267,6 +311,7 @@ def main(argv=None):
     parser.add_argument('journals', nargs='+')
     parser.add_argument('--lines', choices=('client', 'server'))
     parser.add_argument('--gate', action='store_true')
+    parser.add_argument('--intents', action='store_true')
     args = parser.parse_args(argv)
     for path in args.journals:
         facts = Facts(path)
@@ -275,6 +320,9 @@ def main(argv=None):
                 print(line)
         elif args.gate:
             print(' '.join('%s=%s' % kv for kv in gate(facts).items()))
+        elif args.intents:
+            for line in intent_lines(facts):
+                print('%s: %s' % (os.path.basename(path), line))
         else:
             kinds = sorted(k['name'] for k in (facts.schema or {}).values())
             counts = {}

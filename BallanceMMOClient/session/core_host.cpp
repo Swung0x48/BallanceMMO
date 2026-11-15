@@ -65,6 +65,7 @@
 #include <game/force_block_alias.hpp>
 #include <game/host_backend.hpp>
 #include <game/hull_template.hpp>
+#include <game/level_intents.hpp>
 #include <game/mirror_clones.hpp>
 #include <game/proximity_union.hpp>
 #include <game/sector_activation.hpp>
@@ -616,6 +617,13 @@ namespace {
         // The pause menu's mute in force (the replica's polling follows it;
         // design 2.2 observe_input / unforce_own).
         bool input_muted = false;
+        // Step INT: what opened the pause in force (decided where the mute
+        // turns on: BMMO's own restart front, the ESC key, or unknown), the
+        // frame's reset delivery and Menu_Dead (the shared watch), and the
+        // automation verb exitlevel's exit until OnPreExitLevel takes it.
+        bs::intent_source pause_source = bs::intent_source::unknown;
+        bmmo::game::level_intent_watch level_intents;
+        bool exit_by_automation = false;
         // The mirrors this host made: entity -> player, player -> ball type
         // (the spirit ball shown, objects_.on_trafo's "from").
         std::map<std::string, uint32_t> mirror_player;
@@ -1330,6 +1338,8 @@ namespace {
         host.revive_navigations.clear();
         host.own_group_set = false;
         host.input_muted = false;
+        host.pause_source = bs::intent_source::unknown;
+        host.exit_by_automation = false;
         host.mirror_player.clear();
         host.mirror_contract.clear();   // step BMX
         ghost_pins.clear();   // step BALL
@@ -2309,6 +2319,26 @@ bool BallanceMMOClient::core_host_session_running() const {
     return core_session_running();
 }
 
+// Step INT: a level reset BMMO asked for (restart_current_level's callers),
+// noted in the running core; the frame that delivers it records it.
+void BallanceMMOClient::core_host_note_reset_request(bmmo::session::intent_source source, uint32_t arg) {
+    if (core_session_running()) host.core->note_reset_request(source, arg);
+}
+
+// Step INT: the automation verb exitlevel's exit, for the exit_level intent's source.
+void BallanceMMOClient::core_host_note_automation_exit() {
+    if (core_session_running()) host.exit_by_automation = true;
+}
+
+// Step INT: the exit_level intent, recorded and sent before the core ends
+// and the room Leave goes (once: OnPreExitLevel, else OnPostExitLevel's
+// fallback).  The core names a menu source from its own state.
+void BallanceMMOClient::core_host_record_exit() {
+    if (!core_session_running()) return;
+    host.core->request_level_exit(host.exit_by_automation ? bs::intent_source::automation : bs::intent_source::unknown);
+    host.exit_by_automation = false;
+}
+
 // The tick driver's slew (step R5): the core's while a core session runs,
 // none otherwise - the legacy path's pacing is exactly what it was.
 bmmo::session::pacer_slew* BallanceMMOClient::core_host_pacer() {
@@ -2764,6 +2794,7 @@ void BallanceMMOClient::core_host_pre_exit_level() {
     }
     const uint32_t session = host.session, room = host.room;
     const uint32_t tick = host.core ? host.core->current_tick() : 0;
+    core_host_record_exit();
     core_host_end_local("left the level");
     if (!room) {
         logger_->Warn("Physics session %u: left the level at tick %u; no room known, no leave sent", session, tick);
@@ -4398,6 +4429,12 @@ void BallanceMMOClient::core_host_frame() {
                                                       host.own_replica.key_blocks, host.own_replica.key_count, error))
                 logger_->Warn("Physics session: own polling: %s", error.c_str());
             host.input_muted = muted;
+            // Step INT: the pause_enter intent's source (the core records the
+            // edge on T + 1's frame, which observes this mute).
+            if (muted)
+                host.pause_source = core.reset_request_pending() ? bs::intent_source::restart_front
+                                  : input_manager_ && input_manager_->oIsKeyDown(CKKEY_ESCAPE) ? bs::intent_source::esc_key
+                                                                                           : bs::intent_source::unknown;
         }
     }
     core_host_drain();
@@ -5014,6 +5051,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
             }
         }
         seen.paused = muted;
+        seen.pause_source = host.pause_source;   // step INT
         if (!muted && seen.nav_active != ball_nav_active_) ++host.nav_source_differs;
         if (muted != (m_bml->IsIngame() && m_bml->IsPaused())) ++host.mute_source_differs;
         return seen;
@@ -5045,12 +5083,18 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         for (CK_ID id: bmmo::game::script_replay::resets_pending(m_bml->GetCKContext(), host.script_ids))
             host.script_reset_ticks[id] = tick;
     };
+    // Step INT: the live frame's reset delivery and Menu_Dead (the shared
+    // watch the headless client reads too).
+    p.poll_level_intents = [this](uint32_t) {
+        const auto seen = host.level_intents.poll(m_bml->GetCKContext());
+        return bs::level_intents_poll{seen.reset, seen.menu_dead};
+    };
     // N1-N3 kept neutralized, and N4's split kept (design 1.3 step 4; the
     // clock guard and the pause edits stay host code at the top of the frame).
-    p.script_guards = [this](uint32_t, bool resolved) {
+    p.script_guards = [this](uint32_t, bool sector_up) {
         // N1 and N2 kept (FULL step LGM: the shared helpers the headless
         // client's guard keeps them with, in the core host's own state).
-        core_reset_apply(m_bml->GetCKContext(), logger_, resolved);
+        core_reset_apply(m_bml->GetCKContext(), logger_, sector_up);
         if (const int again = bmmo::game::repin_checkpoint_deactivation(m_bml->GetCKContext(), core_deactivate_pins))
             logger_->Info("Physics session: the chains' sector deactivation: %d input(s) handed back were re-pinned to 0",
                           again);

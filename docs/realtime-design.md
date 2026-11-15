@@ -4524,3 +4524,161 @@ per kind-1 controller, `live_owner` per same-named candidate; unmeasured) and th
 fix: the live Level 13 run with a forced resync (`f3x_rs1`, s19's resync_at150 arm) parts from the server from tick
 2 078 when the balls enter the airship zone, with or without the owner match - s19 / s20 end just after 2 078, and
 `journal_judge.py`'s `trim()` leaves airship-zone ball rows out, so neither the arms nor the judge cover it.
+
+
+## Built (player intents in the journal, step INT, 2026-11-15)
+
+**Why.** The user, 2026-11-14: record the player's intents, not the menu keys or clicks behind them - when a
+restart was asked, not how - and a re-drive recipe replays each intent at its tick through the game's own entry
+point, so the chain after it is covered (`recipes-drive-real-logic`). A recipe for a public session has to come
+from the server journal alone (no session had every member's client journal), so every intent a re-drive needs
+reaches the server with the session tick it applies at. The S0 spike (`.local-tools/work/INT` and the scratchpad's
+`int0`; runs `maps/arena-test/int0*`) measured that the game's own reset chain runs headless tick for tick as in
+retail, survives live rewinds across it, and needs the Init Ingame guard engaged (below); the vanilla ESC pause and
+Exit Level cannot run in a headless session.
+
+**The intents** (`session/intent.hpp`): kinds `reset_level`, `exit_level`, `pause_enter`, `pause_leave`,
+`game_over`; sources `unknown`, `pause_menu`, `dead_menu`, `finish_menu`, `restart_request`, `countdown`,
+`automation`, `test_flag`, `recipe`, `esc_key`, `restart_front`, `debug_key` (both tables static_asserted against
+`count`; new ids go at the end). The ticks are live session ticks, the INPUT frames' numbering:
+- `reset_level`: D, the tick whose frame delivered "Reset Level" to `Level` (headless `--reset-level-at T`: D =
+  T + 1, measured); `request` is the last live tick a BMMO trigger asked at (-1 for a menu).
+- `game_over`: the tick whose frame left the root script Menu_Dead active (a rising edge; an already open one when
+  the watch first looks after the anchor is no edge).
+- pause edges: the frame whose observed pause changed - the live observation, read before a forced tick plays the
+  server's frame (a FRESH frame's INPUT PAUSED edge; the server repeats flags on substituted ticks). The first
+  frame after the anchor only primes the state. A `pause_leave` takes its `pause_enter`'s source.
+- `exit_level`: the core's tick at the request, a label: the exit takes effect at the server's removal of the
+  member, which the server's PLAYER record holds and the re-drive already uses (`journal_recipe.py` leave ticks).
+
+Nothing is recorded before the assignment (the assignment renumbers the ticks; the log says so) and no replayed
+tick records one (post_step is live only; the replay calls `CKBehavior::Execute` itself).
+
+**Detection, shared** (`game/level_intents.hpp`, CK only): `send_reset_level` / `send_exit_level` (the message to
+`Level` and `All_Balls`, as Menu_Pause sends it) and `level_intent_watch`, one per host: after a live frame,
+whether that frame's messages to `Level` include "Reset Level" (`GetLastFrameMessage`, the CK API the headless
+Level_Finish watch reads) and whether Menu_Dead is active. It keeps the two objects' ids and checks each by name on
+every poll, finding it again when the check fails (a level load recycles ids). The watch sees every source: the
+pause menu's Yes, Menu_Dead's restart, BMMO's own sends, an automation `message`. The core
+(`client_core_intents.cpp`) turns the poll into records in post_step after the record (`poll_level_intents`,
+outside the rollback branch): a game over first, then a reset whose source is, in order, the noted BMMO request
+(`note_reset_request`, dropped with a log line if no frame delivers it within 5 s), `dead_menu` after a game over,
+`pause_menu` when the frame before D was paused, else `unknown`. `request_level_exit(source)` records the exit
+(once per anchor; `unknown` lets the core name `dead_menu` after a game over, `finish_menu` after its own Finish
+went out, `pause_menu` when the last frame was paused). Per-core state, no globals.
+
+**The wire: SessionIntent, protocol 41** (`message/session_intent_msg.hpp`, appended opcode): client to server,
+reliable, schema byte then session, tick, request, arg, life, kind, source (the session added to the design's
+16 bytes, as SessionTelemetry carries it, so a message from an earlier session is told apart). Journaled before it
+is sent, on the core's send path (a K7 capture holds it as an O record), never relayed, acknowledged or applied.
+The server (`handle_session_intent`) journals it as `member_intent` when the sender is a member of the session it
+names and the kind and source are below `count`; anything else is dropped and counted (verbose line). The intent
+goes before the room Leave on the one reliable connection (no lanes), so the server reads it first. The flags byte
+could not carry a source and a one-tick bit would be lost or doubled on substituted ticks, hence a message.
+`BMMO_PHYSICS_API_VERSION` is unchanged (nothing in physics_RT moved).
+
+**The journals** (`journal_stats.hpp`, appended): client `intent {tick, request, life, kind, source, arg}`
+(logical, its STAT tick the intent's); server `member_intent {player, life, kind, source, tick, request, arg}` and
+`room_intent {player, what, other, detail}` (raw: written where the message is handled, at the tick the runner
+simulates next; the `tick` field is the member's). A session's player ids are its members' connections, so `arg` and
+`player` / `other` are the connection when it is a member of that session, -1 when not (or none), -2 for the server
+console. `room_intent` rows: `level_restarted` (the legacy LevelRestarted, written before `log_level_restarts`
+decides the log line), `restart_request` (one helper for the handler and the console's `restartlevel`, written in the
+victim's session; the console path takes `state_mutex_`, which guards `client_session_`, and `journal_clock` posts to
+the runner when off its thread), `restart_request_failed` (player the victim, other the requester), `vote` /
+`unvote` / `restart` (detail "votes/needed" after the change; `restart` before the Start that ends the old
+session's journal), `countdown` (a Go with `restart_level` after the config override, in every running session,
+detail `restart_level=1 force_restart=B`). No log line changed; the new ones are verbose.
+Readers: `session_facts.py --intents` (and `intents()`), `pubtest_report.py` (intents by kind / source, room
+requests by what), `journal_compare.py --ignore-kind NAME` (and `JOURNAL_IGNORE_KINDS` for every comparer through
+`journal_trace.compare`: the SCHEMA entry and the records left out).
+
+**Retail** (`BallanceMMOClient.h` `restart_current_level(source, arg)`): in a running core session the request is
+noted first (`core_host_note_reset_request`), then the old body runs unchanged - the ESC front, 3 frames later
+`game::send_reset_level` and Menu_Pause's restart output. Callers pass their source: the countdown's Go
+(`countdown`, the sender), RestartRequest (`restart_request`, the requester), the automation verb `restart`
+(`automation`), debug key 5 (`debug_key`); the session's own restart at its start (`core_host_go`) runs before the
+core runs and notes nothing. `OnPreResetLevel` is unchanged. The pause source is decided where the mute turns on:
+`restart_front` while a noted reset is pending, `esc_key` when `oIsKeyDown(ESC)`, else `unknown`.
+`core_host_pre_exit_level` records the exit before `core_host_end_local` (`automation` after the `exitlevel` verb,
+which now uses `send_exit_level`), `OnPostExitLevel`'s fallback too (nothing if OnPreExitLevel recorded it; the
+reload's exit records nothing). Not shared, on purpose: retail's restart front (the ESC activation, Menu_Pause's
+output) - headless has no session pause modules, and a vanilla ESC forks the world one tick later (int0p1).
+
+**Headless** (`session_client.cpp`): `--reset-level-at T|b+N` notes the request (`test_flag`) and sends through
+`game::send_reset_level` (the inline copy is gone); new `--exit-level-at T`: the exit intent, the core ended, the
+room Leave, then `send_exit_level` on the vanilla level; the run exits once the server has taken the client out, as
+after `--leave-room-at`. RestartRequest and Countdown stay unhandled headless.
+
+**The fix: the level-reset guard without snapshot names.** The deferred Init Ingame site (N1b, "the sector reset in
+activate Scripts ... is neutralized") engaged only once the client had resolved a snapshot's mechanism names, so a
+reset in every `--ignore-snapshots` run (the fast LBM's default) took the forking path: int0l11r's rope and sacks off
+by 1.4-1.5 cm from tick 650 (3 996 rows), int0rx's P_Modul_01_Pusher from 1644 (754 rows). `script_guards` now gets
+`sector_up = resolved() > 0 || own_born_`; `own_born_` is set by `commit_own_birth` (any own birth: the spawn flag is
+a spawn-area test, not "first") and cleared only by the begin's reset (a resync keeps it). Measured on the level
+start (intq2 client 3): the start's manager run at tick 29 ("Gameplay_SectorManager is told to reset at tick 29"),
+the own spawn at 232, "activate Scripts ... is neutralized" at 233. Residual: a reset before the session's first own
+birth on a client without names takes the old path (listed).
+
+**The quick check** (intq2, this build, 4 bots on the arena A0, IGN, coordinated, the bots' whole drive
+`--drive-stop 4200` as int0rx, client 3 `--reset-level-at 1000 --force-rollback-at 1061:65`): `journal_judge.py`
+PASS, every client's bodies exact - client 3 0 of 34 190 body rows differ (int0rx on HEAD: 754 of 34 292; 34 190 is
+int0rxs's SNAP count) - own events 9/9; client 3's one `intent` {tick 1001, request 1000, life 1, reset_level,
+test_flag, arg -1}, the server's `member_intent` field for field the same, clients 0-2 none; the forced rewind
+anchor 996 -> live 1061 (base before D, 60 past it: the send, Event_handler's reset Level at 1038 and the Init
+Ingame site inside it); own Unphysicalize at D+35, the respawn at D+244 (the guarded SNAP path's timing).
+intq1 (the same with STOP 1750 and client 2 `--exit-level-at 1500`): PASS, 4 of 4 exact; client 2's exit_level at
+1500 in the server journal before its leave record; client 2 exit code 0, no crash.
+
+**The gate legs** (local): `.local-tools/work/INT/int_leg.sh LABEL OUT` (the full gate's lane P after the owner
+leg) runs intr (the quick check's shape), intg (client 3 plays `dmA.bmrc`: its last life lost, ENTER on Menu_Dead's
+Restart), intx (`--exit-level-at 1500`), l11r (Level 11, IGN, client 1 resets at 600, a checkpoint every 2 ticks) and
+l11s (its SNAP twin), each judged by `int_judge.py` (FINAL rows bit-exact against the server, the intent records field
+for field the server's member_intent, no other intent record; the L11 thresholds read on the spike's int0l11r /
+int0l11rs journals: the server's Sack x range after the respawn 14.8 m, the SNAP twin's 15/15 and 2 632 LOCAL Sack
+rows); the full gate also fails when an LBM arm's journal holds any intent record, or an L6, dense or owner journal one
+other than `game_over` (`int_judge.py zero`: their recipes carry no menu actions, so a ball that loses its last life
+opens Menu_Dead, a true game over). An extra point taken before a rewind across the reset (PH column 4, the design's
+problem 6) is no arm: the extra point is no physics body, so the rows cannot show its pickup, and the data review found
+no manager pass re-issued inside the window (996..1061) - not exercised. The leg's key record path is absolute in the
+Windows form (a client runs in its case directory; the MSYS form `/d/...` does not open: the first gate's intg failed
+so). The retail leg `.local-tools/work/INT/int_retail.py LABEL [HEADLESS_L11_RUN]` (two copies, not K = 20, not in
+`gate_retail.sh`; the restart verb, then ESC DOWN ENTER LEFT ENTER) is written, not part of the gate.
+
+**Review fixes** (the code review's three defects): the server console's `countdown-forced` journals its Go's
+`room_intent countdown` (`journal_console_countdown`, under `state_mutex_`, player -2); a recorded reset clears
+`finished_seen_` beside `game_over_seen_` (a later exit after a reset from the finish screen is no `finish_menu`);
+the automation `exitlevel` verb checks both Level and All_Balls before it flags the exit and sends
+(`game::level_objects_present`). `intents_recorded_` and the unused `level_exit_recorded()` are gone.
+
+**References.** core_ref_s21 (`maps/arena-test/core_ref_s21/README.md`): s20's twelve arms re-recorded with S18/record.py's
+recipe (strict replay 12/12 arms, wire check ALL SAME 57 sends + 58 journals, PLAYER-DATA: NONE; its l6_pubtest holds 11
+`member_intent` game_over records, ticks 1750-3414) - the default of `wire_check.sh` (s18 rules for `core_ref_s21*`) and
+`fast_gate.sh`. The fast LBM on-only reference is `intg1` (rows `.local-tools/work/JN2/rows_intg1_values.txt`, byte-equal
+to f3xg1's), the L6 equality reference `pf_intg1_1` (`full_gate.sh`'s defaults).
+
+**Gate.** `full_gate.sh intg1` with `JOURNAL_IGNORE_KINDS=intent,member_intent,room_intent` against the F3X references
+(the proof that nothing but the intents moved): x64, x86, Arch, 863/863, the owner check 40/40; s21 strict replay and wire
+check ALL SAME; fast LBM 19/19 FINAL exact, rows equal to f3xg1's, 89/89 journals equal; L6 re-drive 13 clients mism 0,
+judge 13/13, 14/14 journals equal to pf_dwbr1_1's, 72 749 rewinds; dense L6 13/13; owner leg 8/8; no intent in the 89 LBM
+journals, only game_over (44) in the 37 L6 / dense / owner journals; 0 ties; retail L12 + L11 at K = 20 bit-equal - all
+PASS but the intent leg's intg (the key record path above); the leg alone then PASS 5/5 (intg1j: intg's client 3
+`game_over` at 2155 and `reset_level` / `dead_menu` at 2360, the server's member_intent the same, 4/4 bodies exact).
+`full_gate.sh intg2` against intg1 / pf_intg1_1, nothing ignored: FULL-GATE PASS, 1 412 s: x64, x86, Arch, 863/863, the owner check 40/40; s21 strict replay and wire check ALL SAME; fast LBM 19/19 FINAL exact, rows equal to intg1's, 89/89 journals equal; L6 re-drive mism 0 x 13, judge 13/13, 14/14 journals equal to pf_intg1_1's, 72 749 rewinds; dense L6 13/13; owner leg 8/8; the intent leg 5/5 (intr, intg, intx, l11r, l11s); no intent in the LBM journals, only game_over (44) in the L6 / dense / owner ones; 0 ties; retail L12 + L11 at K = 20 bit-equal; the tree unchanged during the gate.
+
+**For recipe v4** (the next step): `member_intent` holds every intent with the tick it applies at, its source,
+life and request; leaves stay the PLAYER records; `note_reset_request(recipe)` + `game::send_reset_level` after live
+tick `tick - 1` re-journals the reset at the same D. v4 must also honour an injected PAUSED in the core (as
+`nav_active`), add a flags column to BMRF, reproduce each player's lead, check that a game over re-arises at its
+tick and drive Menu_Dead's own restart for a `dead_menu` reset.
+
+**Not done / not exercised:** the retail leg (written, not run), the extra point taken before a rewind across a
+reset (PH column 4), the CK watch under the 2002 CK2.dll in retail (an undelivered pending request's drop line is the
+failure signature), the request-to-send gap in retail (expected 3-4 ticks), Next Level / the finish screen's exit (BML's
+OnPreNextLevel is not overridden; whether Next Level passes OnPreExitLevel is unverified: finish L1 in retail, choose
+Next Level, look for "left the level at tick"), the four guard paths beyond the headless level start (retail, a late
+join, a resync, the anchor restart), headless RestartRequest / Countdown, a `room_intent` record in any run (votes,
+countdown, console, the -1 / -2 player mapping), a reset before the first own birth without names, a join's blob across
+a reset, SimTool `--replay-session` re-issuing intents, the session pause modules ported, the K7 mouse gap, the K7
+captures' re-record (owed since protocol 40), the twins LBM (TWINS=1; its reference jn2t predates format 4 and the
+intent kinds).

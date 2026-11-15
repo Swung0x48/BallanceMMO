@@ -760,16 +760,11 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         // countdown reload does (core_host.cpp) - back to the main menu; a
         // 'level N' through the menus loads a level again.
         if (!m_bml->IsIngame()) return "error not ingame";
-        CKContext* context = m_bml->GetCKContext();
-        auto* level_object = static_cast<CKBeObject*>(context->GetObjectByNameAndParentClass(
-            const_cast<CKSTRING>("Level"), CKCID_BEOBJECT, nullptr));
-        auto* all_balls = static_cast<CKBeObject*>(context->GetObjectByNameAndParentClass(
-            const_cast<CKSTRING>("All_Balls"), CKCID_BEOBJECT, nullptr));
-        if (!level_object || !all_balls) return "error no Level / All_Balls object";
-        auto* messages = m_bml->GetMessageManager();
-        const CKMessageType exit_level = messages->AddMessageType(const_cast<CKSTRING>("Exit Level"));
-        messages->SendMessageSingle(exit_level, level_object);
-        messages->SendMessageSingle(exit_level, all_balls);
+        // Step INT: the shared send (game/level_intents.hpp); a running
+        // session's exit intent says automation.
+        if (!bmmo::game::level_objects_present(m_bml->GetCKContext())) return "error no Level / All_Balls object";
+        core_host_note_automation_exit();
+        bmmo::game::send_exit_level(m_bml->GetCKContext());
         return "ok Exit Level sent to Level and All_Balls";
     }
     if (verb == "restart") {
@@ -779,7 +774,7 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         // ball joints under the body guard (design 9.28), so a regression test
         // needs to reach it without spending the run's lives.
         if (!m_bml->IsIngame()) return "error not ingame";
-        restart_current_level();
+        restart_current_level(bmmo::session::intent_source::automation);
         return "ok level reset requested";
     }
     if (verb == "sector") {

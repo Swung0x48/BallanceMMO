@@ -614,6 +614,12 @@ namespace bmmo::session {
         s.remote_last_physicalize_.clear();
         s.remote_last_unphysicalize_.clear();
         s.own_physicalized_ = false;
+        s.own_born_ = false;   // step INT
+        s.pending_reset_ = {};
+        s.last_paused_ = s.pause_primed_ = false;
+        s.pause_source_ = intent_source::unknown;
+        s.menu_dead_ = s.menu_dead_primed_ = false;
+        s.game_over_seen_ = s.finished_seen_ = s.level_exit_recorded_ = false;
         s.own_body_entity_.clear();
         s.own_ball_entities_.clear();
         s.mirror_entities_.clear();
@@ -1689,6 +1695,7 @@ namespace bmmo::session {
         event.state = 0;
         event.serialize();
         ++s.events_sent_;
+        if (event.type == bmmo::session::event_type::Finish) s.finished_seen_ = true;   // step INT: a later exit's source
         // Own events go on the wire with player 0; the box names the
         // player the server will fill in.
         journal_.lifecycle_event(s.own_id_, event);

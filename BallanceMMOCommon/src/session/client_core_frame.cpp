@@ -704,8 +704,10 @@ namespace bmmo::session {
         // echoes (step ODM).
         process_own_echoes();
         // The sector resets stay neutralized (the level-reset one once the
-        // sector is up: this client has resolved a mechanism of its own).
-        platform_.script_guards(frame_tick, s.mechanism_tracking_.resolved() > 0);
+        // sector is up: this client has resolved a mechanism of its own, or
+        // - step INT, without snapshot names - its own ball was born since
+        // the anchor, which the level start's Init Ingame site precedes).
+        platform_.script_guards(frame_tick, s.mechanism_tracking_.resolved() > 0 || s.own_born_);
         // Step A3: a resync state waiting for its bodies (resync design
         // 2.6.4 step 2), tried again now that the drain made what was due -
         // before this frame's own rewinds, which then run on the re-stepped
@@ -1054,6 +1056,20 @@ namespace bmmo::session {
         // journaled SUBSTITUTED and sent as such - the server drops it as
         // stale, and the record holds what the server applied, so its
         // notice, when it comes, changes nothing.
+        // Step INT: the pause edges, on the live observation (a forced tick
+        // plays the server's frame below; an injected one keeps the live
+        // pause).  The first frame after the anchor only primes the state.
+        const bool paused_before = s.last_paused_;
+        if (!s.pause_primed_) {
+            s.pause_primed_ = true;
+            s.last_paused_ = seen.paused;
+            s.pause_source_ = seen.pause_source;
+        } else if (seen.paused != s.last_paused_) {
+            s.last_paused_ = seen.paused;
+            if (seen.paused) s.pause_source_ = seen.pause_source;   // a leave takes its enter's
+            record_intent(seen.paused ? intent_kind::pause_enter : intent_kind::pause_leave, s.pause_source_, tick,
+                          INTENT_NONE, INTENT_NONE);
+        }
         const bool forced = frame_.forced;
         if (forced) play_forced_own(tick, frame_.forced_frame, input);
         if (config.trace && (input.keys != s.last_keys_ || nav_active != s.last_nav_active_))
@@ -1128,6 +1144,9 @@ namespace bmmo::session {
             }
             if (platform_.hooks.after_record) platform_.hooks.after_record(tick);
         }
+        // Step INT: a reset this frame delivered, a game over it showed -
+        // live only (a replayed tick never comes here).
+        poll_level_intents(tick, paused_before);
         // A notice that named this tick before it was simulated: the
         // record just made holds what we played, the server applied
         // something else (late-player design 1.3).

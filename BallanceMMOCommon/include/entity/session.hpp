@@ -306,7 +306,13 @@ namespace bmmo::session {
     //      first resync, so it is refused at the handshake instead.  The
     //      journal format is unchanged (the RESYNC blob is opaque; the reader
     //      takes formats 2 to 4).
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 40;
+    //  41  SessionIntent (session_intent_msg.hpp, step INT): a member sends
+    //      each player intent it journals (a level reset with its source,
+    //      the level left, the pause menu opened and closed, the last life
+    //      lost) with the session tick it applies at; the server journals it
+    //      (member_intent) and no world reads it.  A 40 server would log each
+    //      as an invalid opcode, so the handshake refuses it.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 41;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
     // The protocol whose SessionStart carries `mechanism_slots` (step Q7).

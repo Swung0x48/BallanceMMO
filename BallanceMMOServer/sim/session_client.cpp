@@ -41,6 +41,7 @@
 #include <game/array_reads.hpp>
 #include <game/checkpoint_phase.hpp>
 #include <game/force_block_alias.hpp>
+#include <game/level_intents.hpp>
 #include <game/tutorial_exit.hpp>
 #include <game/sector_activation.hpp>
 #include <game/sector_deactivate_pin.hpp>
@@ -585,6 +586,13 @@ namespace {
         // seconds before it removes it), the server removes the player at
         // its next tick.
         uint32_t leave_room_at = 0;
+        // --exit-level-at TICK (step INT; a test switch): the level left at
+        // TICK as retail's OnPreExitLevel leaves it - the exit_level intent
+        // recorded and sent (source test_flag), the core ended, the room
+        // Leave, then "Exit Level" sent to the vanilla level; the run loop
+        // exits once the server has taken this client out, as after
+        // --leave-room-at.
+        uint32_t exit_level_at = 0;
         // --placement-signature HEX (step S5, sector placement design 7.4
         // "mismatch"; a test switch): the host declares the placement
         // capability and reports HEX as its anchor's placement signature.
@@ -663,6 +671,8 @@ namespace {
                   "       [--rejoin-at TICK[:MS]]   (leave the room at TICK and join it again on the same connection, once;\n"
                   "                                  MS: the Join MS milliseconds after the Leave)\n"
                   "       [--leave-room-at TICK]   (leave the room at TICK, end the session and exit once out of the room)\n"
+                  "       [--exit-level-at TICK]   (test: leave the level at TICK as retail does - the exit intent, the\n"
+                  "         session ended, the room Leave, then Exit Level)\n"
                   "       [--sector-at SECTOR:TICK]...   (enter SECTOR at TICK, an own Sector input; repeatable; --beam is too)\n"
                   "       [--placement-signature HEX]   (test: report HEX as the anchor's placement signature instead of the world's)");
     }
@@ -985,6 +995,7 @@ namespace {
                 else out.later_rejoins.emplace_back(at, delay);
             }
             else if (arg == "--leave-room-at") { if (!(v = next())) return false; out.leave_room_at = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
+            else if (arg == "--exit-level-at") { if (!(v = next())) return false; out.exit_level_at = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
             else if (arg == "--leave-after-unphys") { if (!(v = next())) return false; out.leave_after_unphys = std::atoll(v); }
             else if (arg == "--leave-after-trafo") { if (!(v = next())) return false; out.leave_after_trafo = std::atoll(v); }
             else if (arg == "--beam2") {
@@ -2300,8 +2311,8 @@ namespace {
             // there.  pre_step: the sector resets kept neutralized, the
             // forced rollback after the rewinds, the mirrors driven, a
             // forced own tick, the own Physicalize capture armed.
-            p.script_guards = [this](uint32_t, bool resolved) {
-                for (const auto& chain: reset_guard_.apply(engine_->context(), resolved))
+            p.script_guards = [this](uint32_t, bool sector_up) {
+                for (const auto& chain: reset_guard_.apply(engine_->context(), sector_up))
                     logf("the sector reset in %s (Execute Script -> Gameplay_SectorManager) is neutralized", chain.c_str());
                 // N3 kept, as the retail mod keeps it (FULL step N3K,
                 // host-platform audit D3): a level reset that handed the
@@ -2444,6 +2455,13 @@ namespace {
             p.outside_forces = [this](std::vector<bmmo::physics::outside_controllers::force_reading>& out) {
                 bmmo::physics::outside_controllers::read_forces<bmmo::physics::physics_direct, bmmo_physics_force_block>(
                         bmmo::physics::physics_direct(engine_->physics()), outside_force_blocks_, out);
+            };
+            // Step INT: what the live frame did to the level (a reset
+            // delivered, Menu_Dead open), read after its tick as the
+            // Level_Finish watch reads All_Gameplay.
+            p.poll_level_intents = [this](uint32_t) {
+                const auto seen = level_intents_.poll(engine_->context());
+                return bmmo::session::level_intents_poll{seen.reset, seen.menu_dead};
             };
             p.note_script_resets = [this](uint32_t tick) {
                 for (CK_ID id: bmmo::game::script_replay::resets_pending(engine_->context(), scripts_)) {
@@ -4089,6 +4107,7 @@ namespace {
                     behind("--leave-at", args_.leave_at);
                     behind("--rejoin-at", args_.rejoin_at);
                     behind("--leave-room-at", args_.leave_room_at);
+                    behind("--exit-level-at", args_.exit_level_at);
                     if (args_.resync_at >= 0) behind("--resync-at", static_cast<uint64_t>(args_.resync_at));
                 }
                 if (args_.leave_after_unphys >= 0 && !leave_unphys_tick_ && args_.beam && now >= args_.beam_tick
@@ -4149,6 +4168,21 @@ namespace {
                          core_.own_physicalized() ? "physicalized" : "without a body");
                     core_.end("--leave-room-at: left the room");
                     room_request(bmmo::room::action::Leave, room_id_);
+                    return;
+                }
+                // --exit-level-at (step INT): retail's level exit - the
+                // intent, the core ended, the room Leave, then the level's
+                // own Exit Level on the vanilla level.
+                if (args_.exit_level_at && !room_left_ && now >= args_.exit_level_at && room_id_ != 0) {
+                    room_left_ = true;
+                    room_left_at_ = wall_now(bmmo::sim::wall_site::run_report);
+                    logf("--exit-level-at: leaving the level at tick %u (own ball %s)", now,
+                         core_.own_physicalized() ? "physicalized" : "without a body");
+                    core_.request_level_exit(bmmo::session::intent_source::test_flag);
+                    core_.end("--exit-level-at: left the level");
+                    room_request(bmmo::room::action::Leave, room_id_);
+                    logf("--exit-level-at: \"Exit Level\" sent to %d of 2 objects (Level, All_Balls) after the core ended",
+                         bmmo::game::send_exit_level(engine_->context()));
                     return;
                 }
             }
@@ -4547,20 +4581,11 @@ namespace {
             if (args_.reset_level_at >= 0 && !h1_reset_done_
                     && static_cast<int32_t>(now - due(args_.reset_level_at, args_.reset_level_rel)) >= 0) {
                 h1_reset_done_ = true;
-                CKMessageManager* messages = context ? context->GetMessageManager() : nullptr;
-                if (!messages) {
-                    logf("--reset-level-at: no message manager at tick %u", now);
-                } else {
-                    const CKMessageType reset = messages->AddMessageType(const_cast<CKSTRING>("Reset Level"));
-                    int sent = 0;
-                    for (const char* target: {"Level", "All_Balls"}) {
-                        auto* object = static_cast<CKBeObject*>(
-                            context->GetObjectByNameAndParentClass(const_cast<CKSTRING>(target), CKCID_BEOBJECT, nullptr));
-                        if (object && messages->SendMessageSingle(reset, object)) ++sent;
-                    }
-                    logf("--reset-level-at: \"Reset Level\" sent to %d of 2 objects (Level, All_Balls) after tick %u "
-                         "(tick base %u)", sent, now, h1_base_);
-                }
+                // Step INT: the intent noted (the frame that delivers it
+                // records it), then the game's own message (game/level_intents.hpp).
+                core_.note_reset_request(bmmo::session::intent_source::test_flag);
+                logf("--reset-level-at: \"Reset Level\" sent to %d of 2 objects (Level, All_Balls) after tick %u "
+                     "(tick base %u)", bmmo::game::send_reset_level(context), now, h1_base_);
             }
             if (args_.activate_script_at >= 0 && !h1_activate_done_
                     && static_cast<int32_t>(now - due(args_.activate_script_at, args_.activate_script_rel)) >= 0) {
@@ -5343,6 +5368,7 @@ namespace {
         std::vector<bmmo::game::written_column> written_columns_;   // step RK2: the script binding's written-cell columns
         bmmo::game::array_reads::cells_memo cells_memo_;            // step OPB: their memo (BMMO_CELLS_MEMO)
         bmmo::game::sector_reset_guard reset_guard_;         // the retail sector resets, neutralized (game/sector_reset_guard.hpp)
+        bmmo::game::level_intent_watch level_intents_;       // step INT: the frame's reset delivery and Menu_Dead (game/level_intents.hpp)
         std::vector<bmmo::game::deactivate_pin> deactivate_pins_;   // N2's pins (game/sector_deactivate_pin.hpp)
         bmmo::game::depth_test_rule depth_test_;             // FULL step PRX: Gameplay_Ingame/DepthTest as a rule (game/depth_test.hpp)
         bmmo::game::sector_cell_split chain_cell_split_;     // the chain's own [0][1] (game/sector_cell_split.hpp, step B2SX)
