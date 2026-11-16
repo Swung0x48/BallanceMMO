@@ -5197,3 +5197,45 @@ hold-release tail are equal by reading.
 
 **Not exercised:** the in-place mode (no caller), `retire_before` on a record with a blob or below a sparse record,
 `reanchor_base` (no caller), `fork_heal: true` in a config file, retail.
+
+## Built (the birth log keeps each name's latest birth, step BLR, 2026-11-16)
+
+**Why.** Public test 2's S4 (fork detection design 15.0, BL): five depth-test props born at 2602 and removed
+4343-7634 ticks later were missing from the forked client's rows for 2-12 ticks after a rewind across their removal,
+while nine stones removed within 4096 ticks of their birth were revived. A rewind revives a revivable body the
+window destroyed from the birth of its lifetime at the anchor (`revive_body`, `local_birth_log::lifetime_at`), and
+the birth log dropped every birth more than 4096 ticks older than the newest one added, so a body physicalized more
+than 62 s before the rewind had none and the replay ran without it until its removal tick. Harmless for a falling
+prop, not as a class: every revivable mechanism (the trafo pieces, a selected module's bodies) had the same limit.
+
+**Client** (`session_host_world.hpp`, `local_birth_log`). The last 4096 ticks stay whole; below that edge a birth is
+dropped only when a later birth of the same name, also below the edge, supersedes it, so `lifetime_at` answers every
+anchor in the last 4096 ticks as it would with nothing dropped, and the log holds at most one older birth per name.
+The pass walks the older ticks newest first, once each time the edge moves. Both client hosts; the server's world
+has no birth log. No wire, protocol, journal or engine change.
+
+**Evidence.** The BLR leg (`.local-tools/work/BLR/blr_leg.sh`: one client on the arena in sector 2, snapshots off,
+`P_Ball_Paper_MF` moved off the arena at 4300 with `--inject-fork`, sector 3 entered at 4310 so a birth comes more
+than 4096 ticks after the prop's, forced rewinds of depth 12 every 12 ticks): the prop is removed at 5127 and the
+rewind based at 5120 crosses it; before BLR (one run, on a build of ZRX with a working tree whose birth-log code is
+FD3a's) the restore logs "not made again ... no birth known" and the replay removes nothing, on this build it is
+made again and removed again at 5127 (every run; one pushed at 4452 instead is made again at the restore of 5264
+and removed again at 5279). The unit test of the event log's parse
+now checks the rule (an old sole birth kept, one superseded below the edge dropped, an old birth kept while its
+successor is inside the window). The s22 strict replay and wire check compare every reference unchanged.
+
+**Accepted.** Bodies older than 4096 ticks now answer `birth_tick_of` and `destroy_body`'s latest-birth fallback as
+younger ones always did (before: unknown); the s22 references show no change from it (their l6_pubtest arm runs to
+tick 33 218, the other eleven end before 4096). One more answer changes, untested: step RO1's guard
+(`remade_by_replay`, "no lifetime at the anchor") for a FIXED body born again inside a window whose earlier birth is
+more than 4096 ticks old. Before BLR that birth was gone, so the restore destroyed the body for the replayed scripts
+to make again; now it stays on the deferral, as one born again within 4096 ticks always did (`lifetime_at` reads
+births, not deaths). No session path is known to make a fixed body twice: a session's sector resets (the death's and
+a level reset's `activate Scripts`) are neutralized and both chains' sector deactivation is pinned to 0, so a fixed
+module body is made once, at its sector's first activation; no s22 arm activates a sector twice. The exact guard
+would ask whether the body is alive at the anchor, a change outside BLR.
+
+**Not exercised:** the trafo pieces or a module body past 4096 ticks, a fixed body born again more than 4096 ticks
+after its first birth (RO1's guard, above), the prop's replayed rows between the anchor and its removal (the leg
+judges the removal and revive lines only), retail, the LBM and L6 legs (the full gate);
+the fd2g1 LBM and L6 client logs have no "no birth known" line, so their revives did not meet the old limit.

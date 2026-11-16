@@ -1015,7 +1015,8 @@ TEST(RollbackBinding, SessionWorldComposesTheCoresHooksInTheDesignsOrder) {
 
 // The event log's entries in order, the malformed ones skipped, and a
 // recipe line parsed into a birth (design 2.4 parse_event_log /
-// parse_recipe_event); the birth log keeps 4096 ticks.
+// parse_recipe_event); the birth log keeps 4096 ticks whole and each name's
+// latest birth before them.
 TEST(RollbackBinding, EventLogAndRecipeParse) {
     std::vector<std::string> seen;
     bmmo::session::parse_event_log("t=1 created P_Box;bad;t=2 deleted P_Box;t=3 recipe P_Box|m=2;t=4",
@@ -1036,9 +1037,23 @@ TEST(RollbackBinding, EventLogAndRecipeParse) {
     EXPECT_FLOAT_EQ(birth.local_matrix[14], 9.0f);
     bmmo::session::local_birth_log log;
     log.add(10, std::move(birth));
+    log.add(20, birth_of("P_Gate", 1.0f));
+    log.add(30, birth_of("P_Gate", 2.0f));
+    log.add(40, birth_of("P_Plank", 1.0f));
+    log.add(4200, birth_of("P_Plank", 2.0f));
     log.add(5000, birth_of("P_Late", 0.0f));
-    EXPECT_EQ(log.find("P_Box", 0), nullptr) << "more than 4096 ticks behind: dropped";
     ASSERT_NE(log.find("P_Late", 5000), nullptr);
+    // Step BLR: more than 4096 ticks behind, each name's latest birth is
+    // kept (a rewind anchored in the last 4096 ticks revives from it) and
+    // only a birth a later one before the edge supersedes is dropped.
+    ASSERT_NE(log.lifetime_at("P_Box", 4990), nullptr) << "a name's only birth, whatever its age";
+    EXPECT_FLOAT_EQ(log.lifetime_at("P_Box", 4990)->matrix[13], 5.0f);
+    EXPECT_EQ(log.find("P_Gate", 20), nullptr) << "superseded by 30, also behind the edge: dropped";
+    ASSERT_NE(log.lifetime_at("P_Gate", 4990), nullptr);
+    EXPECT_EQ(log.birth_tick_of("P_Gate"), 30u);
+    ASSERT_NE(log.lifetime_at("P_Plank", 4100), nullptr) << "the lifetime at 4100 is still the birth of 40";
+    EXPECT_FLOAT_EQ(log.lifetime_at("P_Plank", 4100)->matrix[12], 1.0f);
+    EXPECT_EQ(log.birth_tick_of("P_Plank"), 4200u);
 }
 
 // FULL step AUD3 (host-platform audit D4; the user's (b), decision 59): the

@@ -32,6 +32,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -302,13 +303,20 @@ namespace bmmo::session {
     };
 
     // Every body this world made, by the tick of the record that first
-    // carries it, the last 4096 ticks.
+    // carries it: the last 4096 ticks whole, and before them each name's
+    // latest birth whatever its age (step BLR, fork detection design 15.0:
+    // a rewind revives a body from the birth of its lifetime at the anchor,
+    // lifetime_at, and a prop the depth test removes a minute after its
+    // birth still needs it), so at most one older birth per name.
     class local_birth_log {
     public:
-        void clear() { by_tick_.clear(); }
+        void clear() {
+            by_tick_.clear();
+            trimmed_below_ = 0;
+        }
         void add(uint32_t tick, local_birth&& birth) {
             by_tick_[tick].push_back(std::move(birth));
-            while (!by_tick_.empty() && by_tick_.begin()->first + 4096 < tick) by_tick_.erase(by_tick_.begin());
+            if (tick > 4096 && tick - 4096 > trimmed_below_) trim_below(tick - 4096);
         }
         // The one insertion rule (FULL step AUD3, host-platform audit D4; the
         // user's (b), decision 59): as add, but a birth of a name the tick
@@ -386,7 +394,25 @@ namespace bmmo::session {
         }
 
     private:
+        // Below `edge`, each name's latest birth only: a name born again
+        // before the edge has no lifetime_at answer older than that birth
+        // for any anchor at or after it.  Walked newest first, once each
+        // time the edge moves.
+        void trim_below(uint32_t edge) {
+            trimmed_below_ = edge;
+            std::set<std::string> newer;
+            for (auto it = by_tick_.lower_bound(edge); it != by_tick_.begin();) {
+                --it;
+                auto& births = it->second;
+                births.erase(std::remove_if(births.begin(), births.end(),
+                                            [&](const local_birth& b) { return newer.count(b.name) != 0; }),
+                             births.end());
+                for (const auto& b: births) newer.insert(b.name);
+                if (births.empty()) it = by_tick_.erase(it);
+            }
+        }
         std::map<uint32_t, std::vector<local_birth>> by_tick_;
+        uint32_t trimmed_below_ = 0;
     };
 
     inline bool parse_recipe_event(const std::string& text, local_birth& out);
