@@ -843,6 +843,143 @@ def _self_test(out_dir):
     return 0 if all(ok for _, ok in checks) else 1
 
 
+# Fork detection step FD1 (session/world_check.hpp): --world-check lists every
+# world-check episode and blind stretch one journal holds, from its records
+# alone - a server journal's fork_* / world_agree, or a client journal's
+# fork_notice / world_report.  An episode with no close is listed as open at
+# the end.  A server journal also gives each member's coverage against the
+# server's own samples: the sample ticks from the member's first epoch to its
+# leave (or the journal's last tick), the last `tail` ticks left out (a
+# sample retires a round trip and the history after its step, so the last
+# one or two before an end never arrive), and how many of them were compared.
+# Client journals given with it explain the samples their member never sent
+# (held back while a resync was pending, or never retired): listed, not
+# counted.  rc 1 with --no-episodes when any episode is there, with
+# --no-would-heal when one was decided (an episode held unsettled and closed
+# - a lead, a pending own reason - is listed only), with --min-compared when
+# a member's coverage is below it (the gate's G1).
+SAMPLE_TICKS = 66
+
+
+def world_check_listing(paths, no_episodes=False, min_compared=None, tail=2 * SAMPLE_TICKS, no_would_heal=False):
+    found = 0
+    decided = 0
+    short = 0
+    journals = [(path, jt.read_journal(str(path), summary=True)) for path in paths]
+    # The client journals given with a server journal explain its gaps: a sample the client held back while a resync
+    # was pending (sent 0) or never retired (sent 2: a re-anchor dropped it) is no compare the server could make.
+    unsent = collections.defaultdict(set)
+    for _, journal in journals:
+        if journal.header['kind'] != jt.KIND_SERVER:
+            unsent[journal.header['own_player']].update(
+                s['values']['tick'] for s in journal.stats if s.get('name') == 'world_report' and s['values']['sent'] != 1)
+    for path, journal in journals:
+        stats = [s for s in journal.stats if s.get('name') in (
+            'world_agree', 'fork_open', 'fork_detail', 'fork_decision', 'fork_close', 'fork_blind', 'world_check_end',
+            'world_report', 'fork_notice')]
+        print('%s:' % pathlib.Path(path).name)
+        server = journal.header['kind'] == jt.KIND_SERVER
+        episodes = collections.OrderedDict()
+        if server:
+            results = collections.defaultdict(collections.Counter)
+            compared = collections.defaultdict(set)
+            first_epoch = {}
+            for s in stats:
+                v = s['values']
+                if s['name'] == 'world_agree':
+                    results[v['player']][v['result']] += 1
+                    first_epoch.setdefault(v['player'], v['epoch'])
+                    if v['result'] in ('equal', 'differs'):
+                        compared[v['player']].add(v['tick'])
+                elif s['name'] == 'fork_open':
+                    episodes[v['episode']] = {'player': v['player'], 'tick': v['tick'], 'kinds': v['kinds'],
+                                              'owners': v['owners'], 'buckets': v['buckets']}
+                elif s['name'] in ('fork_detail', 'fork_decision', 'fork_close') and v['episode'] in episodes:
+                    e = episodes[v['episode']]
+                    if s['name'] == 'fork_detail':
+                        e['detail'] = '%d differ, worst %s %.4g m, own %.4g m, near %.4g m%s%s' % (
+                            v['differing'], v['worst'] or '-', v['worst_m'], v['own_m'], v['near_m'],
+                            ', presence ' + v['presence'] if v['presence'] else '',
+                            ', same: ' + v['same'] if v['same'] else '')
+                    elif s['name'] == 'fork_decision':
+                        e['decided'] = e.get('decided') or v['tier'] != 'unsettled'
+                        e['decision'] = '%s/%s would heal %d%s%s' % (
+                            v['tier'], v['rule'], v['would_heal'], ' (gap +%d)' % v['gap_wait'] if v['gap_wait'] else '',
+                            ' FINAL' if v['final'] else '')
+                    else:
+                        e['close'] = '%s at %d (samples %d, forked %d ticks, own %d)' % (
+                            v['outcome'], v['first'] + v['forked_ticks'], v['samples'], v['forked_ticks'], v['own_ticks'])
+                elif s['name'] == 'fork_blind':
+                    print('  blind p%d %s from %d, %d ticks%s' % (v['player'], v['cause'], v['first'], v['ticks'],
+                                                                ' (ended)' if v['ended'] else ''))
+                elif s['name'] == 'world_check_end':
+                    print('  end: %s' % ' '.join('%s=%s' % kv for kv in v.items()))
+            # Each member's windows in the session: its PLAYER adds and removals.
+            last = journal.tick_range()[1] if journal.ticks else 0
+            windows = collections.defaultdict(list)
+            for group in journal.ticks:
+                for rec in group.players:
+                    w = windows[rec['id']]
+                    if rec['added']:
+                        w.append([rec['tick'], None])
+                    elif w and w[-1][1] is None:
+                        w[-1][1] = rec['tick']
+            for player in sorted(set(results) | set(windows)):
+                counts = results.get(player, collections.Counter())
+                total = sum(counts.values())
+                base = first_epoch.get(player)
+                expected = set()
+                for start, end in windows.get(player, []):
+                    start = max(start, base) if base is not None else start
+                    end = (last if end is None else end) - tail
+                    expected.update(t for t in range(-(-start // SAMPLE_TICKS) * SAMPLE_TICKS, end + 1, SAMPLE_TICKS))
+                held = expected & unsent.get(player, set()) - compared[player]
+                expected -= held
+                got = len(compared[player] & expected)
+                pct = 100.0 * got / len(expected) if expected else 100.0
+                low = min_compared is not None and base is not None and pct < min_compared
+                short += low
+                print('  p%d reports %d: %s; compared %d of %d samples from its first epoch %s to its end - %d ticks '
+                      '(%.1f%%)%s%s' % (player, total, ', '.join('%s %d' % kv for kv in sorted(counts.items())) or 'none',
+                                        got, len(expected), base if base is not None else '-', tail, pct,
+                                        '; %d more not sent around a resync (its journal: %s)' % (
+                                            len(held), ' '.join(map(str, sorted(held)))) if held else '',
+                                        ' BELOW %g%%' % min_compared if low else ''))
+            for eid, e in episodes.items():
+                print('  episode %d p%d tick %d (kinds %d, owners [%s], buckets %d): %s; %s; %s' % (
+                    eid, e['player'], e['tick'], e['kinds'], e['owners'], e['buckets'], e.get('detail', 'no detail'),
+                    e.get('decision', 'no decision'), e.get('close', 'OPEN at the end')))
+        else:
+            reports = [s['values'] for s in stats if s['name'] == 'world_report']
+            sent = collections.Counter(r['sent'] for r in reports)
+            print('  reports %d (%d sent, %d held back while a resync was pending, %d never retired), unconfirmed %d' % (
+                len(reports), sent[1], sent[0], sent[2], sum(1 for r in reports if r['verdict'] and r['sent'] != 2)))
+            for s in stats:
+                if s['name'] != 'fork_notice':
+                    continue
+                v = s['values']
+                e = episodes.setdefault(v['episode'], {'tick': v['tick']})
+                if v['action'] == 'opened':
+                    e['kinds'], e['owners'] = v['kinds'], v['owners']
+                elif v['action'] == 'decided':
+                    e['decided'] = True
+                    e['decision'] = '%s/%s would heal %d, %d differ, worst %s %.4g m, own %.4g m' % (
+                        v['tier'], v['rule'], v['tick2'], v['differing'], v['worst'] or '-', v['worst_m'], v['own_m'])
+                elif v['action'] == 'closed' and 'close' not in e:
+                    e['close'] = '%s at %d' % (v['outcome'], v['tick2'])
+            for eid, e in episodes.items():
+                print('  episode %d tick %d (kinds %s, owners [%s]): %s; %s' % (
+                    eid, e['tick'], e.get('kinds', '?'), e.get('owners', ''), e.get('decision', 'no decision'),
+                    e.get('close', 'OPEN at the end')))
+        print('  episodes %d' % len(episodes))
+        found += len(episodes)
+        decided += sum(1 for e in episodes.values() if e.get('decided'))
+    print('world check: %d episodes (%d decided, %d never left unsettled) over %d journals%s' % (
+        found, decided, found - decided, len(paths),
+        '' if min_compared is None else ', %d members below %g%% compared' % (short, min_compared)))
+    return 1 if (no_episodes and found) or (no_would_heal and decided) or short else 0
+
+
 def main():
     jt.use_utf8_output()
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
@@ -865,7 +1002,22 @@ def main():
                     help='without a server journal: compare the clients with their received snapshots (reported)')
     ap.add_argument('--replay-dir', default='', help="the SimTool's working directory, kept (default: a temp dir, removed)")
     ap.add_argument('--self-test', action='store_true', help="judge journal_trace's synthetic journals")
+    ap.add_argument('--world-check', action='store_true',
+                    help='list the world-check episodes and blind stretches of each journal given, from it alone')
+    ap.add_argument('--no-episodes', action='store_true', help='with --world-check: rc 1 when any episode is listed')
+    ap.add_argument('--no-would-heal', action='store_true',
+                    help='with --world-check: rc 1 when any episode was decided (a would-heal); one held unsettled - a lead, '
+                         'a pending own reason - and closed is listed, not counted')
+    ap.add_argument('--min-compared', type=float, default=None,
+                    help='with --world-check: rc 1 when a member of a server journal has fewer of its samples compared (%%)')
+    ap.add_argument('--tail', type=int, default=2 * SAMPLE_TICKS,
+                    help='with --world-check: the ticks before a member\'s end left out of its coverage (default 132)')
     args = ap.parse_args()
+    if args.world_check:
+        paths = ([args.server] if args.server else []) + (args.clients or [])
+        for directory in args.run_dir:
+            paths.extend(jt.journal_files(directory))
+        return world_check_listing(paths, args.no_episodes, args.min_compared, args.tail, args.no_would_heal)
     args.exclude = [p for p in (args.exclude if args.exclude is not None else DEFAULT_EXCLUDE) if p]
     if args.self_test:
         return self_test()

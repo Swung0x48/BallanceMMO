@@ -116,6 +116,7 @@ CHECKPOINT_RECEIVED = 4
 CHECKPOINT_RESYNC = 8   # version 4: the rows of a resync state
 CHECKPOINT_FINAL = 16    # client, diagnostic (headless --final-checkpoints, step D0): the final state, with LOCAL
 CHECKPOINT_UNCONFIRMED = 32   # with FINAL only: a remote ball was stepped with a frame not relayed for the tick
+CHECKPOINT_CHECK = 64    # fork detection (FD1): an episode's rows of its sample tick; a trailing u32 member follows
 RESYNC_OUTCOMES = {0: "applied", 1: "refused_scripts", 2: "timed_out"}
 
 EVENT_TYPES = {0: "Physicalize", 1: "Unphysicalize", 2: "Sector", 3: "Finish", 4: "BodyRevived", 5: "Trafo", 6: "AirshipRelease"}
@@ -438,6 +439,8 @@ class JournalWriter(object):
             _put_vec(buf, body["linear"], 3, _F32)
             _put_vec(buf, body["angular"], 3, _F32)
             buf += _U8.pack(body["flags"])
+        if record["flags"] & CHECKPOINT_CHECK:
+            buf += _U32.pack(record.get("member", 0))
         self._record(TAG_CHECKPOINT, bytes(buf))
 
     def note(self, record):
@@ -926,7 +929,10 @@ class JournalReader(object):
             bodies.append({"kind": cursor.u8(), "owner": cursor.u32(), "name": cursor.string(),
                            "position": cursor.f64v(3), "rotation": cursor.f64v(4),
                            "linear": cursor.f32v(3), "angular": cursor.f32v(3), "flags": cursor.u8()})
-        return {"tick": tick, "flags": flags, "bodies": bodies}
+        record = {"tick": tick, "flags": flags, "bodies": bodies}
+        if flags & CHECKPOINT_CHECK:
+            record["member"] = cursor.u32()
+        return record
 
     @staticmethod
     def _note(cursor):
@@ -1097,6 +1103,7 @@ COMPARE_MODES = ("run", "replay", "legacy")
 # adds kinds (intent, member_intent, room_intent) is proven to have moved nothing else against a reference recorded
 # before them.  journal_compare.py --ignore-kind NAME; every other comparer that goes through compare() (the gates'
 # arm_journals_id.py, journal_replay_compare.py) reads the environment's JOURNAL_IGNORE_KINDS (comma-separated).
+# Step FD1: the name CHECK leaves out the world check's checkpoint rows too (CHECKPOINT_CHECK).
 IGNORE_KINDS = frozenset(k for k in os.environ.get("JOURNAL_IGNORE_KINDS", "").split(",") if k)
 
 
@@ -1144,6 +1151,8 @@ def canonical(path, mode="run", checkpoint_sets=False, ignore_kinds=None):
             text = _RESYNC_NOTE_TIMES.sub(b"", payload[6:])
             if len(text) != len(payload) - 6:
                 payload = payload[:4] + _U16.pack(len(text)) + text
+        elif tag == TAG_CHECKPOINT and "CHECK" in ignore and len(payload) > 4 and payload[4] & CHECKPOINT_CHECK:
+            continue   # step FD1: JOURNAL_IGNORE_KINDS's CHECK leaves out the world check's episode rows
         elif tag == TAG_CHECKPOINT and checkpoint_sets:
             c = JournalReader._checkpoint(_Cursor(payload))
             payload = (c["tick"], c["flags"], tuple(sorted(repr(sorted(b.items())) for b in c["bodies"])))
@@ -1421,7 +1430,8 @@ def _fmt_tick(record):
 def _checkpoint_flags(flags):
     return _flag_names(flags, ((CHECKPOINT_FULL, "FULL"), (CHECKPOINT_LOCAL, "LOCAL"),
                                (CHECKPOINT_RECEIVED, "RECEIVED"), (CHECKPOINT_RESYNC, "RESYNC"),
-                               (CHECKPOINT_FINAL, "FINAL"), (CHECKPOINT_UNCONFIRMED, "UNCONFIRMED")))
+                               (CHECKPOINT_FINAL, "FINAL"), (CHECKPOINT_UNCONFIRMED, "UNCONFIRMED"),
+                               (CHECKPOINT_CHECK, "CHECK")))
 
 
 def _fmt_checkpoint(record):

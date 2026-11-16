@@ -895,6 +895,10 @@ namespace bmmo::session {
         // for the replays that re-run it (host-local).
         if (platform_.record_script_order) platform_.record_script_order(frame_tick);
         const uint32_t tick = current_tick();
+        // Step FD1: the airship zone's status at the step of a sample tick,
+        // before any drive, beam or correction moves a body (as a replay
+        // reads it, through after_replayed_step).
+        world_check_zone(tick);
 
         if (platform_.discover_navigation(tick)) {
             for (auto& [id, remote]: s.remotes_) {

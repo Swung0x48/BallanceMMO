@@ -1156,6 +1156,7 @@ namespace {
         case bmmo::SessionStartAt: return "SessionStartAt";
         case bmmo::SessionStartStatus: return "SessionStartStatus";
         case bmmo::SessionBootStatus: return "SessionBootStatus";
+        case bmmo::SessionWorldFork: return "SessionWorldFork";
         default: return "?";
         }
     }
@@ -1184,6 +1185,7 @@ namespace {
         case bmmo::SessionStartAt: { bmmo::session_start_at_msg m{}; return decode_bytes(bytes, m); }
         case bmmo::SessionStartStatus: { bmmo::session_start_status_msg m{}; return decode_bytes(bytes, m); }
         case bmmo::SessionBootStatus: { bmmo::session_boot_status_msg m{}; return decode_bytes(bytes, m); }
+        case bmmo::SessionWorldFork: { bmmo::session_world_fork_msg m{}; return decode_bytes(bytes, m); }
         default: return false;
         }
     }
@@ -2297,6 +2299,7 @@ bool BallanceMMOClient::core_host_offer(const bmmo::net::message* network_msg) {
     case bmmo::SessionMember:        // step M1 (protocol 18)
     case bmmo::SessionStartAt:       // FULL step SAXH (protocol 24)
     case bmmo::SessionStartStatus:
+    case bmmo::SessionWorldFork:     // step FD1 (protocol 42)
         if (!core_latched.load()) { core_stray.fetch_add(1); return true; }
         mailbox.push(static_cast<int>(raw->code), network_msg->data, static_cast<size_t>(network_msg->size),
                      network_msg->received);
@@ -4730,6 +4733,11 @@ void BallanceMMOClient::core_host_dispatch(int code, const std::string& bytes) {
     case bmmo::SessionLead: {
         bmmo::session_lead_msg msg{};
         if (decode(msg)) core.on_session_lead(msg);
+        break;
+    }
+    case bmmo::SessionWorldFork: {   // step FD1 (protocol 42)
+        bmmo::session_world_fork_msg msg{};
+        if (decode(msg)) core.on_session_world_fork(msg);
         break;
     }
     case bmmo::SessionResyncState: {

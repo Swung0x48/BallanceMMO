@@ -220,6 +220,9 @@ namespace bmmo::session {
         // again (insert_birth, recreate_body) and before pre_step: IVP's
         // collision filter reads the record when a ball enters the world.
         world_hooks_.before_replayed_births = [this](uint32_t tick) { forget_spawn_groups_replayed(tick); };
+        // Step FD1: a replayed sample tick's airship zone status, read where
+        // the live one is (right after the step, before any correction).
+        world_hooks_.after_replayed_step = [this](uint32_t tick) { world_check_zone(tick); };
         // Every decision the engine takes about a snapshot, straight into
         // the box: no log parsing needed to know what this client did.
         world_hooks_.on_correction = [this](const bmmo::session::rollback_correction& c) { journal_.rollback_correction(c); };
@@ -392,18 +395,22 @@ namespace bmmo::session {
         // ends in a resync whose re-anchor drops the records it covers; a
         // record leaving while such a notice may still come, or while that
         // resync is pending, is UNCONFIRMED too.
-        if (config.journal_final_checkpoints) {
+        // Step FD1 (fork detection): the observer runs whenever the rollback
+        // does - journal or not - since the world check reports the retired
+        // rows of every sample tick (world_check_sample) and folds every
+        // retired tick (world_check_fold); the FINAL rows keep their own two
+        // gates (the switch and final_due).  Records the session's end hands
+        // it (at_end: still being predicted) are never reported.
+        if (config.rollback) {
             s.rollback_.set_retire_observer(
                 [this, names = std::map<std::string, uint32_t>{}, unconfirmed_logs = 0u, sticky_logged = false](
                     uint32_t tick, const bmmo::session::rollback_tracked& tracked,
                     const std::map<std::string, bmmo_physics_body_state>& bodies,
-                    const std::map<std::string, bmmo::session::input_frame>& inputs) mutable {
-                    // No journal (retail's SessionJournal off): no rows, so
-                    // no verdict either - nothing else reads it.
-                    if (!journal_.journalling()) return;
+                    const std::map<std::string, bmmo::session::input_frame>& inputs, bool at_end) mutable {
+                    using bmmo::session::world_check::why;
                     for (const auto& [id, remote]: s.remotes_)
                         if (!remote.entity.empty()) names[remote.entity] = id;
-                    const char* why = nullptr;
+                    why verdict = why::none;
                     const std::string* why_entity = nullptr;
                     const bool inherited = s.final_unconfirmed_;
                     if (!inherited) sticky_logged = false;
@@ -417,15 +424,15 @@ namespace bmmo::session {
                         if (const auto it = names.find(entity); it != names.end()) player = it->second;
                         if (player == 0) player = mirror_player_of(entity);
                         const auto remote = s.remotes_.find(player);
-                        if (player == 0 || remote == s.remotes_.end()) why = "no player";
+                        if (player == 0 || remote == s.remotes_.end()) verdict = why::no_player;
                         else if (const auto relayed = remote->second.inputs.find(tick); relayed == remote->second.inputs.end())
-                            why = "not relayed";
-                        else if (!same_frame(relayed->second, frame)) why = "differs from the relayed frame";
-                        if (why) { why_entity = &entity; break; }
+                            verdict = why::not_relayed;
+                        else if (!same_frame(relayed->second, frame)) verdict = why::relayed_differs;
+                        if (verdict != why::none) { why_entity = &entity; break; }
                     }
-                    if (why) s.final_unconfirmed_ = true;
-                    if (!why && inherited) {
-                        why = "inherits an unconfirmed retired tick";
+                    if (verdict != why::none) s.final_unconfirmed_ = true;
+                    if (verdict == why::none && inherited) {
+                        verdict = why::inherited;
                         why_entity = &tracked.own_entity;
                     }
                     // The own ball: a substitution notice still missing that
@@ -435,16 +442,16 @@ namespace bmmo::session {
                     // later), or a resync asked for and not applied yet (its
                     // re-anchor drops the records it covers, but this one is
                     // leaving before).
-                    if (!why) {
-                        if (s.resync_pending_ || s.resync_in_flight_) why = "pending: a resync was asked for";
+                    if (verdict == why::none) {
+                        if (s.resync_pending_ || s.resync_in_flight_) verdict = why::resync_pending;
                         else
                             for (const auto& [watched, total]: s.held_gap_watch_)
                                 if (static_cast<int32_t>(watched - tick) >= 0
                                     && total > held_learned_upto(watched) + s.held_gap_credit_) {
-                                    why = "pending: own substitution notices outstanding";
+                                    verdict = why::own_notices;
                                     break;
                                 }
-                        if (why) why_entity = &tracked.own_entity;
+                        if (verdict != why::none) why_entity = &tracked.own_entity;
                     }
                     // A never-made birth (REJECTED, MISSING) stays pending
                     // from its own stamp while its re-report is out: the
@@ -455,14 +462,19 @@ namespace bmmo::session {
                         return (life.state == own_life::verdict::sent || life.rereported)
                                && static_cast<int32_t>(tick - life.origin) >= 0;
                     };
-                    if (!why && (std::any_of(s.own_life_.begin(), s.own_life_.end(), pending_life)
-                                 || std::any_of(s.own_rereports_.begin(), s.own_rereports_.end(), pending_life))) {
-                        why = "pending: own lifecycle echo outstanding";
+                    if (verdict == why::none && (std::any_of(s.own_life_.begin(), s.own_life_.end(), pending_life)
+                                                 || std::any_of(s.own_rereports_.begin(), s.own_rereports_.end(), pending_life))) {
+                        verdict = why::own_echo;
                         why_entity = &tracked.own_entity;
                     }
                     // The verdict above runs every tick (it is sticky); the
-                    // rows are built only for a tick the journal keeps.
-                    if (!journal_.final_due(tick)) return;
+                    // rows are built only for a tick the world check samples
+                    // or the journal keeps.
+                    if (config.world_check) world_check_fold(tick, bodies, tracked, names);
+                    const bool sample = config.world_check && !at_end && s.assigned_
+                                        && tick % bmmo::session::world_check::kSampleTicks == 0;
+                    const bool final_row = config.journal_final_checkpoints && journal_.final_due(tick);
+                    if (!sample && !final_row) return;
                     std::vector<bmmo::session::body_state> out;
                     out.reserve(bodies.size());
                     for (const auto& [entity, body]: bodies) {
@@ -488,11 +500,14 @@ namespace bmmo::session {
                             | (body.collision_enabled ? bmmo::session::BODY_FLAG_COLLISION_ENABLED : 0u));
                         out.push_back(std::move(state));
                     }
-                    if (journal_.final_checkpoint(tick, out, why == nullptr) && why
+                    if (sample) world_check_sample(tick, out, verdict);
+                    if (!final_row) return;
+                    if (journal_.final_checkpoint(tick, out, verdict == why::none) && verdict != why::none
                         && (s.final_unconfirmed_ ? !sticky_logged : unconfirmed_logs < 16)) {
                         if (s.final_unconfirmed_) sticky_logged = true;
                         ++unconfirmed_logs;
-                        logf("final checkpoint %u unconfirmed: %s's frame %s", tick, why_entity->c_str(), why);
+                        logf("final checkpoint %u unconfirmed: %s's frame %s", tick, why_entity->c_str(),
+                             bmmo::session::world_check::why_text(verdict));
                     }
                 });
         } else {
@@ -657,6 +672,7 @@ namespace bmmo::session {
         s.sector_stamps_.clear();
         s.sector_stamp_seq_ = 0;
         s.union_records_.clear();
+        s.world_check_ = client_core_state::world_check_client{};   // step FD1
         s.pass_log_.clear();
         s.sector_late_.clear();
         s.rederive_ = client_core_state::union_rederivation{};
@@ -903,6 +919,9 @@ namespace bmmo::session {
         // compares it with its own world's (late joiners too).  Without the
         // capability: 0, not compared.
         if (caps_.placement) ready.caps |= bmmo::session::CAP_PLACEMENT;
+        // Protocol 42 (fork detection step FD1): the world check's reports,
+        // with the resync state only (the session core with rollback on).
+        if (resync_state && config.world_check) ready.caps |= bmmo::session::CAP_WORLD_CHECK;
         ready.anchor_placement = placement;
         // Protocol 16 (world agreement 2.3, 5; step G3): the mechanism-class
         // probe signature of this world's rewire, always filled (0 when this
@@ -992,7 +1011,9 @@ namespace bmmo::session {
 
     void session_client_core::retire_final_checkpoints(const char* why) {
         const size_t retired = s.rollback_.retire_remaining();
-        if (retired != 0) logf("final checkpoints: the %zu records still held retired (%s)", retired, why);
+        if (retired != 0 && config.journal_final_checkpoints)
+            logf("final checkpoints: the %zu records still held retired (%s)", retired, why);
+        world_check_end();   // step FD1: an open episode closes `ended`; the counters
     }
 
     // SessionEnd: drop the mirrors and go idle; a later SessionStart of the
@@ -1364,6 +1385,13 @@ namespace bmmo::session {
             return;
         }
         s.last_assign_first_tick_ = msg.first_tick;
+        // Step FD1: a new numbering - the zone statuses and folds of the old
+        // one name other ticks.
+        s.world_check_.zones.clear();
+        s.world_check_.folds.clear();
+        s.world_check_.samples.clear();
+        s.world_check_.rewinds.clear();
+        s.world_check_.holding = false;
         // A newer base answers every resync asked for so far, and any
         // the limiter still owes: its full snapshot replaces the world.
         s.resync_in_flight_ = false;
@@ -1559,6 +1587,7 @@ namespace bmmo::session {
             w.stat(now, stat_kind::rewind, {anchor, now, static_cast<int>(cause), body});
             w.stat(now, stat_kind::rewind_base,
                    {now, restored ? *restored : restored_at, s.rollback_.stats().resim_ticks - resim_before});
+            world_check_rewind(anchor, now, cause, s.rollback_.stats().resim_ticks - resim_before, body);
         }
         if (s.rollback_.stats().frozen != frozen_before) request_resync("local physics clock frozen", true);
         // C3 (record-format-gaps design 2.3 step 6, step RK1): a refused

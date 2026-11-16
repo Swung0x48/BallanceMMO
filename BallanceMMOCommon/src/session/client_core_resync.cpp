@@ -788,6 +788,7 @@ namespace bmmo::session {
                 auto& w = journal_.writer();
                 w.stat(now, stat_kind::rewind, {anchor, now, static_cast<int>(rewind_cause::resync), std::string_view()});
                 w.stat(now, stat_kind::rewind_base, {now, anchor, s.rollback_.stats().resim_ticks - resim_before});
+                world_check_rewind(anchor, now, rewind_cause::resync, s.rollback_.stats().resim_ticks - resim_before, {});
             }
             // C3 (record-format-gaps design 2.3 step 6, step RK1): a refused
             // write of the physics globals dropped the history: not applied.

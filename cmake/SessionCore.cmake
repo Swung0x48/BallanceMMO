@@ -21,4 +21,5 @@ set(BMMO_SESSION_CORE_SRC
         "${BMMO_SESSION_CORE_DIR}/client_core_report.cpp"
         "${BMMO_SESSION_CORE_DIR}/client_core_resync.cpp"
         "${BMMO_SESSION_CORE_DIR}/client_core_trafo.cpp"
+        "${BMMO_SESSION_CORE_DIR}/client_core_world_check.cpp"
         "${BMMO_SESSION_CORE_DIR}/client_journal.cpp")

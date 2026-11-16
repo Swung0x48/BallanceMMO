@@ -1212,6 +1212,7 @@ public:
         callbacks.on_event_accepted = [this](const bmmo::sim::accepted_event& a) { on_event_accepted(a); };
         callbacks.on_player_added = [this](const bmmo::sim::member_change& c) { on_player_added(c); };
         callbacks.on_player_removed = [this](const bmmo::sim::member_change& c) { on_player_removed(c); };
+        callbacks.on_world_fork = [this](uint32_t session, const bmmo::sim::world_watch::notice& n) { on_world_fork(session, n); };
         callbacks.on_player_add_failed = [this](const bmmo::sim::member_change& c, const std::string& error) {
             on_player_add_failed(c, error);
         };
@@ -2447,6 +2448,53 @@ public:
                                 stat_int(m.inbound_p50), stat_int(m.inbound_p99), stat_int(m.inbound_max), stat_int(ping)});
     }
 
+    // Fork detection step FD1 (protocol 42): a member's report of its
+    // retired rows of a sample tick, compared by the runner (sim/world_watch)
+    // after its step of that tick.  One from a connection that is not a
+    // member of the session it names is dropped (counted).
+    void handle_session_world_report(bmmo::net::connection c, const bmmo::session_world_report_msg& m) {
+        auto cs = client_session_.find(c);
+        if (cs == client_session_.end() || cs->second != m.session || !runner_) {
+            ++dropped_world_reports_;
+            Printf(kVerbose, "Physics session %u: SessionWorldReport from %s (#%u) dropped (not a member; %llu dropped).",
+                   m.session, get_client_name(c), c, static_cast<unsigned long long>(dropped_world_reports_));
+            return;
+        }
+        runner_->world_report(m.session, bmmo::sim::world_report_in::from(c, m));
+    }
+
+    // Simulation thread (step FD1): a world-check line, printed at the
+    // default level (the user's exception to the quiet log: one per episode
+    // open and close, one per blind stretch, the session's counters), and a
+    // SessionWorldFork to the member it names while it is still a member.
+    void on_world_fork(uint32_t session, const bmmo::sim::world_watch::notice& n) {
+        std::lock_guard lk(state_mutex_);
+        if (!n.line.empty()) Printf("Physics session %u: world check: %s", session, n.line.c_str());
+        if (!n.send) return;
+        auto it = physics_sessions_.find(session);
+        if (it == physics_sessions_.end()) return;
+        const auto c = static_cast<bmmo::net::connection>(n.player);
+        if (std::find(it->second.members.begin(), it->second.members.end(), c) == it->second.members.end()) return;
+        bmmo::session_world_fork_msg msg;
+        msg.session = session;
+        msg.episode = n.episode;
+        msg.tick = n.tick;
+        msg.action = static_cast<uint8_t>(n.action);
+        msg.kinds = n.kinds;
+        msg.owners = n.owners;
+        msg.buckets = n.buckets;
+        msg.tier = static_cast<uint8_t>(n.tier);
+        msg.rule = static_cast<uint8_t>(n.rule);
+        msg.tick2 = n.tick2;
+        msg.outcome = static_cast<uint8_t>(n.outcome);
+        msg.differing = n.differing;
+        msg.worst_m = n.worst_m;
+        msg.own_m = n.own_m;
+        msg.worst = n.worst;
+        msg.serialize();
+        send(c, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
+    }
+
     // Step INT (protocol 41): a member's player intent, journaled as
     // received (member_intent) with its arg mapped to the session's player
     // id; nothing else - no world, relay or schedule reads it.  One from a
@@ -3184,6 +3232,9 @@ public:
             assigned = clamped;
         }
         if (!s.leads.count(c)) {
+            // Fork detection step FD1: the world check's member, whatever the
+            // lead flags (before its player_ready, on the same queue).
+            runner_->world_check_member(msg.session, c, msg.caps, client_it->second.name);
             auto& lead = s.leads[c];
             lead.caps = msg.caps;
             lead.assigned_lead = s.late.count(c) ? join_lead + join_clamp_delta : s.start_tick_base;
@@ -5427,6 +5478,13 @@ protected:
                 if (msg.deserialize()) handle_session_intent(networking_msg->conn, msg);
                 break;
             }
+            case bmmo::SessionWorldReport: {   // protocol 42, fork detection step FD1
+                bmmo::session_world_report_msg msg{};
+                msg.raw.write(static_cast<const char*>(networking_msg->data), networking_msg->size);
+                if (msg.deserialize()) handle_session_world_report(networking_msg->conn, msg);
+                else Printf(kVerbose, "Physics session: SessionWorldReport from #%u refused (malformed).", networking_msg->conn);
+                break;
+            }
 #endif
             case bmmo::RealWorldTimestamp:
             case bmmo::SoundData:
@@ -5589,6 +5647,7 @@ protected:
     std::unordered_map<uint32_t, uint32_t> room_session_;               // room -> session
     std::unordered_map<bmmo::net::connection, uint32_t> client_session_;  // member -> session
     uint64_t dropped_intents_ = 0;   // step INT: SessionIntents not journaled (not a member, unknown kind or source)
+    uint64_t dropped_world_reports_ = 0;   // step FD1: SessionWorldReports from a non-member
     uint32_t next_session_id_ = 1;
     // The runner's seed (runner_config::seed): every world's spawn impulse
     // and trafo seeds derive from it, so SessionStart carries this value.

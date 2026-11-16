@@ -56,6 +56,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <random>
@@ -142,6 +143,7 @@ namespace bmmo::session {
         BMMO_CORE_STEP(spawn_forgets_after_resync)
         BMMO_CORE_STEP(own_death_end)         // FULL step ODM
         BMMO_CORE_STEP(join_own_correction)   // FULL step ODM
+        BMMO_CORE_STEP(world_check_zone)      // step FD1
 #undef BMMO_CORE_STEP
         static bmmo::session::input_frame live_drive(const client_core_state::remote_ball& remote, uint32_t tick) {
             return session_client_core::live_drive(remote, tick);
@@ -1182,7 +1184,8 @@ namespace {
             EXPECT_EQ(ready.anchor_surfaces, 0x52u);
             EXPECT_EQ(ready.physics_sha256, "headless-64");
             EXPECT_EQ(ready.build_id, "build-x");
-            EXPECT_EQ(ready.caps, (slew ? bmmo::session::CAP_LEAD : 0u) | bmmo::session::CAP_RESYNC_STATE);
+            EXPECT_EQ(ready.caps, (slew ? bmmo::session::CAP_LEAD : 0u) | bmmo::session::CAP_RESYNC_STATE
+                                     | bmmo::session::CAP_WORLD_CHECK);
         }
     }
 
@@ -1915,7 +1918,8 @@ namespace {
         session_client_core core(fake.make_flow(true), session_capabilities{});
         run_to_tick_125(core, fake);
         ASSERT_FALSE(fake.sent.empty());
-        EXPECT_EQ(decode<bmmo::session_ready_msg>(fake.sent[0].first).caps, bmmo::session::CAP_RESYNC_STATE);
+        EXPECT_EQ(decode<bmmo::session_ready_msg>(fake.sent[0].first).caps,
+                  bmmo::session::CAP_RESYNC_STATE | bmmo::session::CAP_WORLD_CHECK);
         const size_t sent_before = fake.sent.size();
         const size_t from = fake.calls.size();
         core.on_session_lead(lead_message(1, 4, 121, 130, 120));
@@ -12425,5 +12429,147 @@ namespace {
             EXPECT_FALSE(core.force_own_move(4, 0)) << "no rollback";
             EXPECT_FALSE(state_of(core).force_own_move_.armed);
         }
+    }
+
+    // Fork detection step FD1 (the fork detection design, 14.7, test 3): a report at
+    // every retired sample tick with the journal closed; the zone status a
+    // replayed step reads (the core's after_replayed_step) is the live
+    // read's and keeps the latched ball out of the terms; an `opened` is
+    // answered at once with a DETAIL report of its tick and its rows are
+    // journaled as LOCAL | FINAL | CHECK; held back while a resync is
+    // pending, then sent with PENDING; never for a record the session's end
+    // retires.
+    TEST(SessionClientCore, WorldReport) {
+        using report = bmmo::session_world_report_msg;
+        namespace wc = bmmo::session::world_check;
+        journal_dir dir("world_report");
+        flow_fake fake;
+        fake.path = dir.path / "client.bmjr";
+        auto platform = fake.make_flow(true);
+        platform.airship_zone_contains = [](const std::string& entity) { return entity == "Ball_Wood_BMMO_4" ? 1 : 0; };
+        session_client_core core(std::move(platform), session_capabilities{});
+        bmmo::session::core_config config;
+        config.journal_final_checkpoints = false;
+        ASSERT_FALSE(core.begin(start_message(9, 3), config).refused);
+        auto& state = state_of(core);
+        state.own_id_ = 3;
+        state.assigned_ = true;
+        state.airship_active_ = true;
+        state.rollback_.thresholds().history_ticks = 1;
+        state.remotes_[4].entity = "Ball_Wood_BMMO_4";
+        bmmo::session::rollback_world world;
+        world.get_nav = [](const std::string&, bmmo_physics_nav_state&) { return false; };
+        world.get_body = [](const std::string& entity, bmmo_physics_body_state& out) {
+            out = make_body(entity.c_str(), true, static_cast<double>(entity.size()));
+            return true;
+        };
+        bmmo::session::rollback_tracked tracked;
+        tracked.own_entity = "Ball_Wood";
+        tracked.remote_entities = {"Ball_Wood_BMMO_4"};
+        tracked.mechanisms = {"P_Modul_18_MF002"};
+        const auto record = [&](uint32_t from, uint32_t to) {
+            for (uint32_t tick = from; tick <= to; ++tick) state.rollback_.record(world, tick, tracked, {});
+        };
+        const auto reports = [&fake]() {
+            std::vector<std::string> out;
+            for (const auto& sent: fake.sent) {
+                bmmo::opcode code{};
+                std::memcpy(&code, sent.first.data(), sizeof(code));
+                if (code == bmmo::SessionWorldReport) out.push_back(sent.first);
+            }
+            return out;
+        };
+
+        // The live read and a replayed step's write the same entry.
+        steps{core}.world_check_zone(132);
+        const auto live = state.world_check_.zones.at(132);
+        EXPECT_EQ(live, std::vector<uint32_t>{4});
+        ASSERT_TRUE(steps{core}.world_hooks().after_replayed_step);
+        steps{core}.world_hooks().after_replayed_step(132);
+        EXPECT_EQ(state.world_check_.zones.at(132), live);
+        steps{core}.world_hooks().after_replayed_step(198);
+        steps{core}.world_hooks().after_replayed_step(199);   // not a sample tick: nothing read
+        EXPECT_EQ(state.world_check_.zones.count(199), 0u);
+
+        record(131, 264);   // retires 131..263: the samples 132 and 198, journal closed
+        auto sent = reports();
+        ASSERT_EQ(sent.size(), 2u);
+        for (size_t i = 0; i < sent.size(); ++i) {
+            const auto r = decode<report>(sent[i]);
+            EXPECT_EQ(r.tick, i == 0 ? 132u : 198u);
+            EXPECT_EQ(r.session, 9u);
+            EXPECT_EQ(r.latched, std::vector<uint32_t>{4});
+            ASSERT_EQ(r.balls.size(), 1u) << "the latched ball's term left out";
+            EXPECT_EQ(r.balls[0].first, 3u);
+            EXPECT_EQ(r.rows, 2u);
+            EXPECT_EQ(r.flags, 0u);
+            EXPECT_TRUE(r.body_rows.empty());
+        }
+        EXPECT_TRUE(state.world_check_.zones.empty()) << "dropped at their retirement";
+
+        // `opened` for 198: the DETAIL answer at once, the rows journaled.
+        core.journal().open(bmmo::physics::world_hash{}, "build-x", "Me");
+        bmmo::session_world_fork_msg opened;
+        opened.session = 9;
+        opened.episode = 1;
+        opened.tick = 198;
+        opened.action = static_cast<uint8_t>(wc::fork_action::opened);
+        opened.kinds = wc::KIND_BUCKET;
+        opened.buckets = 0xFF;
+        core.on_session_world_fork(opened);
+        sent = reports();
+        ASSERT_EQ(sent.size(), 3u);
+        {
+            const auto r = decode<report>(sent[2]);
+            EXPECT_EQ(r.tick, 198u);
+            EXPECT_NE(r.flags & report::FLAG_DETAIL, 0);
+            EXPECT_EQ(r.episode, 1u);
+            EXPECT_EQ(r.body_rows.size(), 3u) << "both balls and the mechanism of the named buckets";
+            EXPECT_EQ(r.folds.size(), 132u);
+            EXPECT_EQ(r.fold_first, 263u - 131u);
+        }
+
+        // A resync pending: held back for 660 ticks, then sent with PENDING
+        // (and the episode's rows, undecided).
+        state.resync_pending_ = true;
+        record(265, 991);
+        sent = reports();
+        ASSERT_EQ(sent.size(), 5u) << "264 .. 858 held, 924 and 990 sent";
+        EXPECT_EQ(decode<report>(sent[4]).tick, 990u);
+        {
+            const auto r = decode<report>(sent[3]);
+            EXPECT_EQ(r.tick, 924u);
+            EXPECT_NE(r.flags & report::FLAG_PENDING, 0);
+            EXPECT_NE(r.flags & report::FLAG_UNCONFIRMED, 0);
+            EXPECT_EQ(r.why, static_cast<uint8_t>(wc::why::resync_pending));
+            EXPECT_EQ(r.body_rows.size(), 3u);
+        }
+        // The session's end retires 1056 (a sample, past the hold): not reported.
+        record(992, 1056);
+        EXPECT_EQ(state.rollback_.retire_remaining(), 1u);
+        EXPECT_EQ(reports().size(), 5u);
+        core.journal().close("done");
+
+        bmmo::session::journal journal;
+        std::string error;
+        ASSERT_TRUE(bmmo::session::read_journal(fake.path, journal, error)) << error;
+        size_t checks = 0, held = 0, sent_records = 0;
+        for (const auto& tick: journal.ticks) {
+            for (const auto& checkpoint: tick.checkpoints)
+                if (checkpoint.flags & bmmo::session::JOURNAL_CHECKPOINT_CHECK) {
+                    ++checks;
+                    EXPECT_EQ(checkpoint.tick, 198u);
+                    EXPECT_EQ(checkpoint.member, 3u);
+                    EXPECT_EQ(checkpoint.flags & (bmmo::session::JOURNAL_CHECKPOINT_LOCAL | bmmo::session::JOURNAL_CHECKPOINT_FINAL),
+                              bmmo::session::JOURNAL_CHECKPOINT_LOCAL | bmmo::session::JOURNAL_CHECKPOINT_FINAL);
+                    EXPECT_EQ(checkpoint.bodies.size(), 3u);
+                }
+            for (const auto& stat: tick.stats)
+                if (stat.kind == static_cast<uint16_t>(bmmo::session::stat_kind::world_report))
+                    ++(stat.values.at(9).i ? sent_records : held);
+        }
+        EXPECT_EQ(checks, 1u);
+        EXPECT_EQ(held, 10u);
+        EXPECT_EQ(sent_records, 2u);
     }
 }

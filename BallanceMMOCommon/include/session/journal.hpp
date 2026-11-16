@@ -142,7 +142,11 @@ namespace bmmo::session {
     //    the entries; written only when an entry's life is not 1).  Old
     //    readers stop before both.
     // 10: no layout change; FINAL rows in every client journal, and the
-    //    writer-named file extensions below (canned tests step 0b).
+    //    writer-named file extensions below (canned tests step 0b).  Since
+    //    fork detection step FD1 (protocol 42, still version 10) a
+    //    checkpoint with the CHECK flag carries a trailing u32 member
+    //    (JOURNAL_CHECKPOINT_CHECK); older readers stop before it and read
+    //    the row by its other flags.
     constexpr uint32_t kJournalVersion = 10;
     // The oldest version this reader still takes (see the format note above).
     constexpr uint32_t kJournalOldestReadable = 2;
@@ -190,6 +194,13 @@ namespace bmmo::session {
     // hold-last prediction or a hole's stand-in - or one that differs and
     // was never replayed), so the row is not the tick's confirmed state.
     constexpr uint8_t JOURNAL_CHECKPOINT_UNCONFIRMED = 32;
+    // Fork detection step FD1 (session/world_check.hpp): the rows of a world
+    // check episode's sample tick, written when the episode needs them (a
+    // client's at a SessionWorldFork `opened`, as LOCAL | FINAL | CHECK; in
+    // the server journal the member's as LOCAL | FINAL | CHECK and the
+    // server's own late rows of T as FULL | CHECK).  A checkpoint with CHECK
+    // carries a trailing u32 member: whose rows they are (0 the server's).
+    constexpr uint8_t JOURNAL_CHECKPOINT_CHECK = 64;
     // RESYNC `outcome`
     constexpr uint8_t JOURNAL_RESYNC_APPLIED = 0;          // applied as tick S and re-stepped
     constexpr uint8_t JOURNAL_RESYNC_REFUSED_SCRIPTS = 1;  // applied, the server's scripts refused (the client's own kept)
@@ -295,6 +306,7 @@ namespace bmmo::session {
         uint32_t tick = 0;
         uint8_t flags = 0;      // JOURNAL_CHECKPOINT_*
         std::vector<body_state> bodies;
+        uint32_t member = 0;    // with JOURNAL_CHECKPOINT_CHECK only: whose rows (trailing)
     };
 
     struct journal_note {
@@ -942,7 +954,7 @@ namespace bmmo::session {
             record(journal_tag::tick, payload);
         }
 
-        void checkpoint(uint32_t tick, uint8_t flags, const std::vector<body_state>& bodies) {
+        void checkpoint(uint32_t tick, uint8_t flags, const std::vector<body_state>& bodies, uint32_t member = 0) {
             if (!writable()) return;
             last_tick_ = tick;
             const size_t count = std::min(bodies.size(), kJournalMaxCheckpointBodies);
@@ -951,6 +963,7 @@ namespace bmmo::session {
             journal_detail::write_u8(payload, flags);
             journal_detail::write_u32(payload, static_cast<uint32_t>(count));
             for (size_t i = 0; i < count; ++i) journal_detail::write_body(payload, bodies[i]);
+            if (flags & JOURNAL_CHECKPOINT_CHECK) journal_detail::write_u32(payload, member);
             record(journal_tag::checkpoint, payload);
         }
 
@@ -1570,6 +1583,10 @@ namespace bmmo::session {
                     c.bodies.resize(count);
                     bool ok = true;
                     for (uint32_t i = 0; i < count && ok; ++i) ok = journal_detail::read_body(in, c.bodies[i]);
+                    if (ok && (c.flags & JOURNAL_CHECKPOINT_CHECK)) {
+                        c.member = in.u32();
+                        ok = in.ok;
+                    }
                     if (!ok) break;
                     auto& group = groups[c.tick];
                     group.tick = c.tick;

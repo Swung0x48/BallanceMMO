@@ -41,6 +41,7 @@
 
 #include "physics_world.hpp"
 #include "stall_policy.hpp"
+#include "world_watch.hpp"
 
 namespace bmmo::sim {
     struct runner_config {
@@ -289,6 +290,10 @@ namespace bmmo::sim {
         std::function<void(const member_change&)> on_player_added;
         std::function<void(const member_change&, const std::string& error)> on_player_add_failed;
         std::function<void(const member_change&)> on_player_removed;
+        // Fork detection step FD1, simulation thread: a SessionWorldFork to
+        // send (`send`, to `player`) and/or a world-check log line to print
+        // at the default level (sim/world_watch.hpp).
+        std::function<void(uint32_t session, const world_watch::notice&)> on_world_fork;
         // A tick failed or the world died; the server ends the session.
         std::function<void(uint32_t session, const std::string& reason)> on_failed;
         // Step K4b: the runner needs the handover mark (session_runner::mark)
@@ -421,6 +426,12 @@ namespace bmmo::sim {
         // peak), which E is sized with (design 2.3).  The server posts it
         // once a second, with lead_adjust on only.
         void set_player_rtt(uint32_t session, uint32_t player, uint32_t rtt_ms);
+        // Fork detection step FD1 (sim/world_watch.hpp): what the member's
+        // SessionReady declared (posted before its first player_ready, every
+        // deployment), and one of its SessionWorldReports.  Report only: no
+        // world, schedule or snapshot reads either.
+        void world_check_member(uint32_t session, uint32_t player, uint32_t caps, const std::string& name);
+        void world_report(uint32_t session, world_report_in report);
         // The player's client acknowledged SessionLead `id`, having applied
         // `applied` ticks of it.  An ack of anything but the outstanding
         // decision is ignored.
@@ -745,6 +756,9 @@ namespace bmmo::sim {
             // origin every TICK record's `ms` is measured from.
             bmmo::session::journal_writer journal;
             std::chrono::steady_clock::time_point journal_start{};
+            // Fork detection step FD1: the samples, the compares and each
+            // member's episode (its sink is bound in create_session).
+            world_watch watch;
         };
         // S4: every applied frame of `tick` that claims a ball the world
         // has none of, after the tick's events (step()).

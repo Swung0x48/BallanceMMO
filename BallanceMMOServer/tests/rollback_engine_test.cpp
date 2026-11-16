@@ -1323,7 +1323,7 @@ TEST(RollbackEngine, TheRetireObserverSeesEachRecordLeavingTheHistory) {
     std::map<uint32_t, double> retired_own_x;
     engine.set_retire_observer([&](uint32_t tick, const rollback_tracked& tracked,
                                    const std::map<std::string, bmmo_physics_body_state>& bodies,
-                                   const std::map<std::string, input_frame>&) {
+                                   const std::map<std::string, input_frame>&, bool) {
         retired.push_back(tick);
         EXPECT_EQ(tracked.own_entity, "Own");
         ASSERT_EQ(bodies.count("Own"), 1u);
@@ -1382,7 +1382,7 @@ TEST(RollbackEngine, ARetiredRecordCarriesTheReplayedStateAndFrames) {
     std::map<uint32_t, uint8_t> own_keys;
     engine.set_retire_observer([&](uint32_t tick, const rollback_tracked&,
                                    const std::map<std::string, bmmo_physics_body_state>& bodies,
-                                   const std::map<std::string, input_frame>& inputs) {
+                                   const std::map<std::string, input_frame>& inputs, bool) {
         retired.push_back(tick);
         own_linear[tick] = bodies.at("Own").linear[0];
         if (const auto it = inputs.find("Own"); it != inputs.end()) own_keys[tick] = it->second.keys;

@@ -209,6 +209,11 @@ namespace bmmo::session {
         // Whether the before_replayed_tick of `tick` made this mirror's
         // navigation again (step AR; rollback_world::navigation_remade).
         std::function<bool(const std::string& entity, uint32_t tick)> navigation_remade;
+        // Fork detection step FD1: after each replayed tick's step, the
+        // core's half of rollback_world::after_step (the airship zone's
+        // status at a sample tick, world_check.hpp).  bind_session_world
+        // runs the host's after_replayed_step first, then this.
+        std::function<void(uint32_t tick)> after_replayed_step;
         // The mechanism bodies the world has after a replayed step: the
         // list the live records track (rollback_world::replay_mechanisms).
         std::function<std::vector<std::string>()> replay_mechanisms;

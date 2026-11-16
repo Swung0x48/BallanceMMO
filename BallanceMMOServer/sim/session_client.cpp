@@ -250,6 +250,16 @@ namespace {
         // restored module scripts make the bodies, joints and forces again
         // (plan doc 10).  The A/B.
         bool park_births = false;
+        // Fork detection step FD1: --no-world-check declares no
+        // CAP_WORLD_CHECK and sends no SessionWorldReport (the F-leg's
+        // control); --inject-fork TICK ENTITY DX moves ENTITY (a level name,
+        // `own`, or p<id>: that player's mirror) DX metres along x right
+        // after the step of TICK, live and in every replay of it, so this
+        // world differs from the server's from TICK on (a test switch).
+        bool world_check = true;
+        int64_t inject_fork_tick = -1;
+        std::string inject_fork_entity;
+        double inject_fork_dx = 0.0;
         // --insert-births: put a parked window-born body where its Physicalize
         // made it before its birth tick's step (see the hook).  An A/B.
         bool insert_births = false;
@@ -635,6 +645,9 @@ namespace {
                   "                                            MS only)\n"
                   "       [--force-own-move N[:K]]   (test: the first own birth after the anchor moved N ticks late, K ticks after it)\n"
                   "       [--window-origin TICK]   (the window: lines' 60-tick grid starts at TICK)\n"
+                  "       [--no-world-check]   (no fork detection reports: CAP_WORLD_CHECK not declared)\n"
+                  "       [--inject-fork TICK ENTITY DX]   (test: ENTITY - a level name, own or p<id> - moved DX m along x\n"
+                  "                                        after the step of TICK, live and replayed)\n"
                   "       [--reach N]   (the rollback's reach pinned at N ticks, 48..120; default: per client, from the relay lag)\n"
                   "       [--rewind-cost R:P]   (the reach's cap from a fixed rewind cost: R ms of restore, P ms a tick; default measured)\n"
                   "       [--starved-resync-reports N]   (N starved input reports in a row ask for a resync; 0 = never; default 330)\n"
@@ -849,6 +862,16 @@ namespace {
                 out.dump_savestate_dir = v;
             }
             else if (arg == "--park-births") out.park_births = true;
+            else if (arg == "--no-world-check") out.world_check = false;
+            else if (arg == "--inject-fork") {
+                if (!(v = next())) return false;
+                out.inject_fork_tick = std::atoll(v);
+                if (!(v = next())) return false;
+                out.inject_fork_entity = v;
+                if (!(v = next())) return false;
+                out.inject_fork_dx = std::atof(v);
+                if (out.inject_fork_tick < 0 || out.inject_fork_entity.empty()) return false;
+            }
             else if (arg == "--insert-births") out.insert_births = true;
             else if (arg == "--compare-scripts") {
                 if (!(v = next())) return false;
@@ -1766,6 +1789,12 @@ namespace {
                 core_.on_session_lead(msg);
                 break;
             }
+            case bmmo::SessionWorldFork: {   // protocol 42, step FD1
+                bmmo::session_world_fork_msg msg;
+                if (!fill(msg)) return;
+                core_.on_session_world_fork(msg);
+                break;
+            }
             case bmmo::SessionStartAt: {   // protocol 24, FULL step SAXH
                 bmmo::session_start_at_msg msg;
                 if (!fill(msg)) return;
@@ -2593,6 +2622,7 @@ namespace {
             else if (!args_.dump_savestate_dir.empty() || !args_.compare_scripts_dir.empty()) c.sparse_capture = 1;
             c.sparse_capture_verify = args_.sparse_capture_verify;
             c.accept_protocol = args_.accept_protocol;
+            c.world_check = args_.world_check;
             return c;
         }
 
@@ -3486,6 +3516,36 @@ namespace {
 
         uint32_t current_tick() const { return core_.current_tick(); }
 
+        // --inject-fork (step FD1): after the step of the named tick, live
+        // and replayed, the body moved along x with its velocities kept.
+        void inject_fork(uint32_t tick, const char* where) {
+            if (args_.inject_fork_tick < 0 || tick != static_cast<uint32_t>(args_.inject_fork_tick) || !core_.assigned()) return;
+            std::string entity = args_.inject_fork_entity;
+            if (entity == "own") {
+                entity = core_.own_body_entity();
+            } else if (entity.size() > 1 && entity[0] == 'p'
+                       && std::all_of(entity.begin() + 1, entity.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+                const auto it = core_.remotes().find(static_cast<uint32_t>(std::atoll(entity.c_str() + 1)));
+                entity = it == core_.remotes().end() ? std::string() : it->second.entity;
+            }
+            bmmo_physics_body_state body{};
+            std::string error;
+            if (entity.empty() || !bmmo::physics::get_body_state(engine_->physics(), entity.c_str(), body, error)) {
+                logf("--inject-fork: no body for %s at the %s step of tick %u%s%s", args_.inject_fork_entity.c_str(), where,
+                     tick, error.empty() ? "" : ": ", error.c_str());
+                return;
+            }
+            body.position[0] += args_.inject_fork_dx;
+            if (!bmmo::physics::set_body_state(engine_->physics(), entity.c_str(), body.position, body.rotation, body.linear,
+                                               body.angular, true, error)) {
+                logf("--inject-fork: %s could not be moved at the %s step of tick %u: %s", entity.c_str(), where, tick,
+                     error.c_str());
+                return;
+            }
+            logf("--inject-fork: %s moved %+g m along x after the %s step of tick %u", entity.c_str(), args_.inject_fork_dx,
+                 where, tick);
+        }
+
         CK3dEntity* current_ball() const {
             CKDataArray* level = engine_->data_array("CurrentLevel");
             if (!level) return nullptr;
@@ -4039,6 +4099,7 @@ namespace {
             // the sector stamp, the events and echoes, the rewinds, the held
             // body changes, the union's pass, the drive of this tick), the
             // step, and the flow after it (post_step).
+            const uint32_t stepping = core_.next_tick();
             core_.pre_step();
             const bool ticked = engine_->tick(error);
             live_tick_serial_ = 0;
@@ -4071,6 +4132,7 @@ namespace {
                     break;
                 }
             }
+            if (ticked) inject_fork(stepping, "live");
             if (!core_.post_step(ticked)) { logf("tick failed: %s", error.c_str()); ended_ = true; return; }
             // Step T3 (H8): the leave switches.
             if (core_.assigned()) {
@@ -4886,6 +4948,7 @@ namespace {
             // support's manager_activations::after_replayed_step); step
             // N01R: and the [0][1].
             w.after_replayed_step = [this](uint32_t tick) {
+                inject_fork(tick, "replayed");   // step FD1's test switch, first (before --park-births returns)
                 if (args_.park_births) return;
                 const int written = manager_activations_.after_replayed_step(engine_->context(), tick);
                 if (!written || cell_write_logs_++ >= 8) return;

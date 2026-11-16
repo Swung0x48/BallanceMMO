@@ -4959,3 +4959,108 @@ checked against it. S15's one-tick entry-note differences were not traced to it.
 final form of the flag on the public-test captures (the replays above ran the first form); the L13 drives' releases
 (they release with the navigation off); S1 after 36 832 and its 36 881 control; S15 in the other two captures; the
 own release replayed on retail; the latch fix.
+
+
+## Built (fork detection, report only, step FD1, 2026-11-16)
+
+**Why.** Public test 2's silent forks (FB, AR) lasted whole sessions with snapshots off, and nothing told anyone.
+The user's rules (2026-11-15/16): the server's world is always the authority; no frequent snapshots - the agreeing
+case sends no state down; a short fork is allowed; every disagreement is reported proactively in the log and the
+journal on both sides so it can be analysed later. FD1 is the first stage of the fork detection design
+(`.local-tools/work/DESIGN/fork_detection.md`, sections 1-6 and the FD1 plan, 14): **detect and report only.
+Nothing it adds writes any world** - no heal, no resync, no correction, no input. Its decision rules run and are
+journaled as "would heal" under the user's policy of 2026-11-16 (a fixed 10 s gap between one member's heals; the
+in-place retry and the kick after more than 6 consecutive failed heals are FD3's, not modelled online here).
+
+**What is hashed** (`session/world_check.hpp`, pure, no globals; `scripts/world_check.py` is its python mirror,
+`--self-test` on the unit test's golden values). A row's term is FNV-1a 64 fed field by field (kind, the key - a
+ball's owner, a mechanism's name -, position 3 x f64, rotation 4 x f64, linear and angular 3 x f32 bit patterns,
+SIMULATED | COLLISION_ENABLED), then `world_hash::fold_term`; terms are summed per class, so row order never matters.
+A report of tick T: per ball owner the sum of its rows (two rows of one owner counted in `dup`), eight mechanism
+buckets (name hash & 7), the rows hashed, the owner-0 balls (`unkeyed`, not compared), and the owners latched in the
+airship zone at the step of T (read live right after the step and in replays through the new
+`core_world_hooks::after_replayed_step`; a latched ball is out of both folds, a ball latched on one side only is a
+zone difference). Keep-local bodies are out on both sides (`resync_rules.hpp keep_local_body`), the client's
+local-only bodies on the client. Samples are the ticks T % 66 == 0, the FINAL / FULL rows' cadence.
+
+**Client** (`client_core_world_check.cpp`, state per core in `s.world_check_`): the retire observer now runs
+whenever the rollback does, journal or not (retail with SessionJournal off reports too); its verdict is unchanged
+(the `why` codes, the same log text) and the FINAL rows keep their own gates. Every retired tick folds its
+positions into a 132-tick ring (6.3a: mechanisms half, balls half), every retired sample tick sends a
+`SessionWorldReport` (reliable, about 100 + 12 x balls bytes) and journals `world_report`; a resync pending holds
+reports back for at most 660 ticks (then PENDING); records handed over at the session's end are never reported; a
+sample tick a re-anchor dropped before it retired is journaled with `sent` 2, so the hole is in the record. A
+`SessionWorldFork` `opened` is answered at once with a DETAIL report of T (the rows of every player ball and of the
+episode's mechanism buckets, the fold ring, the last 16 rewinds, the resyncs asked) and the core's rows of T go into
+its journal as `LOCAL | FINAL | CHECK` unless a FINAL row holds them; reports carry rows until the episode is
+decided (at most 6). `decided` and `closed` print one line each; an episode the server has not closed by the
+session's end closes `ended` locally (the server's own close comes after SessionEnd), so the client journal lists
+every episode it saw as closed. The headless `--no-world-check` declares nothing and sends nothing (the control);
+`--inject-fork TICK ENTITY DX` (test only) moves a level body, `own` or `p<id>` by DX m along x after the step of
+TICK, live and in every replay of it.
+
+**Server** (`sim/world_watch.hpp/.cpp`, pure: no CK, no clock; one per session in the runner's session state, the
+simulation thread its only caller; every time a session tick, K4b). At the end of the step of a sample tick, while
+any member declares `CAP_WORLD_CHECK`, the runner's one `snapshot_for_journal` serves the FULL checkpoint and the
+sample (its bytes unchanged) with `physics_world::latched_players()`; the last 16 samples' terms and the last 4
+samples' rows are kept. A report waits until the runner has stepped its T (no "late" outcome), then is compared,
+or recorded as `old_epoch`, `stale`, `uncomparable`, `not_sample`, `dropped`, `no_capability`. The first differing
+compared sample opens an episode (`fork_open`, notice `opened`); the DETAIL (or its 66-tick timeout) decides it
+from the client's rows against the server's rows of T: the worst body and its error, the own ball's, the nearest
+differing body to the member's ball, presence (a body or a second row of one owner only one side has), and the
+grouping (how many other members reported the same term, and whether a differing ball's owner agrees). The
+unsettled rules hold a zone- or presence-only first sample (a), and a pending own reason within 660 ticks (c, never
+after a decision); rules 1-3 give NOW (size 0.5 m or presence after the first sample, own 5 cm, a ball's flags,
+breadth), SOON (+132: the own ball, a body within 10 m) or LATER (+396), earlier at a calm moment (the member's ball
+absent or finished), never within 660 ticks of the member's previous would-heal; a re-judge only escalates, and a
+report without rows waits for the DETAIL. `fork_decision` final 1 marks the would-heal tick reached. The first
+equal sample with no episode key latched closes it: `lead` (never left (a)), `self_healed` (before the would-heal
+tick), `equal_again` (after it; nothing was healed), `ended` at a leave or the session's end. A member not compared
+for 660 ticks is a blind stretch (`silent`, or the last result's cause; `no_capability` once at its join).
+
+**Reporting, both sides.** Server: `world_agree` per report, `fork_open`, `fork_detail` (the fold ring in hex, the
+rewinds, the grouping), `fork_decision`, `fork_close`, `fork_blind`, `world_check_end`, all clock-site kinds
+written at the runner's tick of the compare; the member's DETAIL rows as `LOCAL | FINAL | CHECK` + member and the
+server's own late rows of T as `FULL | CHECK` when T has no FULL row. Default-level log lines (the user's exception
+to the quiet log: one per episode open and one per close, one per blind stretch, never per sample), e.g.
+`Physics session 1: world check: <name>'s world differs from the server's at tick 726 (episode 1:
+P_Modul_01_Pusher, 0.0011 m; mechanisms of bucket 5: 0 of 3 other members report the same); would heal by tick
+1250 (later), rule distant (report only)`, its close line, and an end line with the session's counts. Client:
+`world_report` and `fork_notice` (logical kinds), the line `world check: this world differs from the server's at
+tick 726 (episode 1: P_Modul_01_Pusher, 0.0011 m); the server would heal by tick 1250 (later), rule distant
+(report only)`, its close line and one counters line at the end (retail through the core's log sink, the BML logger
+thread). `scripts/journal_judge.py --world-check` lists every episode, blind stretch and per-member result from
+one journal alone (server or client), with each member's coverage against the server's own samples (its first
+epoch to its leave or the end, the last 132 ticks left out, and the samples the member's own journal - when given
+with it - says it never sent around a resync listed, not counted); `--no-would-heal` (no episode decided; one held
+unsettled and closed - a lead, a pending own reason - is listed) and `--min-compared PCT` make it a gate (G1).
+
+**The wire: protocol 42** (`message/session_world_report_msg.hpp`, `session_world_fork_msg.hpp`, opcodes appended
+after SessionIntent; `CAP_WORLD_CHECK = 1 << 4`, declared only with `CAP_RESYNC_STATE`). The server takes a report
+from a member of the session it names only (else dropped, counted, verbose line); the parsers bound every count by
+the bytes left and refuse trailing bytes and another schema. A 41 peer is refused at the handshake (it would log
+each report as an invalid opcode). Journal version 10 unchanged: a checkpoint with `CHECK` (64) carries a trailing
+u32 member, which older readers stop before. `JOURNAL_IGNORE_KINDS` takes the name `CHECK` to leave those rows out.
+
+**Evidence** (the reviews' runs and the step's own, E-cores, `maps/arena-test/fdv_*`, `.local-tools/work/FDV`,
+`.local-tools/work/FD1`): agreeing runs (L6 13 clients at 150 ms to 5 000 with about 21 000 rewinds, the L13 and AR
+legs, LBM A5D's resync and A4's 10 % loss) open no episode and every row, TICK hash, event and correction equals
+the protocol-41 build's; an injection opens exactly one episode naming the body, with the right size and tier
+(the Pusher 1 mm LATER, a remote ball 1 m NOW, the own ball 3 cm SOON), from either journal alone, and the same
+run with `--no-world-check` everywhere has every journal equal (FD changes no world, even forked); the jitter
+replays of the server capture give the same records; retail L12 and L11 report every sample equal, with
+SessionJournal off too. core_ref_s21 replayed by this build with `--accept-protocol 41 --no-world-check`: 58/58
+journals IDENTICAL with FD1's kinds left out, the sends equal but each SessionReady; with the check on, the
+journals the same and the sends add only the reports.
+
+**Accepted limits.** The zone status is read at sample ticks only (the fold ring keeps latched balls, 6.3a's
+holes); a replayed T reads a remote's current entity, so a life change inside the window can give a false zone
+difference (rare). Bucket sums need equal row sets, stricter than the judge's shared-key compare. A client
+supplied name reaches a default-level line printable-ASCII only, at most 64 characters. The `boot` record of a
+coordinated run is not reproduced by a capture replay (a raw read; the jitter compare leaves it out).
+
+**Not exercised:** a closed notice over the wire before the session's end (every test episode ended with the
+session), a leave in mid-episode, the 660-tick gap across two episodes, presence or zone episodes live, a silent
+blind stretch live, PENDING live, retail as the forked side (nothing injects into a retail world: its notice
+handling, DETAIL answer and lines run only on the headless core), the per-tick fold's cost on retail x86 and the
+runner's step cost at 13 clients (A4's cost check).

@@ -127,6 +127,10 @@ namespace bmmo {
         // Protocol 41 (step INT): a member's player intent with its session tick, for the server's journal
         // (session_intent_msg.hpp).
         SessionIntent,
+        // Protocol 42 (fork detection step FD1): a member's terms of its retired rows of a sample tick, and the
+        // server's notices of an episode of them differing (session_world_report_msg.hpp, session_world_fork_msg.hpp).
+        SessionWorldReport,
+        SessionWorldFork,
     };
 
     template<typename T, opcode C = None>

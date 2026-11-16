@@ -106,6 +106,9 @@
 #include "../message/session_clock_ack_msg.hpp"
 #include "../message/session_telemetry_msg.hpp"
 #include "../message/session_intent_msg.hpp"
+#include "../message/session_world_fork_msg.hpp"
+#include "../message/session_world_report_msg.hpp"
+#include "world_check.hpp"
 #include "intent.hpp"
 #include "../message/session_start_at_msg.hpp"
 #include "../message/session_start_status_msg.hpp"
@@ -1280,6 +1283,50 @@ namespace bmmo::session {
         // player whose life this client cannot name (no set made).
         uint64_t trafo_retired_sights_ = 0, trafo_unnamed_lives_ = 0;
         uint32_t trafo_leak_logs_ = 0;
+
+        // Fork detection step FD1 (session/world_check.hpp; the design's
+        // 14.3): what the retire observer reports of its sample ticks and
+        // what it answers a SessionWorldFork with.  Report only: nothing
+        // here writes any world.
+        struct world_check_client {
+            struct sample {
+                uint32_t tick = 0;
+                std::vector<bmmo::session::body_state> rows;   // as the tick's FINAL row has them
+                std::vector<uint32_t> latched;
+                bmmo::session::world_check::world_terms terms;
+                bmmo::session::world_check::why why = bmmo::session::world_check::why::none;
+                uint32_t resyncs = 0;   // resyncs asked in the window ending here
+            };
+            static constexpr size_t kSamples = 4;
+            static constexpr size_t kFolds = 2 * TICK_RATE;   // the per-tick fold ring (6.3a)
+            static constexpr size_t kRewinds = 16;
+            // The airship zone's latched owners read at the step of each
+            // sample tick (live at post_step's entry, replayed through
+            // after_replayed_step); dropped at the tick's retirement.
+            std::map<uint32_t, std::vector<uint32_t>> zones;
+            std::deque<sample> samples;              // the last kSamples reported
+            std::deque<uint64_t> folds;              // consecutive retired ticks, the newest fold_last
+            uint32_t fold_last = 0;
+            std::deque<bmmo::session_world_report_msg::rewind_entry> rewinds;
+            // The window's tallies, since the previous sample: rewinds, the
+            // deepest one's re-stepped ticks, s.resyncs_sent_ at that sample.
+            uint32_t window_rewinds = 0, window_deepest = 0;
+            uint64_t window_resyncs_from = 0;
+            // Reports held back while a resync is pending (at most
+            // kHoldTicks from hold_from, then sent with PENDING).
+            bool holding = false;
+            uint32_t hold_from = 0;
+            // The episode the server opened, until it closes it: its rows
+            // ride on the reports until it is decided (at most kRowReports).
+            bool open = false, decided = false;
+            uint32_t episode = 0, episode_tick = 0, row_reports = 0;
+            uint8_t episode_buckets = 0;
+            // Counters: reports sent, held back and never retired (a
+            // re-anchor's hole), DETAIL answers and those whose sample had
+            // left the ring, notices, episodes opened.
+            uint64_t reports = 0, held = 0, skipped = 0, details = 0, detail_misses = 0, notices = 0, episodes = 0;
+        };
+        world_check_client world_check_;
     };
 
     // Design 1.2 "Configuration": what the host decides for the session, filled
@@ -1482,6 +1529,11 @@ namespace bmmo::session {
         // (headless --sparse-capture-verify).
         uint32_t sparse_capture = 8;
         bool sparse_capture_verify = false;
+        // Fork detection step FD1 (session/world_check.hpp): with rollback
+        // on, declare CAP_WORLD_CHECK and report the retired rows of every
+        // sample tick.  Report only: off changes no world (the F-leg's
+        // control; headless --no-world-check).
+        bool world_check = true;
     };
 
     // (legacy_calls, the transitional back-calls of design 6.1 "Linking while
@@ -1644,6 +1696,9 @@ namespace bmmo::session {
         // protocol error (design 2.3): counted, journaled, not applied, not
         // acknowledged.
         void on_session_lead(const bmmo::session_lead_msg& msg);
+        // SessionWorldFork (fork detection step FD1): journaled and logged;
+        // an `opened` is answered at once with a DETAIL report of its tick.
+        void on_session_world_fork(const bmmo::session_world_fork_msg& msg);
         // FULL step SAXH (protocol 24): the start handshake's server messages.
         void on_session_start_at(const bmmo::session_start_at_msg& msg);
         // FULL step SAXC: true when the status is shown (start_notice); false
@@ -2142,6 +2197,19 @@ namespace bmmo::session {
         void note_life_skipped(uint32_t player, bmmo::session::event_type type, uint32_t stamp, uint32_t origin);
         // The player whose mirror `entity` is or was (the life log), 0 none.
         uint32_t mirror_player_of(const std::string& entity) const;
+        // Fork detection step FD1 (client_core_world_check.cpp): the zone
+        // status at the step of a sample tick (live and replayed); a retired
+        // tick's fold, and a sample's report; a rewind for the DETAIL list.
+        void world_check_zone(uint32_t tick);
+        void world_check_fold(uint32_t tick, const std::map<std::string, bmmo_physics_body_state>& bodies,
+                              const bmmo::session::rollback_tracked& tracked,
+                              const std::map<std::string, uint32_t>& names);
+        void world_check_sample(uint32_t tick, const std::vector<bmmo::session::body_state>& rows,
+                                bmmo::session::world_check::why why);
+        void world_check_send(const client_core_state::world_check_client::sample& sample, uint8_t flags, bool rows);
+        void world_check_rewind(uint32_t anchor, uint32_t now, rewind_cause cause, uint64_t depth, std::string_view body);
+        // The session's end: an open episode closes `ended` here; the counters' line.
+        void world_check_end();
         // A physicalized mirror without navigation is driven from now on, if
         // the host has the navigation (post_step step 16, and every birth).
         // Step DX10: the host's answer (attached for one driven already,

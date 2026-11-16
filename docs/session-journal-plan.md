@@ -79,7 +79,7 @@ version. Then a stream of `uint8` tag + payload:
 | `INPUT` | `u32 tick, u32 id, u8 repeat` — `repeat=1` means "same frame as this player's previous one" (the common case when nobody moves the camera); otherwise `keys u8, cam_right/up/dir 9×f32, ball_type u8, flags u8` |
 | `EVENT` | `u32 tick, u32 id, u8 type, u8 ball_type, u8 flags, f32 pos[3], f32 rot[9], i32 sector, str name, recipe` |
 | `TICK` | `u32 tick, u64 hash, u64 pose, i32 cores, u32 ms` |
-| `CHECKPOINT` | `u32 tick, u32 count, count × body_state (kind u8, owner u32, str name, f64 pos[3], f64 rot[4], f32 lin[3], f32 ang[3], u8 flags)` |
+| `CHECKPOINT` | `u32 tick, u32 count, count × body_state (kind u8, owner u32, str name, f64 pos[3], f64 rot[4], f32 lin[3], f32 ang[3], u8 flags)`; with flag CHECK (64, step FD1) a trailing `u32 member` |
 | `NOTE` | `u32 tick, str text` — session start/end reason, room name, member names, anything a human wants in the box |
 
 `str` = `u16` length + bytes. The recipe is `bmmo_physics_ball_recipe`'s fields
@@ -141,7 +141,16 @@ line's counters but `resim=`, at the session's end before the journal closes), `
 values and the whole line, at the end and at each headless 5 s report; raw), `own_death` (each outcome line of a
 late own death), `stall` (a headless `--stall-ms` stall), and from step INT `intent` (a player intent: the session
 tick it applies at, the live tick a BMMO trigger asked at or -1, life, kind, source, arg; live ticks only - see
-docs/realtime-design.md 'Built (player intents in the journal, step INT, 2026-11-15)' for the tick rules).
+docs/realtime-design.md 'Built (player intents in the journal, step INT, 2026-11-15)' for the tick rules). From step FD1 (fork
+detection, report only; docs/realtime-design.md 'Built (fork detection, report only, step FD1, 2026-11-16)'): client
+`world_report` (a retired sample tick's terms: tick, epoch, verdict, why, rows, unkeyed, dup, latched, the 64-bit
+fold, `sent` 1 sent / 0 held back while a resync was pending / 2 never retired, the window's rewinds, deepest and
+resyncs) and `fork_notice` (a SessionWorldFork as received; the fold ring at `opened`; a local `closed` / `ended` at
+the session's end), both logical; server `world_agree` (each report and the compare's result), `fork_open`,
+`fork_detail`, `fork_decision`, `fork_close`, `fork_blind`, `world_check_end`, all class 1 (written at the runner's
+tick of the compare). A checkpoint with flag CHECK (64) carries a trailing `u32 member` (0 the server's own rows):
+an episode's rows of its sample tick, `LOCAL | FINAL | CHECK` (a client's) or `FULL | CHECK` (the server's late
+rows); `JOURNAL_IGNORE_KINDS` takes `CHECK` to leave them out of a compare.
 
 The resync note keeps its rows and bytes; its capture and coding times (raw reads that differed between any two
 runs) moved to `resync_cost`.

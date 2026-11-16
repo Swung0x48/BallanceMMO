@@ -437,6 +437,28 @@ namespace bmmo::sim {
             s->world_options = world_option_bits;
             s->mechanism_slots = (world_option_bits & bmmo::session::WORLD_PLAYER_MECHANISMS) ? mechanism_slots : 0;
             {
+                // Fork detection step FD1: the world check's records go into
+                // this session's journal at the tick it simulates next, its
+                // notices and lines to the server.
+                session_state* st = s.get();
+                world_watch::sink sink;
+                sink.record = [st](bmmo::session::stat_kind kind, std::initializer_list<bmmo::session::journal_value> v) {
+                    if (st->world && st->journal.is_open() && !st->journal.capped()) st->journal.stat(st->world->tick_index(), kind, v);
+                };
+                sink.rows = [st](uint32_t tick, uint8_t flags, const std::vector<bmmo::session::body_state>& rows, uint32_t member) {
+                    if (st->journal.is_open() && !st->journal.capped()) st->journal.checkpoint(tick, flags, rows, member);
+                };
+                sink.out = [this, session](const world_watch::notice& n) {
+                    if (callbacks_.on_world_fork) callbacks_.on_world_fork(session, n);
+                    else if (!n.line.empty()) log("[session " + std::to_string(session) + "] world check: " + n.line);
+                };
+                sink.calm = [st](uint32_t player) {
+                    if (!st->world) return 0;
+                    return !st->world->player_physicalized(player) ? 1 : st->world->player_finished(player) ? 2 : 0;
+                };
+                s->watch.set_sink(std::move(sink));
+            }
+            {
                 std::lock_guard lk(view_mutex_);
                 views_[session] = view{};
             }
@@ -575,6 +597,7 @@ namespace bmmo::sim {
                     log("[session " + std::to_string(s.id) + "] " + text);
                     s.journal.note(s.world->tick_index(), text);
                 }
+                if (s.world) s.watch.end(s.world->tick_index());   // step FD1: open episodes close `ended`, the counters
                 s.journal.note(s.world ? s.world->tick_index() : 0,
                                "end: " + (reason.empty() ? std::string("session destroyed") : reason));
                 if (s.journal.asynchronous())   // step SIO: the writer queue's high-water mark
@@ -687,6 +710,7 @@ namespace bmmo::sim {
             auto it = sessions_.find(session);
             if (it == sessions_.end()) return;
             auto& s = *it->second;
+            if (s.world) s.watch.leave(player, s.world->tick_index());   // step FD1: its episode closes `ended`
             // Step M1: a player the world does not hold - its add failed, or
             // it rejoined while its old life was leaving and left again
             // before that add ran.  The waiting add is dropped (its join
@@ -828,6 +852,7 @@ namespace bmmo::sim {
             if (it == sessions_.end() || !it->second->world) return;
             auto& s = *it->second;
             if (!s.players.count(player)) return;
+            s.watch.ready(player, first_tick, s.world->tick_index());   // step FD1: the epoch its reports carry
             auto& arrivals = s.arrivals[player];
             const bool keep_absolute = s.ready.count(player) && shared_absolute(s);
             const int lead = static_cast<int>(assigned_lead) - s.lateness[player].meter.offset();
@@ -947,6 +972,22 @@ namespace bmmo::sim {
             // Sector (step B1); its raises are bounded by its reach.
             lead.rewinds_sectors = (caps & bmmo::session::CAP_RESYNC_STATE) != 0;
             lead.assigned_lead = assigned_lead;
+        });
+    }
+
+    void session_runner::world_check_member(uint32_t session, uint32_t player, uint32_t caps, const std::string& name) {
+        post([this, session, player, caps, name] {
+            auto it = sessions_.find(session);
+            if (it == sessions_.end() || !it->second->world) return;
+            it->second->watch.member(player, caps, name, it->second->world->tick_index());
+        });
+    }
+
+    void session_runner::world_report(uint32_t session, world_report_in report) {
+        post([this, session, report = std::move(report)]() mutable {
+            auto it = sessions_.find(session);
+            if (it == sessions_.end() || !it->second->world) return;
+            it->second->watch.report(std::move(report), it->second->world->tick_index());
         });
     }
 
@@ -1803,12 +1844,19 @@ namespace bmmo::sim {
         // snapshot() would recompute body_set_changed_ against its own call and
         // number mechanisms the server has not numbered yet, and the journal
         // must not change one byte of what the server sends.
-        if (recording && config_.journal_checkpoint_ticks != 0
-                && tick % config_.journal_checkpoint_ticks == 0) {
+        // Fork detection step FD1: the world check's sample of T takes the
+        // same rows (journal or not), then the reports held for T and the
+        // check's deadlines.
+        const bool full_due = recording && config_.journal_checkpoint_ticks != 0
+                && tick % config_.journal_checkpoint_ticks == 0;
+        const bool sample_due = s.watch.active() && tick % bmmo::session::world_check::kSampleTicks == 0;
+        if (full_due || sample_due) {
             std::vector<bmmo::session::body_state> bodies;
             s.world->snapshot_for_journal(bodies);
-            s.journal.checkpoint(tick, bmmo::session::JOURNAL_CHECKPOINT_FULL, bodies);
+            if (full_due) s.journal.checkpoint(tick, bmmo::session::JOURNAL_CHECKPOINT_FULL, bodies);
+            if (sample_due) s.watch.sample(tick, std::move(bodies), s.world->latched_players(), full_due, s.world->tick_index());
         }
+        s.watch.step(s.world->tick_index());
     }
 
     // Late-player design 2.1, observe only (plan step 7): every stepped tick
@@ -2444,6 +2492,7 @@ namespace bmmo::sim {
             if (!sp) continue;
             if (config_.patience && sp->running && sp->world)
                 report_patience(*sp, sp->world->tick_index(), "server stopped");
+            if (sp->world) sp->watch.end(sp->world->tick_index());
             sp->journal.note(sp->world ? sp->world->tick_index() : 0, "end: server stopped");
         }
         sessions_.clear();

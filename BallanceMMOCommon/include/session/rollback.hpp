@@ -1115,7 +1115,7 @@ namespace bmmo::session {
             history_.push_back(std::move(state));
             while (history_.size() > thresholds_.history_ticks) {
                 const tick_state& oldest = history_.front();
-                if (retire_observer_) retire_observer_(oldest.tick, oldest.tracked, oldest.bodies, oldest.inputs);
+                if (retire_observer_) retire_observer_(oldest.tick, oldest.tracked, oldest.bodies, oldest.inputs, false);
                 history_.pop_front();
             }
         }
@@ -1130,9 +1130,12 @@ namespace bmmo::session {
         // a resync, the session's assignment) is not retired; the records
         // still held when the session ends are retired by retire_remaining.
         // Unset by default: nothing reads or changes a simulation for it.
+        // `at_end`: shown by retire_remaining (records still being predicted
+        // when the session ends), not by leaving the history (step FD1: the
+        // world check never reports those).
         using retire_observer = std::function<void(uint32_t tick, const rollback_tracked& tracked,
                                                    const std::map<std::string, bmmo_physics_body_state>& bodies,
-                                                   const std::map<std::string, input_frame>& inputs)>;
+                                                   const std::map<std::string, input_frame>& inputs, bool at_end)>;
         void set_retire_observer(retire_observer observer) { retire_observer_ = std::move(observer); }
         // The session's end (step D0 gate): every record still held is shown
         // to the observer, oldest first, as the newest the client ever had
@@ -1140,7 +1143,7 @@ namespace bmmo::session {
         // is unset so no record is shown twice.  Returns how many.
         size_t retire_remaining() {
             if (!retire_observer_) return 0;
-            for (const tick_state& state: history_) retire_observer_(state.tick, state.tracked, state.bodies, state.inputs);
+            for (const tick_state& state: history_) retire_observer_(state.tick, state.tracked, state.bodies, state.inputs, true);
             retire_observer_ = nullptr;
             return history_.size();
         }

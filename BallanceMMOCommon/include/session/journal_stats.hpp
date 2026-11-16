@@ -87,6 +87,16 @@ namespace bmmo::session {
         intent,              // client: an intent of this member, at the session tick it applies at
         member_intent,       // server: a member's SessionIntent as received
         room_intent,         // server: a room or legacy request about a running session (restart votes, requests)
+        // Fork detection step FD1 (session/world_check.hpp; the fork detection design, 14.4): report only.
+        world_report,        // client: the terms of a retired sample tick, as reported (or held back)
+        fork_notice,         // client: a SessionWorldFork as received
+        world_agree,         // server: a member's report and the compare's result
+        fork_open,           // server: an episode opened
+        fork_detail,         // server: the member's DETAIL report against the server's rows
+        fork_decision,       // server: the would-heal tier and tick (nothing heals in FD1)
+        fork_close,          // server: an episode closed
+        fork_blind,          // server: a member not compared for 660 ticks, and its end
+        world_check_end,     // server: the session's world-check counters
         count
     };
 
@@ -193,6 +203,42 @@ namespace bmmo::session {
         // not a member, -2: the server console); `detail`: the votes after
         // the change ("votes/needed"), a countdown's switches.
         constexpr stat_field room_intent[] = {{"player", 'i'}, {"what", 's'}, {"other", 'i'}, {"detail", 's'}};
+        // Fork detection step FD1.  The client's two: `verdict` 0 confirmed /
+        // 1 not; `why` world_check::why; `latched` the owners latched in the
+        // airship zone at the step of T; `fold` world_check::terms_fold in
+        // hex; `sent` 0 when held back (a resync pending, under 660 ticks);
+        // the window's tallies since the previous sample: `rewinds`, the
+        // `deepest` one's re-stepped ticks, `resyncs` asked.  A notice's
+        // `folds` (opened only): the per-tick fold ring from `fold_first`,
+        // 16 hex digits a tick (mechanisms half, balls half).
+        constexpr stat_field world_report[] = {
+            {"tick", 'i'}, {"epoch", 'i'}, {"verdict", 'i'}, {"why", 'i'}, {"rows", 'i'}, {"unkeyed", 'i'},
+            {"dup", 'i'}, {"latched", 's'}, {"fold", 's'}, {"sent", 'i'}, {"rewinds", 'i'}, {"deepest", 'i'},
+            {"resyncs", 'i'}};
+        constexpr stat_field fork_notice[] = {
+            {"episode", 'i'}, {"tick", 'i'}, {"action", 's'}, {"kinds", 'i'}, {"owners", 's'}, {"buckets", 'i'},
+            {"tier", 's'}, {"rule", 's'}, {"tick2", 'i'}, {"outcome", 's'}, {"differing", 'i'}, {"worst", 's'},
+            {"worst_m", 'f'}, {"own_m", 'f'}, {"fold_first", 'i'}, {"folds", 's'}};
+        constexpr stat_field world_agree[] = {
+            {"player", 'i'}, {"tick", 'i'}, {"epoch", 'i'}, {"result", 's'}, {"flags", 'i'}, {"why", 'i'},
+            {"rows", 'i'}, {"unkeyed", 'i'}, {"dup", 'i'}, {"kinds", 'i'}, {"owners", 's'}};
+        constexpr stat_field fork_open[] = {
+            {"player", 'i'}, {"episode", 'i'}, {"tick", 'i'}, {"kinds", 'i'}, {"owners", 's'}, {"buckets", 'i'},
+            {"rows", 'i'}, {"unkeyed", 'i'}, {"dup", 'i'}, {"last_equal", 'i'}, {"server_latched", 's'},
+            {"client_latched", 's'}};
+        constexpr stat_field fork_detail[] = {
+            {"player", 'i'}, {"episode", 'i'}, {"tick", 'i'}, {"differing", 'i'}, {"worst", 's'}, {"worst_m", 'f'},
+            {"own_m", 'f'}, {"near_m", 'f'}, {"presence", 's'}, {"same", 's'}, {"folds", 's'}, {"rewinds", 's'}};
+        constexpr stat_field fork_decision[] = {
+            {"player", 'i'}, {"episode", 'i'}, {"tick", 'i'}, {"tier", 's'}, {"rule", 's'}, {"would_heal", 'i'},
+            {"gap_wait", 'i'}, {"final", 'i'}};
+        constexpr stat_field fork_close[] = {
+            {"player", 'i'}, {"episode", 'i'}, {"outcome", 's'}, {"first", 'i'}, {"last", 'i'}, {"samples", 'i'},
+            {"forked_ticks", 'i'}, {"own_ticks", 'i'}};
+        constexpr stat_field fork_blind[] = {{"player", 'i'}, {"cause", 's'}, {"first", 'i'}, {"ticks", 'i'}, {"ended", 'i'}};
+        constexpr stat_field world_check_end[] = {
+            {"members", 'i'}, {"samples", 'i'}, {"compared", 'i'}, {"differing", 'i'}, {"episodes", 'i'},
+            {"leads", 'i'}, {"would_heals", 'i'}, {"blind_max_ticks", 'i'}};
     }
 
 #define BMMO_STAT_KIND(name, klass, side) \
@@ -251,6 +297,19 @@ namespace bmmo::session {
         BMMO_STAT_KIND(intent, logical, STAT_CLIENT),
         BMMO_STAT_KIND(member_intent, raw, STAT_SERVER),
         BMMO_STAT_KIND(room_intent, raw, STAT_SERVER),
+        // Fork detection step FD1.  The client's at a retirement in the live
+        // frame or at a notice's receipt, as its other message records; the
+        // server's at the runner's tick of the compare, which follows the
+        // report's arrival stamp (the fork detection design, 5.5).
+        BMMO_STAT_KIND(world_report, logical, STAT_CLIENT),
+        BMMO_STAT_KIND(fork_notice, logical, STAT_CLIENT),
+        BMMO_STAT_KIND(world_agree, clock_site, STAT_SERVER),
+        BMMO_STAT_KIND(fork_open, clock_site, STAT_SERVER),
+        BMMO_STAT_KIND(fork_detail, clock_site, STAT_SERVER),
+        BMMO_STAT_KIND(fork_decision, clock_site, STAT_SERVER),
+        BMMO_STAT_KIND(fork_close, clock_site, STAT_SERVER),
+        BMMO_STAT_KIND(fork_blind, clock_site, STAT_SERVER),
+        BMMO_STAT_KIND(world_check_end, clock_site, STAT_SERVER),
     };
 #undef BMMO_STAT_KIND
     static_assert(sizeof(kStatKinds) / sizeof(kStatKinds[0]) == static_cast<size_t>(stat_kind::count),

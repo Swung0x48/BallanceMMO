@@ -312,7 +312,13 @@ namespace bmmo::session {
     //      lost) with the session tick it applies at; the server journals it
     //      (member_intent) and no world reads it.  A 40 server would log each
     //      as an invalid opcode, so the handshake refuses it.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 41;
+    //  42  Fork detection, step FD1 (session/world_check.hpp): a member
+    //      declaring CAP_WORLD_CHECK sends a SessionWorldReport of its
+    //      retired rows at every sample tick, the server compares it with
+    //      its own rows and sends SessionWorldFork notices of an episode
+    //      that differs.  Report only: no world changes.  A 41 peer would
+    //      log each as an invalid opcode, so the handshake refuses it.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 42;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
     // The protocol whose SessionStart carries `mechanism_slots` (step Q7).
@@ -347,6 +353,11 @@ namespace bmmo::session {
     // session with WORLD_PLACEMENT_CLONES, and since step B9DX by every
     // session (session_ready_refusal below: the bit marks the session core).
     constexpr uint32_t CAP_PLACEMENT = 1u << 3;
+    // Protocol 42 (fork detection step FD1): the client sends a
+    // SessionWorldReport at every sample tick and answers SessionWorldFork;
+    // declared only with CAP_RESYNC_STATE (the session core with rollback
+    // on).  A member without it is never compared.
+    constexpr uint32_t CAP_WORLD_CHECK = 1u << 4;
 
     // session_start_msg::world_options bits (protocol 11): what every world
     // of the session runs, fixed by the server for the session's life (never

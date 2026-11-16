@@ -313,6 +313,20 @@ namespace bmmo::sim {
         void set_input(uint32_t id, const bmmo::session::input_frame& frame);
         bool apply_event(uint32_t id, const lifecycle_event& event, std::string& error);
         bool player_physicalized(uint32_t id) const;
+        // Fork detection step FD1: whether the player's Finish was applied
+        // (a calm moment for its would-heal), and the players whose ball is
+        // latched in the airship zone after the last step (the zone loop's
+        // airship_tick: status 1 or 2), sorted.
+        bool player_finished(uint32_t id) const {
+            const auto it = players_.find(id);
+            return it != players_.end() && it->second.finished;
+        }
+        std::vector<uint32_t> latched_players() const {
+            std::vector<uint32_t> out;
+            for (const auto& [id, p]: players_)
+                if (p.airship_tick != 0) out.push_back(id);
+            return out;
+        }
         uint8_t player_ball_type(uint32_t id) const;
         // The entity of a physicalized player's ball clone ("" otherwise).
         // Read only (SimTool's --replay-session maps a resync state's rows).

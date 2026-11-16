@@ -678,7 +678,16 @@ namespace bmmo::session {
         rollback_world world = bind_rollback_world(backend, binding);
         world.remote_generation = hooks.remote_generation;   // step GL1
         world.navigation_remade = hooks.navigation_remade;   // step AR
-        world.after_step = o.after_replayed_step;   // step N02R
+        // Step N02R: the host's, then (step FD1) the core's.
+        const auto host_after = o.after_replayed_step;
+        const auto core_after = hooks.after_replayed_step;
+        if (host_after && core_after)
+            world.after_step = [host_after, core_after](uint32_t tick) {
+                host_after(tick);
+                core_after(tick);
+            };
+        else
+            world.after_step = host_after ? host_after : core_after;
         // Step G3 (world agreement 2.5): the proximity union's place point
         // of every replayed tick, the core's (empty when the session does
         // not run the union).
