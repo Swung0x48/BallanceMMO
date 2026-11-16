@@ -5167,3 +5167,33 @@ held), so those runs test the R - 1 / R - 2 edge only.
 
 **Not exercised:** a non-owner meeting the edge, a refused own release with a sample at R - 1, a release by a remote
 that left, retail.
+
+## Built (the splits the fork heal builds on, step FD3a, 2026-11-16)
+
+**Why.** The fork detection design (`.local-tools/work/DESIGN/fork_detection.md` 15.3) heals a forked member with
+the server's state of one tick X applied in place, with no re-assign, no hold and no resync pending (step FD3b).
+FD3a moves the pieces that heal needs out of the code paths that have them today, with no behaviour change, so the
+references show the moves are exact before FD3b changes anything.
+
+**Client** (`client_core_resync.cpp`). `try_apply_resync` keeps the guard, the anchor and reach check, the RSO wait
+and the tails of a re-assign (the refused state dropped and asked again, the hold released); steps 1b-7 (the trafo
+sets, the restore, the re-step, the apply line and the RESYNC record) move verbatim into `apply_server_state(state,
+anchor, now, own_birth, mode, why)`, which returns waiting, refused or applied. `mode` is `reassign` (the only
+caller) or `in_place` (FD3b's); the pending resync's four flags are cleared at their old place under `reassign`, so
+every step runs in the same order as before.
+
+**Rollback** (`rollback.hpp`). `retire_before(x)` retires every record before x through the retire observer as a
+record leaving the bounded history does, so no rewind is anchored before x afterwards; `record()`'s retirement loop
+and it share `retire_oldest()`. Nothing calls it yet.
+
+**Server.** `session_runner::reanchor_base` gives `reanchor_tick`'s base and assigned lead without the DX9 line (one
+private body, one view lock and one clock read), for FD3b's guard. `physics.fork_heal` (default off) is parsed and
+handed to the runner as `fork_heal && snapshot_interval >= 255` (heals only with snapshots off); nothing reads it, it
+is not journaled.
+
+**Evidence.** The s22 strict replay and the wire check compare every reference unchanged. They cover the applied
+path only (15 re-steps in the s22 arms, no wait, refusal or hold release): the waiting and refused returns and the
+hold-release tail are equal by reading.
+
+**Not exercised:** the in-place mode (no caller), `retire_before` on a record with a blob or below a sparse record,
+`reanchor_base` (no caller), `fork_heal: true` in a config file, retail.

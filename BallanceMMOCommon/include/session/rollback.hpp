@@ -1113,16 +1113,7 @@ namespace bmmo::session {
             }
             if (capture_now) note_globals_change(world, state, history_.empty() ? nullptr : &history_.back());
             history_.push_back(std::move(state));
-            while (history_.size() > thresholds_.history_ticks) {
-                tick_state& oldest = history_.front();
-                if (retire_observer_) {
-                    retired_whole whole{oldest.savestate, oldest.scripts};
-                    const bool has_blob = oldest.full && oldest.have_savestate && !oldest.savestate.empty();
-                    retire_observer_(oldest.tick, oldest.tracked, oldest.bodies, oldest.inputs, false,
-                                     has_blob ? &whole : nullptr);
-                }
-                history_.pop_front();
-            }
+            while (history_.size() > thresholds_.history_ticks) retire_oldest();
         }
 
         // Step D0 (FULL): a diagnostic observer of each record as it leaves
@@ -1161,6 +1152,20 @@ namespace bmmo::session {
                 retire_observer_(state.tick, state.tracked, state.bodies, state.inputs, true, nullptr);
             retire_observer_ = nullptr;
             return history_.size();
+        }
+        // Step FD3a (fork detection 15.3, for FD3b's in-place heal at x):
+        // every record before `x` leaves the history now, oldest first, shown
+        // to the observer as a record leaving the bounded history is (not
+        // at_end), so no rewind is anchored before x afterwards.  Returns how
+        // many.  For x at or before the newest record, every one of them
+        // captured (an x past it empties the history).
+        size_t retire_before(uint32_t x) {
+            size_t n = 0;
+            while (!history_.empty() && static_cast<int32_t>(history_.front().tick - x) < 0) {
+                retire_oldest();
+                ++n;
+            }
+            return n;
         }
 
         // Test support (SimTool --savestate-check with bodies born and
@@ -4480,6 +4485,18 @@ namespace bmmo::session {
         rollback_thresholds thresholds_;
         std::deque<tick_state> history_;
         retire_observer retire_observer_;   // step D0: the final-state diagnostic (unset = none)
+        // The oldest record shown to the observer (with its blob when whole)
+        // and dropped.
+        void retire_oldest() {
+            tick_state& oldest = history_.front();
+            if (retire_observer_) {
+                retired_whole whole{oldest.savestate, oldest.scripts};
+                const bool has_blob = oldest.full && oldest.have_savestate && !oldest.savestate.empty();
+                retire_observer_(oldest.tick, oldest.tracked, oldest.bodies, oldest.inputs, false,
+                                 has_blob ? &whole : nullptr);
+            }
+            history_.pop_front();
+        }
         // The births the server moved (move_birth), while a rewind can still
         // be anchored inside their gap.
         struct moved_birth {

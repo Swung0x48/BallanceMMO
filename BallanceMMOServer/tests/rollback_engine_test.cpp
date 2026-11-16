@@ -1352,6 +1352,37 @@ TEST(RollbackEngine, TheRetireObserverSeesEachRecordLeavingTheHistory) {
     EXPECT_EQ(engine.history_size(), 5u);
 }
 
+// Step FD3a (fork detection 15.3): retire_before(x) shows each record before
+// x to the observer once, in order, as leaving the history (not at_end), and
+// none at or after x; afterwards no rewind is anchored before x.
+TEST(RollbackEngine, RetireBeforeShowsEveryEarlierRecordOnce) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Remote"];
+    rollback_engine engine;
+    std::vector<uint32_t> retired;
+    engine.set_retire_observer([&](uint32_t tick, const rollback_tracked&,
+                                   const std::map<std::string, bmmo_physics_body_state>&,
+                                   const std::map<std::string, input_frame>&, bool at_end,
+                                   rollback_engine::retired_whole*) {
+        retired.push_back(tick);
+        EXPECT_FALSE(at_end) << "tick " << tick;
+    });
+    std::map<uint32_t, input_frame> own_inputs;
+    run_ticks(world, engine, 10, 100, own_inputs);
+    ASSERT_EQ(engine.history_size(), 10u);
+    EXPECT_EQ(engine.retire_before(6), 5u);
+    EXPECT_EQ(retired, (std::vector<uint32_t>{1, 2, 3, 4, 5}));
+    EXPECT_EQ(engine.retire_before(6), 0u);
+    EXPECT_EQ(engine.history_size(), 5u);
+    EXPECT_FALSE(engine.knows_tick(5));
+    EXPECT_TRUE(engine.knows_tick(6));
+    auto w = world.adapter();
+    EXPECT_FALSE(engine.rewind_to(w, 5, 10, no_input, "before x"));
+    EXPECT_TRUE(engine.rewind_to(w, 6, 10, no_input, "at x"));
+    EXPECT_EQ(retired.size(), 5u);
+}
+
 // Step D0 gate: a record a rewind re-stepped is retired with the REPLAYED
 // state and the frames it was replayed with, not the first-recorded ones;
 // retire_remaining shows every record still held once (the session's end),

@@ -1169,6 +1169,7 @@ public:
         rc.patience = config_.physics_patience;
         rc.arrival_trace = config_.physics_arrival_trace;
         rc.lead_adjust = config_.physics_lead_adjust;
+        rc.fork_heal = config_.physics_fork_heal && config_.physics_snapshot_interval >= 255;   // design 15.0
         rc.input_hints = config_.physics_input_hints;
         rc.scheduled_start = true;   // FULL step SAXH: the start handshake names the start instant
         if (!bmmo::session::parse_test_clock_skew(config_.physics_test_clock_skew, rc.test_clock_skew)) {

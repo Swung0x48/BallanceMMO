@@ -79,6 +79,7 @@ bool config_manager::load() {
         physics_patience = yaml_load_value(physics, "patience", physics_patience);
         physics_arrival_trace = yaml_load_value(physics, "arrival_trace", physics_arrival_trace);
         physics_lead_adjust = yaml_load_value(physics, "lead_adjust", physics_lead_adjust);
+        physics_fork_heal = yaml_load_value(physics, "fork_heal", physics_fork_heal);
         physics_input_hints = yaml_load_value(physics, "input_hints", physics_input_hints);
         physics_test_clock_skew = yaml_load_value(physics, "test_clock_skew", std::string{});
         physics_trafo_inputs = yaml_load_value(physics, "trafo_inputs", physics_trafo_inputs);
@@ -301,6 +302,8 @@ void config_manager::save(bool reload_values) {
                    "#     gets a longer lead of its own through SessionLead, if its client declared it can apply\n"
                    "#     one; a late joiner's first lead and a resync's lead are then per player instead of\n"
                    "#     capped at 34 ticks),\n"
+                   "#   fork_heal (fork detection, default false: a member whose world the world check finds forked\n"
+                   "#     from the server's gets the server's state of one tick; only with snapshots off; not built yet),\n"
                    "#   input_hints (protocol 37, default true: every relay datagram also carries what the other\n"
                    "#     members' frames already queued at the server hold for the ticks not stepped yet, so a\n"
                    "#     client's rewind for a key change is as deep as its own round trip, not as deep as the\n"

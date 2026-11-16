@@ -284,6 +284,15 @@ namespace bmmo::sim {
     }
 
     uint32_t session_runner::reanchor_tick(uint32_t session, uint32_t lead, bool resync_state, const std::string& who, uint32_t* assigned_lead) const {
+        return reanchor(session, lead, resync_state, who, assigned_lead, true);
+    }
+
+    uint32_t session_runner::reanchor_base(uint32_t session, uint32_t lead, bool resync_state, uint32_t* assigned_lead) const {
+        return reanchor(session, lead, resync_state, "", assigned_lead, false);
+    }
+
+    uint32_t session_runner::reanchor(uint32_t session, uint32_t lead, bool resync_state, const std::string& who, uint32_t* assigned_lead,
+                                      bool log) const {
         if (assigned_lead) *assigned_lead = lead;
         bmmo::sim::reanchor_parts p;
         uint32_t first_tick = 0, next_tick = 0;
@@ -296,15 +305,15 @@ namespace bmmo::sim {
             if (!v.scheduled) return v.next_tick + lead;
             first_tick = v.first_tick;
             next_tick = v.next_tick;
-            p = bmmo::sim::reanchor_on_schedule_parts(v.schedule_start, v.first_tick, v.clock_fault.nominal_time(on_thread() ? logical_ : clock_->now(bmmo::session::clock_site::runner_reanchor)), lead, v.next_tick,
-                                                      margin);
+            const auto now = v.clock_fault.nominal_time(on_thread() ? logical_ : clock_->now(bmmo::session::clock_site::runner_reanchor));
+            p = bmmo::sim::reanchor_on_schedule_parts(v.schedule_start, v.first_tick, now, lead, v.next_tick, margin);
         }
         // Step DX9 (H3's harness item): the rule's parts in the server's log,
         // so a re-anchor's budget is read, not fitted from the journal - the
         // time from the schedule's start (negative before it: the first
         // start_base periods after the all-ready moment, RL1-e), the signed
         // schedule tick, the floor and the base.
-        if (callbacks_.log) {
+        if (log && callbacks_.log) {
             char line[512];
             std::snprintf(line, sizeof(line),
                           "[session %u] re-anchor%s%s: %+.1f ms from the schedule start (%s it), signed schedule tick %lld "

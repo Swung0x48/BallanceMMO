@@ -86,6 +86,9 @@ namespace bmmo::sim {
         // Protocol 37 (session/input_relay.hpp, the hints): on_inputs also
         // gets every member's frames queued past the tick just stepped.
         bool input_hints = false;
+        // Fork detection 15.3 (step FD3a): physics.fork_heal with snapshots
+        // off (snapshot_interval >= 255).  Nothing reads it yet (FD3b's heal).
+        bool fork_heal = false;
         // FULL step SAXH (protocol 24, session/start_handshake.hpp): the
         // members present at the start confirm one scheduled start instant
         // first, so a session does not start ticking when its last member is
@@ -506,6 +509,9 @@ namespace bmmo::sim {
         // schedule's start, the signed schedule tick, the floor, the base),
         // naming `who` (the member and the path) when given.
         uint32_t reanchor_tick(uint32_t session, uint32_t lead, bool resync_state, const std::string& who = "", uint32_t* assigned_lead = nullptr) const;
+        // Step FD3a (fork detection 15.3): the same base with no log line, so
+        // a caller can read it before it decides (FD3b's RSO guard).
+        uint32_t reanchor_base(uint32_t session, uint32_t lead, bool resync_state, uint32_t* assigned_lead = nullptr) const;
         // Step M1 (J4): the largest removal tick of the session's leaving
         // lives, 0 when none.  A late joiner's base is not before it, so a
         // life the joiner is never told of has ended in the server's world
@@ -845,6 +851,10 @@ namespace bmmo::sim {
         // Starts the session's deadline schedule and publishes it to the
         // cross-thread view (step RL1b: one place for both start paths).
         void start_ticking(session_state& s);
+        // reanchor_tick's body (one view lock, one clock read); `log` prints
+        // the DX9 line (reanchor_base passes false).
+        uint32_t reanchor(uint32_t session, uint32_t lead, bool resync_state, const std::string& who, uint32_t* assigned_lead,
+                          bool log) const;
 
         runner_config config_;
         session_callbacks callbacks_;

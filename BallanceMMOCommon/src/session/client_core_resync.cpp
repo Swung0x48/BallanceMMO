@@ -268,6 +268,45 @@ namespace bmmo::session {
                     own_birth = life.applied;
                     break;
                 }
+        switch (apply_server_state(st, anchor, now, own_birth, apply_mode::reassign, why)) {
+        case apply_result::waiting: return false;
+        case apply_result::refused:
+            s.have_resync_state_ = false;
+            s.resync_state_ = bmmo::session_resync_state_msg{};
+            s.resync_in_flight_ = false;
+            request_resync("the resync state could not be applied", true);
+            return true;
+        case apply_result::applied: break;
+        }
+        s.resync_state_ = bmmo::session_resync_state_msg{};
+        if (s.resync_held_) {
+            // The hold ends with the apply.
+            s.resync_held_ = false;
+            const auto t = platform_.now(clock_site::resync_release);
+            const auto held = t - s.resync_hold_started_;
+            const double ms = std::chrono::duration<double, std::milli>(held).count();
+            s.resync_hold_ms_max_ = std::max(s.resync_hold_ms_max_, ms);
+            logf("resync hold released after %.0f ms: the state was applied", ms);
+            journal_.note("resync hold " + std::to_string(static_cast<long long>(ms)) + " ms");
+            if (platform_.hooks.resync_hold_ended) platform_.hooks.resync_hold_ended(held);
+        }
+        return true;
+    }
+
+    // Steps 1b-7 of the apply (2.6.4): the server's state of `anchor` onto
+    // this world and the re-step to `now`.  Step FD3a (fork detection 15.3)
+    // split it out of try_apply_resync, which keeps the checks, the RSO wait
+    // (`own_birth`: the own body it found born after the anchor, 0 for none)
+    // and the re-assign's tail; `mode` says whether the state came with a
+    // re-assign (the pending resync's flags end here) or is applied in place
+    // (step FD3b's heal: no re-assign, no resync pending).  Waiting: nothing
+    // restored (step 1b's trafo sets and the wait counters may have moved),
+    // the state is tried again; refused: the re-step was refused and the
+    // world is the live one.
+    session_client_core::apply_result session_client_core::apply_server_state(
+            const bmmo::session_resync_state_msg& st, uint32_t anchor, uint32_t now, uint32_t own_birth, apply_mode mode,
+            const char* why) {
+        const uint32_t depth = now - anchor;
         // 1b. Step T3 (trafo-replication design 4.7): a set for every player
         // the server's ledger names, and the rows of the pieces it has bodies
         // for at S - the reconcile below makes them when this world lacks
@@ -458,7 +497,7 @@ namespace bmmo::session {
                      waiting.size() == 1 ? "y" : "ies", names.c_str(), waiting.size() > 24 ? ", ..." : "");
             }
             ++s.resync_deferred_ticks_;
-            return false;
+            return apply_result::waiting;
         }
         // Step A5: a late joiner's anchor is the level start, and its own
         // sector-1 walk runs in its first frames - over several frames
@@ -483,7 +522,7 @@ namespace bmmo::session {
                 if (s.resync_walk_frames_++ == 0)
                     logf("resync: the state of tick %u waits at tick %u for this world's own level walk", anchor, now);
                 ++s.resync_deferred_ticks_;
-                return false;
+                return apply_result::waiting;
             }
             if (s.resync_walk_frames_)
                 logf("resync: the state of tick %u waited %u frame(s) for the level walk (%s)", anchor, s.resync_walk_frames_,
@@ -822,11 +861,7 @@ namespace bmmo::session {
             }
             ++s.resync_states_refused_;
             logf("resync: the re-step from tick %u to %u was refused: asking again", anchor, now);
-            s.have_resync_state_ = false;
-            s.resync_state_ = bmmo::session_resync_state_msg{};
-            s.resync_in_flight_ = false;
-            request_resync("the resync state could not be applied", true);
-            return true;
+            return apply_result::refused;
         }
         // The union at the live tick: the re-derived one (the merged state
         // itself when nothing was re-stepped).
@@ -862,11 +897,13 @@ namespace bmmo::session {
         // record of base stepped with the frame the server did not apply
         // (a5u_lead: 0.17 m on the own ball for good).
         s.held_floor_ = anchor;
-        s.resync_pending_ = false;
         s.final_unconfirmed_ = false;
-        s.resync_exact_ = false;
-        s.resync_join_ = false;   // step A5: the world is the shared one again
-        s.have_resync_state_ = false;
+        if (mode == apply_mode::reassign) {
+            s.resync_pending_ = false;
+            s.resync_exact_ = false;
+            s.resync_join_ = false;   // step A5: the world is the shared one again
+            s.have_resync_state_ = false;
+        }
         ++s.resyncs_done_;
         ++s.resyncs_restepped_;
         s.resync_restep_depth_ += depth;
@@ -916,19 +953,7 @@ namespace bmmo::session {
                           + std::to_string(now) + " (" + std::to_string(depth) + " ticks, delta "
                           + std::to_string(s.resync_delta_) + ")");
         }
-        s.resync_state_ = bmmo::session_resync_state_msg{};
-        if (s.resync_held_) {
-            // The hold ends with the apply.
-            s.resync_held_ = false;
-            const auto t = platform_.now(clock_site::resync_release);
-            const auto held = t - s.resync_hold_started_;
-            const double ms = std::chrono::duration<double, std::milli>(held).count();
-            s.resync_hold_ms_max_ = std::max(s.resync_hold_ms_max_, ms);
-            logf("resync hold released after %.0f ms: the state was applied", ms);
-            journal_.note("resync hold " + std::to_string(static_cast<long long>(ms)) + " ms");
-            if (platform_.hooks.resync_hold_ended) platform_.hooks.resync_hold_ended(held);
-        }
-        return true;
+        return apply_result::applied;
     }
 
     // Late-player plan step 12 (design 2.5): the per-client reach.  Every

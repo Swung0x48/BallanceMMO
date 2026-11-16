@@ -2541,6 +2541,12 @@ namespace bmmo::session {
         // The apply (2.6.4), from on_session_resync_state and every pre_step
         // while a state waits; true when it ran (applied or refused for good).
         bool try_apply_resync(const char* why);
+        // Its steps 1b-7 (step FD3a): the state of `anchor` applied and
+        // re-stepped to `now`, with a re-assign or in place.
+        enum class apply_mode { reassign, in_place };
+        enum class apply_result { waiting, refused, applied };
+        apply_result apply_server_state(const bmmo::session_resync_state_msg& st, uint32_t anchor, uint32_t now,
+                                        uint32_t own_birth, apply_mode mode, const char* why);
         // The tracked set of a record made now (post_step's, for the
         // synthetic anchor).
         bmmo::session::rollback_tracked tracked_now(bool physicalized) const;
