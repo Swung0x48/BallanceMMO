@@ -1643,9 +1643,11 @@ RE_JOIN_IMPORT = re.compile(r'^resynced: tick base (\d+) \(old tick 0\b')
 RE_RESTEP = re.compile(r"^resync: re-stepped from the server's tick (\d+) to (\d+)")
 # Step F0: the airship (BALA; the balloon is the design's one exception, never
 # compared): a ball is out of the comparison from the tick the server's world
-# says it entered the zone to its next birth (a spawn ghost line).
+# says it entered the zone to its next birth (a spawn ghost line) or its
+# AirshipRelease (an S5 line, step AR), whichever comes first.
 RE_AIRSHIP_ZONE = re.compile(r"player (\d+)'s ball \S+ is in the airship zone at tick (\d+)")
 RE_SPAWN_BIRTH = re.compile(r"player (\d+)'s ball \S+ is a spawn ghost at tick (\d+)")
+RE_AIRSHIP_RELEASE = re.compile(r"S5 event player=(\d+) type=AirshipRelease origin=\d+ applied=(\d+)")
 # Step F0: the server's lead adjust mode (A8's joiner lead rule depends on it).
 RE_LEAD_MODE = re.compile(r'Physics sessions enabled \(.*\blead adjust (on|off)\b')
 RE_STATUS_LEAD = re.compile(r'\bworst=\d+ lead=([0-9.]+)')
@@ -2051,16 +2053,19 @@ def relay_start_hold(report, row, controls, control=False):
 
 
 def airship_spans(text):
-    """Step F0: player -> [(zone tick, next birth tick)) from the server log:
-    a ball in its airship span is per-world (BALA) and never compared."""
-    zones, births = collections.defaultdict(list), collections.defaultdict(list)
+    """Step F0: player -> [(zone tick, end tick)) from the server log: a ball
+    in its airship span is per-world (BALA) and never compared.  The span ends
+    at the next birth or AirshipRelease, whichever comes first: the release
+    puts the owner's state into every world (step AR, journal_judge's rule)."""
+    zones, ends = collections.defaultdict(list), collections.defaultdict(list)
     for m in RE_AIRSHIP_ZONE.finditer(text):
         zones[int(m.group(1))].append(int(m.group(2)))
-    for m in RE_SPAWN_BIRTH.finditer(text):
-        births[int(m.group(1))].append(int(m.group(2)))
+    for pattern in (RE_SPAWN_BIRTH, RE_AIRSHIP_RELEASE):
+        for m in pattern.finditer(text):
+            ends[int(m.group(1))].append(int(m.group(2)))
     out = {}
     for player, ticks in zones.items():
-        out[player] = [(z, min([b for b in births[player] if b > z] or [1 << 31])) for z in sorted(set(ticks))]
+        out[player] = [(z, min([b for b in ends[player] if b > z] or [1 << 31])) for z in sorted(set(ticks))]
     return out
 
 
@@ -3339,6 +3344,9 @@ def selftest():
                           "world: airship: player 7's ball Ball_Stone_BMMO_8 is in the airship zone at tick 3186 (a ghost)\n")
     check('airship_spans (step F0)', spans == {7: [(2233, 2673), (3186, 1 << 31)]}
           and in_spans(spans[7], 2233) and not in_spans(spans[7], 2673) and in_spans(spans[7], 9000), str(spans))
+    spans = airship_spans("world: airship: player 7's ball Ball_Stone_BMMO_8 is in the airship zone at tick 3186 (a ghost)\n"
+                          "Physics session 1: S5 event player=7 type=AirshipRelease origin=3201 applied=3203 late=2\n")
+    check('airship_spans (step AR)', spans == {7: [(3186, 3203)]}, str(spans))
     check('lead_mode (step F0)', lead_mode('[x] Physics sessions enabled (game root /a, patience off, lead adjust off).') == 'off'
           and lead_mode('nothing') is None)
 

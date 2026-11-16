@@ -4854,3 +4854,108 @@ session test of the same-frame case (a beam out of the arena fan with a forced r
 the fan's Shutdown comes first there too); client A's S14 after 5 646 (needs another capture of that world); the
 4 393 stone-ball removal timing (open, above).
 
+## Built (a remote's airship release replayed inside a rewind drives its tick, step AR, 2026-11-16)
+
+**Why.** Public test 2 (2026-11-15, build 87a07d10, snapshots off): in S1, S4 and S15 every non-owner client
+computed a remotely released ball differently from the server and the owner (S4 grew into two worlds: the released ball
+off the road in the clients' world, two other balls pushed off in the server's world only). A non-owner applies a remote's
+AirshipRelease at R inside every rewind across R: the rewind for a late release (every one in the data arrived late:
+in the one non-owner capture replayed for both, all 5 of S4 and all 68 of S15 to tick 41 000), and any later rewind
+anchored before R, which applies the release again. The replay loop feeds each named remote its frame for R before
+pre_step; pre_step's `drain_pending_lives(R)` -> `apply_airship_releases` then detaches the navigation
+(`navigation_destroy` erases the entry holding R's keys), remakes the mirror (`physicalize_remote`, remake: the same
+lifetime) and attaches a fresh navigation. The engine's re-feed after pre_step skipped it (named, same generation, not
+a `birth_from_inputs` remake), so the new navigation stood idle through R's step and the held keys' forces came at
+R + 1. The server keeps its navigation across the release (`physics_world::apply_event` -> `navigation->set_ball`) and
+drives R. A diagnostic build logged it at S4's release: `named=1 same_life=1 remade=0 -> not fed`, the new navigation
+`active=0 keys=0 controllers=0` after the step of 16 303 against a frame with keys 6.
+
+**The change.** `rollback_world::navigation_remade(entity, tick)` (optional): pre_step made this remote's navigation
+again within its lifetime; the replay loop then feeds it again as it already did for a body made again from the
+inputs (rollback.hpp, the `replay_remotes` block). The core answers it from `remote_ball::navigation_remade`, the tick
+of the life's last airship release, which `apply_airship_releases` sets after the remake and every new life clears (a
+window birth remade at its stamp, step LB, is the `birth_from_inputs` rule's: 85 of 85 such remakes in the S4 replay
+to 16 400 were fed; the other remakes run at a restore or live, after no feed of theirs, and are not marked).
+`core_world_hooks::navigation_remade` reaches the world through `bind_session_world`, so the retail and the headless
+client both take it. No wire, protocol, journal or engine change; per-core state only. The own ball's release
+replayed in a rewind (`remake_own_body` inside pre_step) is not the same hole on the headless client: the leg below
+forces rewinds across the owner's own release too, and its own rows after R are exact on the builds before and after
+the step (retail's own path not checked).
+
+**Checks, an intervention build on the 87a07d10 base** (an own export with the first form of this diff, the
+replay-only mod patches of the investigation and diagnostic logs; the shipped physics_RT.dll). Dense replays (a
+checkpoint every 2 ticks) against SimTool's dense replays of the server journals; PE_Balloon* and PE_Box_slide left
+out.
+
+| Capture | shipped behaviour | this fix |
+|---|---|---|
+| S4, a non-owner's capture (to 21 568) | first difference 16 304, the released ball (vx, vz -0.50 m/s: two keys' forces); then four more balls at 16 530, 18 626, 20 146, 21 298 | 16 304-21 568: 2 633 shared ticks, no body differs; the controls 17 538 (keys 0x20), 17 734, 20 339, 21 523 (keys 0) exact |
+| S1, another non-owner's capture (to 36 740) | 34 544: the released ball vx -5.4531 against the server's -5.8423 (one key) | exact from 34 544 to 36 740 |
+| S15, a non-owner's capture, chained S13 -> S14 -> S15 (to 40 842) | ball rows differing outside the release-ended airship spans, the three releasing players: 1 778 of 19 700 (from 34 716, one tick after the first release), 237 (from 36 016), 37 (from 40 748) | 0, 0, 0 (inside the spans, the per-world ghosts: 27, 11, 0) |
+
+Before the first release each fixed run equals the shipped-behaviour run row for row (S4 7 807 ticks, S15 17 350),
+and the build computes the shipped world (its control run equals the shipped DLL's S4 replay at all 10 440 FINAL
+ticks). The S1 replay diverged at frame 35 699: the capturing client's own ball, now in the server's world, left the
+zone at 36 832 and proposed a release that the capture, recorded in the forked world, does not hold; its 36 881
+control is past it (the third S1 capture diverges at frame 14 907 with the shipped behaviour too, so it cannot reach it
+either). The two "only server" body rows in S1 (P_Box_MF from 1 786, P_Ball_Paper_MF from 31 530) are the same in the
+shipped replay (a level body removed earlier on the client, as FB's 4 393 case). These replays ran the first form
+of the flag (set at every remake in `physicalize_remote`); the final form (set by the release alone, cleared at a new
+life, after the code review) answers yes at a subset of those ticks, so the two can differ only where a remake other
+than a release was replayed at its own tick without a `birth_from_inputs` feed - not re-run on the captures.
+
+Headless, the arena in slot 13, scenario A0, 4 clients: client 0 starts in sector 4, is beamed into the airship zone
+at 700 and out at 760 and proposes its release (R = 777, K = 16, keys 1 with NAV_ACTIVE held at R - 1 .. R + 1).
+- On time, no rewind across R (client 0 behind a 200 ms delay, the others at 0 ms): K = 21, R = 782; each non-owner
+  applied the release once, live, and its rows from 782 to the next zone entry at 830 equal the server's.
+- A rewind for the late release alone (a downlink spike of 320 ms for 60 ms on clients 1-3 at their tick 774: each
+  rewinds from 776): before the step the released ball is 0.0097 m off at 778 in all three worlds; after, exact. A
+  spike at 766 batches the beam's late events with the release (anchor 752, the beam's birth bumps the generation
+  inside the window) and hides the bug: both builds pass.
+- Forced rewinds across an on-time release (`--force-rollback` 3:8, 5:12 and 2:5 on clients 1-3, `--sparse-capture
+  1`): before the step 26 mirror rows of the released ball differ in each non-owner world, after none - a rewind
+  across R is enough, lateness is not needed. The gate's leg (local, `work/AR/ar_leg.sh`): this scene with client 0
+  forcing 3:8 rewinds as well (its own release replayed), PASS = no FINAL row differing from the server's but the
+  keep-local bodies' and each own ball's inside its own airship spans (zone tick to release, or to the end: the owner
+  is out of the sync from the zone to R by design; the judge's span ends at the beam's Physicalize at 761, so its rc
+  is reported, not the verdict), the release found with keys held at R, a rewind across R in every client and every
+  non-owner's mirror row at R + 1 compared and exact. The binaries before the step: FAIL (72 rows per non-owner, the
+  released ball at 778-920, 26 of them before its next zone entry); this step: PASS.
+
+Unit test `SessionClientCoreAirship.AReleaseReplayedWithHeldKeysDrivesItsTickOnTheNewNavigation`: a remote release
+at 123 replayed by `rewind_for_lifecycle` with keys 6 held; the frame must reach the navigation after the release's
+attach and before the step of 123. It fails with the world's `navigation_remade` left unbound (HEAD's behaviour) and
+passes with it; the fake world binds the hook itself, so the `bind_session_world` wiring is covered by the headless
+leg, not by the test.
+
+**The judges.** `journal_judge.py`'s airship span now ends at the ball's AirshipRelease or its next birth, whichever
+is first (before: the next birth only, so a release fork stayed hidden: S4's first judged difference was 17 160 and
+S15 passed), and `arena_map_test.airship_spans` (the server log's spans, the harness's own verdict) the same, from the
+release's S5 line. Over the references every bodies verdict is unchanged: none of core_ref_s21's twelve arms, the LBM
+intg1 arms, pf_intg1_1 or the L13X leg runs has an AirshipRelease, so no reference holds the bug; only the pre-L13X
+diagnostic runs with releases (already failing) compare more rows. On public test 2's journals (one non-owner's,
+scratch only): S4 FAIL with more mirror rows differing (13 of 218, before 6 of 208), S15 FAIL (11 of 241, before
+PASS). The full gate's L13 leg has no release in its 60 s, and its own-ball excuse (the own ball from its zone tick
+to the run's end) covers the own ball only, never a mirror's post-release rows. Not changed: a span that a beam's
+Physicalize ends (the judge's rule) while the world keeps the ball out of the sync to its release (the headless beam
+scenes only; a player leaves the zone by rolling out).
+
+**Found on the way, not fixed (the zone latch across a rewind).** S4's zone entry at 16 280: the client froze
+the releasing player's mirror at x 2408.4968, 3 mm outside the box face 2408.500, two ticks before the server (frozen from
+16 282 at 2408.5611). The latch log of the replay: the live prediction (before the key edge at 16 277 was relayed)
+had the mirror in the box after 16 279 (x 2408.5407), so the zone listener opened a span at that PSI's clock; the
+correction's replay put it at 2408.4671, outside, yet `airship_zone_contains` answered 2 (a span, not the box) from
+then on. The spans in `physics_state.cpp` (`airship_zone_listener::event_PSI`) are kept by IVP clock and only a new
+entry drops spans entered later than it, so a span the restore's clock moved into the future is read again as open
+when the replay reaches its clock (inferred: the shipped DLL does not show the span table; the answers and the
+positions fit nothing else). Not benign: a mirror caught this way that never enters in the corrected path stays a
+frozen, collision-free ghost until its owner's next birth, with no release to end it. A fix: at each PSI first drop
+every span entered at or after the PSI's clock (and reopen one closed at or after it), so a replay re-derives its own
+entries; it lives in physics_RT.dll's bridge code (a DLL rebuild, a retail proof with the handshake-hash replay
+patch), and the own release's undo (`airship_zone_release(..., undo)`, which finds its span by release tick) must be
+checked against it. S15's one-tick entry-note differences were not traced to it.
+
+**Not exercised:** retail play of a release with held keys; an on-time release in retail (none in the data); the
+final form of the flag on the public-test captures (the replays above ran the first form); the L13 drives' releases
+(they release with the navigation off); S1 after 36 832 and its 36 881 control; S15 in the other two captures; the
+own release replayed on retail; the latch fix.

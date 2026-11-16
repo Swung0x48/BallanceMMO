@@ -233,6 +233,11 @@ namespace bmmo::session {
             // replay_remotes): born_tick, or the tick its navigation was
             // attached when that came later.
             uint32_t driven_from = 0;
+            // Step AR: the tick of this life's last airship release, which
+            // made the body and its navigation again in the same lifetime: a
+            // replay feeds that tick's frame again after pre_step
+            // (rollback_world::navigation_remade).  0 from each new life on.
+            uint32_t navigation_remade = 0;
             // Step LB: the Physicalize the current body was made from, when
             // it was made at its stamp (inside a replay, or live on time):
             // every later restore anchored before born_tick makes it again

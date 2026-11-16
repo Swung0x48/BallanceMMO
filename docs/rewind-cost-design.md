@@ -2404,6 +2404,20 @@ written (`wake_mode::wake_moving`, `ensure_in_simulation_now`); with the old
 `wake` the revive at the next PSI started it from rest, and every release left
 the ball at about 18% of its speed - no one could cling to the spiral.
 
+*Step AR (2026-11-16, public test 2):* a remote's release applied inside a
+rewind (any rewind across R: the one for a late release, or a later one that
+applies it again) remakes the mirror and its navigation in the replayed tick's
+pre_step, in the same lifetime, after the engine has fed that tick's frame to
+the navigation it replaces. The engine now feeds such a mirror again after
+pre_step (`rollback_world::navigation_remade`, the core's
+`remote_ball::navigation_remade`), so its held keys drive R as the server's
+navigation, kept across the release (`navigation->set_ball`), does; before,
+their forces came at R + 1 in every non-owner world (S1, S4, S15). The judge
+(`journal_judge.py`) ends a ball's airship span at its AirshipRelease as well
+as at its next birth: the release puts the owner's state into every world, so
+the ball is compared again from the release's row (`arena_map_test.py`'s
+spans too). The ghost inside the span stays per world. Details: `docs/realtime-design.md`, "Built (... step AR ...)".
+
 ## As built (step BALA)
 
 (Step BALL, below SPGH2's note: the relayed pose is retired at protocol 17 -

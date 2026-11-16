@@ -1492,6 +1492,9 @@ namespace bmmo::session {
                     body.rotation[axis * 3 + axis] = 1.0f;
                 }
                 if (!physicalize_remote(body, tick)) continue;
+                // Step AR: in a replay this runs in pre_step, after the
+                // tick's frame went to the navigation just destroyed.
+                remote->second.navigation_remade = tick;
             }
             s.mechanism_tracking_.mark_dirty();
             bmmo_physics_body_state state{};

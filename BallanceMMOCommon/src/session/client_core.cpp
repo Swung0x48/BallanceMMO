@@ -191,6 +191,17 @@ namespace bmmo::session {
             out = it->second;
             return true;
         };
+        // Step AR: a mirror whose airship release this replayed tick's
+        // pre_step applied keeps its lifetime, so the engine would not feed
+        // it again: the frame of the tick went to the navigation the remake
+        // destroyed, and the new one stood idle through the tick's step (the
+        // held keys' forces came a tick late) where the server's navigation,
+        // kept across the release, drives it.
+        world_hooks_.navigation_remade = [this](const std::string& entity, uint32_t tick) {
+            for (const auto& [id, remote]: s.remotes_)
+                if (remote.entity == entity) return remote.navigation_remade == tick;
+            return false;
+        };
         // The mechanism bodies a replayed tick has: the same list the live
         // record takes (tracked.mechanisms in the frame), so a body the
         // replay made before the live frames did is recorded from the

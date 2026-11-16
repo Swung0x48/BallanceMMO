@@ -1374,6 +1374,7 @@ namespace bmmo::session {
             remote.physicalized = true;
             remote.born_tick = first_tick;
             remote.driven_from = first_tick;
+            remote.navigation_remade = 0;   // step AR: an earlier life's release is not this one's
             // Made at its stamp: every later restore anchored before it can
             // make it again the same way (step LB).
             remote.birth = event;

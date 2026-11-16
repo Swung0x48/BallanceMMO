@@ -206,6 +206,9 @@ namespace bmmo::session {
         // The generation the core holds now for a mirror's name (step GL1;
         // rollback_world::remote_generation).
         std::function<bool(const std::string& entity, uint32_t& generation)> remote_generation;
+        // Whether the before_replayed_tick of `tick` made this mirror's
+        // navigation again (step AR; rollback_world::navigation_remade).
+        std::function<bool(const std::string& entity, uint32_t tick)> navigation_remade;
         // The mechanism bodies the world has after a replayed step: the
         // list the live records track (rollback_world::replay_mechanisms).
         std::function<std::vector<std::string>()> replay_mechanisms;

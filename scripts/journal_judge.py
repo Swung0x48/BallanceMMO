@@ -26,7 +26,8 @@ judgment table (and, with --json, writes it): every row a check, a verdict
                    unconfirmed rows before the session's last 128 ticks (the
                    ones its end retires: rollback.hpp kReachHistoryTicks), or
                    compared rows that stop before them.  A ball in its airship
-                   span (BALA: per world, never compared) and the rows up to a
+                   span (BALA: per world, never compared; from its zone entry
+                   to its AirshipRelease or next birth) and the rows up to a
                    join's import are left out; PE_Balloon and PE_Box_slide
                    (resync_rules.hpp's keep-local bodies, the user's "fix
                    everything except the balloon") too, reported on their own.
@@ -268,22 +269,26 @@ def check_replay(table, server, args):
 # -- 3. bodies ---------------------------------------------------------------
 
 def airship_spans(journal, events_journal=None):
-    """player -> [(zone tick, next birth tick)): the ball's airship span (BALA),
-    from the journal's airship NOTEs to the player's next Physicalize, as
-    arena_map_test.airship_spans has it from the server log."""
+    """player -> [(zone tick, end tick)): the ball's airship span (BALA), from
+    the journal's airship NOTEs to the player's next AirshipRelease or
+    Physicalize, whichever comes first.  Inside the span the ball is a ghost
+    of each world's own; the release puts the owner's state into every world
+    at its tick, so from the release's row on the ball is compared again
+    (step AR: a release that ended no span hid a non-owner world's release
+    fork)."""
     own = journal.header['own_player']
     zones = collections.defaultdict(set)
     for note in journal.notes:
         m = RE_AIRSHIP.match(note['text'])
         if m:
             zones[int(m.group(1)) if m.group(1) else own].add(int(m.group(3)))
-    births = collections.defaultdict(list)
+    ends = collections.defaultdict(list)   # Physicalize (0) and AirshipRelease (6)
     for e in (events_journal or journal).events():
-        if e['type'] == 0:
-            births[e['id']].append(e['tick'])
+        if e['type'] in (0, 6):
+            ends[e['id']].append(e['tick'])
     spans = {}
     for player, ticks in zones.items():
-        spans[player] = [(z, min([b for b in births[player] if b > z] or [1 << 31])) for z in sorted(ticks)]
+        spans[player] = [(z, min([b for b in ends[player] if b > z] or [1 << 31])) for z in sorted(ticks)]
     return spans
 
 

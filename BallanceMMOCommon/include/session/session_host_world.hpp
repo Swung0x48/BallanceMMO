@@ -677,6 +677,7 @@ namespace bmmo::session {
         binding.capture_lookup_verify = hooks.capture_verify;   // FULL step SRT2B
         rollback_world world = bind_rollback_world(backend, binding);
         world.remote_generation = hooks.remote_generation;   // step GL1
+        world.navigation_remade = hooks.navigation_remade;   // step AR
         world.after_step = o.after_replayed_step;   // step N02R
         // Step G3 (world agreement 2.5): the proximity union's place point
         // of every replayed tick, the core's (empty when the session does

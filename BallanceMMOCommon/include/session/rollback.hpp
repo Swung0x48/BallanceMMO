@@ -331,6 +331,11 @@ namespace bmmo::session {
         // rewind of the same frame anchored before the death, and that
         // replay ran without the body.
         std::function<bool(const std::string& entity, uint32_t& generation)> remote_generation;
+        // Optional (step AR): whether pre_step(tick) made this remote's
+        // navigation again within its lifetime (an airship release).  The
+        // feed before pre_step went to the navigation that replaced, so the
+        // remote is fed again, as one born just now.
+        std::function<bool(const std::string& entity, uint32_t tick)> navigation_remade;
         // Optional (docs/world-agreement-gaps-design.md 2.5, step G3): the
         // proximity union's place point of a replayed tick - before
         // anything of tick `tick`: the window-born re-creations and
@@ -2466,9 +2471,13 @@ namespace bmmo::session {
                         step_tracked.generations[entity] = generation;
                         // Made again by pre_step at this, its birth tick, from
                         // the inputs (birth_from_inputs): its navigation is the
-                        // one made with it, after the feed above.
+                        // one made with it, after the feed above.  Or its
+                        // navigation made again by the caller in pre_step
+                        // (step AR: an airship release's remake, which keeps
+                        // the lifetime).
                         const auto made = plan.find(entity);
-                        const bool remade = made != plan.end() && made->second.from_inputs && made->second.repose_tick == t;
+                        const bool remade = (made != plan.end() && made->second.from_inputs && made->second.repose_tick == t)
+                                         || (world.navigation_remade && world.navigation_remade(entity, t));
                         if (named && same_life && !remade) continue;
                         // Named, but under the lifetime that went (a same-name
                         // death and birth at one stamp), or made again just now:

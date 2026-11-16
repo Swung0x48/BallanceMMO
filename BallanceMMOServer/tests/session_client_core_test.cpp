@@ -11992,6 +11992,76 @@ namespace {
         EXPECT_EQ(state.own_airship_release_, 0u);
     }
 
+    // Step AR (public test 2, S1 / S4 / S15): a remote's release replayed
+    // inside a rewind makes its mirror and navigation again in pre_step,
+    // within the same lifetime.  The engine fed the tick's frame before
+    // pre_step, to the navigation that went, so it feeds it again: the held
+    // keys drive the release tick on the new navigation, as the server's
+    // navigation, kept across the release, does.  Before, their forces came
+    // a tick late in every non-owner world.
+    TEST(SessionClientCoreAirship, AReleaseReplayedWithHeldKeysDrivesItsTickOnTheNewNavigation) {
+        flow_fake fake;
+        auto platform = fake.make_flow();
+        platform.bind_world = [&fake](const bmmo::session::core_world_hooks& hooks) {
+            bmmo::session::rollback_world world;
+            world.get_body = [](const std::string&, bmmo_physics_body_state&) { return false; };
+            world.get_nav = [](const std::string&, bmmo_physics_nav_state&) { return false; };
+            world.set_body = [](const std::string&, const bmmo_physics_body_state&, bmmo::session::wake_mode, bool) {
+                return true;
+            };
+            world.nav_input = [&fake](const std::string& entity, const bmmo::session::input_frame& frame) {
+                fake.calls.push_back("nav_input:" + entity + ":" + std::to_string(frame.keys));
+                return true;
+            };
+            world.nav_poll = [](const std::string&, bool) { return true; };
+            world.step = [&fake]() {
+                fake.calls.push_back("step");
+                return true;
+            };
+            // What bind_session_world puts there.
+            world.pre_step = hooks.before_replayed_tick;
+            world.replay_remotes = hooks.replay_remotes;
+            world.navigation_remade = hooks.navigation_remade;
+            return world;
+        };
+        session_client_core core(std::move(platform), session_capabilities{});
+        run_to_tick_125_four(core, fake);
+        core.config.rollback = true;
+        core.config.lifecycle_rewind = true;
+        auto& state = state_of(core);
+        const std::string mirror = "Ball_0_BMMO_5";
+        auto& five = state.remotes_[5];
+        five.entity = mirror;
+        five.physicalized = true;
+        five.navigation = true;
+        five.born_tick = five.driven_from = 100;
+        five.birth.player = 5;
+        five.birth.tick = 100;
+        state.generations_[mirror] = 1;
+        bmmo::session::input_frame held{};
+        held.keys = 6;
+        held.flags = bmmo::session::INPUT_FLAG_NAV_ACTIVE;
+        bmmo::session::rollback_tracked tracked;
+        tracked.remote_entities = {mirror};
+        tracked.generations[mirror] = 1;
+        for (uint32_t tick = 118; tick <= 125; ++tick) {
+            five.inputs[tick] = held;
+            state.rollback_.record(core.platform().bind_world(bmmo::session::core_world_hooks{}), tick, tracked,
+                                   {{mirror, held}});
+        }
+        state.airship_releases_.push_back({5, 123, {}});
+        const size_t from = fake.calls.size();
+        steps{core}.rewind_for_lifecycle(5, 123);
+        EXPECT_EQ(state.life_rewinds_, 1u);
+        const auto calls = since(fake.calls, from);
+        const auto attach = std::find(calls.begin(), calls.end(), "attach_mirror_navigation:5:" + mirror);
+        ASSERT_NE(attach, calls.end()) << "the release remade the mirror in the replay";
+        const auto step = std::find(attach, calls.end(), std::string("step"));
+        ASSERT_NE(step, calls.end());
+        EXPECT_NE(std::find(attach, step, "nav_input:" + mirror + ":6"), step)
+            << "the release tick's held keys reach the new navigation before its step";
+    }
+
 }
 
 // FULL step R6H: the own-event hold both hosts run (session/event_hold.hpp) and
