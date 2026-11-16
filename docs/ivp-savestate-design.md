@@ -551,6 +551,20 @@ the parking path remains as the A/B (`--park-births`).
 * `worst_bodies.py` compared journal keys by name, and the player's ball is
   keyed by its session-specific player id: the one body the test was about
   was never compared. It now pairs the single ball of two solo journals.
+* A force block outlives its body's controller (step FB, engine change #27).
+  A deleted core takes its `PhysicsControllerForce` off and clears its
+  `m_Core`; the block keeps the pointer until its script's next pass shuts it
+  down. A rewind in the removal's own frame, with the body remade by the
+  core, found that orphan, rewrote its point and force and left the remade
+  body without the push: the record had the controller (`unit:...` on the
+  core), the restored blob did not (public test 2, S14, anchor 2037). The
+  state now reports an orphan as none and the restore deletes it and makes
+  the recorded controller on the target's body; step 12 orders it. A
+  controller on a live body is only rewritten. SimTool regression:
+  `--drop-revive TICK` (a ball in Level 13's start fan unphysicalized inside
+  the window and made again at every restore across it; a second ball holds
+  the fan on, so the orphan lives on to the restore, which in the product it
+  does only for the removal's frame).
 
 ## Record size
 

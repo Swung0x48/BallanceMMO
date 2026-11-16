@@ -241,6 +241,14 @@ namespace {
         // --drop-kill-player ID (stage A close-out step S2, V4b): --drop-kill
         // unphysicalizes only that player's ball (1 or 2); 0 = both.
         uint32_t drop_kill_player = 0;
+        // --drop-revive TICK (step FB): inside a --savestate-check window,
+        // player 1's ball unphysicalized before the step that makes record
+        // TICK, and made again at the restore of a rewind across TICK (the
+        // client core's revive of its own ball): a force block on the ball
+        // still holds the controller of the deleted body (it shuts down on
+        // its script's next pass), and the restore must put it on the body
+        // the rewind made.
+        long long drop_revive = -1;
         // --late-ball TYPE X Y Z TICK (close-out step S2, RO2 deferred (b)):
         // in a --late-run, player 1's ball of TYPE physicalized at rest at X Y
         // Z before root+TICK (a tick after A), the same in the control, the
@@ -854,6 +862,11 @@ namespace {
             if (!(v = next())) return false;
             out.drop_kill = std::atoll(v);
             if (out.drop_kill < 0) return false;
+        }
+        else if (arg == "--drop-revive") {   // step FB
+            if (!(v = next())) return false;
+            out.drop_revive = std::atoll(v);
+            if (out.drop_revive < 0) return false;
         }
         else if (arg == "--drop-kill-player") {   // close-out step S2 (V4b)
             if (!(v = next())) return false;
@@ -4018,6 +4031,51 @@ namespace {
         bool restore_refused = false;
         uint64_t owner_decided = 0, owner_ambiguous = 0;   // step F3X: the restores' savestate_report counts, summed
         bmmo::physics::physics_direct backend(physics);
+        // Step FB: --drop-revive.  The kill before the step that makes record
+        // `tick` (the straight pass, every replay of that step, every re-made
+        // live world); from it on the records give the ball's name the next
+        // generation, so a rewind across it finds the life ended and the
+        // core's half of restore_lives (the passes binding below) makes the
+        // ball again at the restore where the anchor had it, as a client's
+        // core revives its own ball; the replayed tick takes it away again.
+        const std::string revive_ball = args.drop_revive >= 0 ? world->player_ball_entity(1) : std::string();
+        std::map<uint32_t, std::array<float, 3>> revive_poses;   // the ball's position at each straight record
+        uint32_t revive_generation = 0;
+        int kills = 0, revives = 0;
+        std::string revive_error, revive_forces;
+        const auto kill_before = [&](uint32_t tick) {
+            if (args.drop_revive < 0 || static_cast<long long>(tick) != args.drop_revive) return;
+            bmmo::sim::lifecycle_event death;
+            death.type = bmmo::session::event_type::Unphysicalize;
+            death.tick = tick;
+            std::string error;
+            if (!world->player_physicalized(1) || !world->apply_event(1, death, error))
+                revive_error = "--drop-revive: player 1's ball not unphysicalized at tick " + std::to_string(tick) + " " + error;
+            else
+                ++kills;
+        };
+        const auto revive_at = [&](uint32_t anchor) {   // the ball made again where the record of `anchor` had it
+            const auto pose = revive_poses.find(anchor);
+            if (revive_ball.empty() || world->player_physicalized(1) || pose == revive_poses.end()) return false;
+            bmmo::sim::lifecycle_event birth;
+            birth.type = bmmo::session::event_type::Physicalize;
+            birth.tick = anchor;
+            birth.ball_type = static_cast<uint8_t>(args.drop_ball);
+            birth.recipe = world->retail_recipe(birth.ball_type);
+            for (int k = 0; k < 3; ++k) birth.position[k] = pose->second[k];
+            std::string error;
+            if (!world->apply_event(1, birth, error)) {
+                revive_error = "--drop-revive: the ball not made again at the restore of " + std::to_string(anchor) + ": " + error;
+                return false;
+            }
+            ++revives;
+            return true;
+        };
+        const auto revive_lives = [&](uint32_t anchor, uint32_t, const std::vector<bmmo::session::ended_life>& ended, bool,
+                                      std::map<std::string, bmmo::session::life_outcome>& out) {
+            for (const auto& life: ended)
+                if (life.name == revive_ball && revive_at(anchor)) out[life.name].revived_until = life.end_tick;
+        };
         bmmo::session::rollback_binding_options binding_options;
         binding_options.delta_ms = bmmo::session::TICK_DELTA_MS;
         binding_options.savestate = !legacy;
@@ -4068,6 +4126,7 @@ namespace {
             // (the restored balls), the hold put back with the step state
             // (restore_step_state).  Step UOFF: always (the bit-clear
             // place_legacy is gone).
+            kill_before(tick);   // step FB: where the straight pass makes it, before the probes
             if (frames) world->place_probes();
         };
         binding_options.on_savestate_restored = [&](bool ok, const std::string& error, const bmmo::session::savestate_outcome&) {
@@ -4146,6 +4205,7 @@ namespace {
             bmmo::session::core_world_hooks core;
             core.replay_mechanisms = [physics]() { return bmmo::physics::movable_body_names(physics); };
             core.ball = is_ball;
+            if (args.drop_revive >= 0) core.restore_lives = revive_lives;   // step FB: the core's half, the ball
             bmmo::session::session_world_options so;
             so.binding = binding_options;
             so.before_replayed_tick = binding_options.before_replayed_tick;
@@ -4582,9 +4642,15 @@ namespace {
             if (passes) {   // step S7: the body set changes at the pass
                 tracked.mechanisms = bmmo::physics::movable_body_names(physics);
                 tracked.generations = pass_generations;
+                if (revive_generation) tracked.generations[revive_ball] = revive_generation;   // step FB
                 rec.bodies = tracked.mechanisms;
                 std::sort(rec.bodies.begin(), rec.bodies.end());
             }
+            bmmo_physics_body_state revive_body{};   // step FB: where a revive at this anchor makes the ball
+            std::string no_body;
+            if (!revive_ball.empty() && backend.get_body_state(revive_ball.c_str(), revive_body, no_body))
+                revive_poses[t] = {static_cast<float>(revive_body.position[0]), static_cast<float>(revive_body.position[1]),
+                                   static_cast<float>(revive_body.position[2])};
             engine.record(binding, t, tracked, no_inputs);
             if (!legacy) {
                 const std::vector<uint8_t>* recorded = engine.recorded_savestate(t);
@@ -4609,6 +4675,19 @@ namespace {
                 moves_before(t);
                 capture_pending(rec);   // close-out step FX2
             }
+            if (!revive_ball.empty() && static_cast<long long>(t + 1u) == args.drop_revive) {   // step FB
+                // The force blocks pushing the ball when it goes: none, and
+                // the scene exercises nothing.
+                CKObject* ball = context->GetObjectByNameAndParentClass(const_cast<CKSTRING>(revive_ball.c_str()),
+                                                                        CKCID_3DENTITY, nullptr);
+                revive_forces = ball ? bmmo::game::script_replay::describe_force_blocks(context, scripts, hooks, ball->GetID())
+                                     : std::string();
+                std::printf("savestate-check: tick=%u %s unphysicalized (--drop-revive), its force blocks: %s\n", t + 1u,
+                            revive_ball.c_str(), revive_forces.empty() ? "none" : revive_forces.c_str());
+            }
+            const int kills_before = kills;
+            kill_before(t + 1u);
+            if (kills != kills_before) revive_generation = 1;   // step FB: the ball's next life from record t+1 on
             if (!step(error)) {
                 std::fprintf(stderr, "savestate-check: the straight pass's step at tick %u failed: %s\n", t, error.c_str());
                 return 1;
@@ -4895,6 +4974,7 @@ namespace {
                         backend.set_event_log_muted(false, mute_error);
                     }
                     world->restore_step_state(straight[0].counters);
+                    revive_at(t0);   // step FB: a rewind to t0 alone has no window to find the ended life in
                     take_capture_cache();
                     engine = pristine;
                     engine.forget_after(t0);
@@ -4908,6 +4988,7 @@ namespace {
                         // the straight pass and do not do again here.
                         reissue_pending(straight[static_cast<size_t>(i)], t0 + static_cast<uint32_t>(i));
                         put_step_globals(t0 + static_cast<uint32_t>(i));
+                        kill_before(t0 + static_cast<uint32_t>(i) + 1u);   // step FB
                         ++remake_steps;
                         if (!step(remake_error)) {
                             std::fprintf(stderr, "savestate-check: re-stepping round %zu's live world failed: %s\n", r,
@@ -5229,6 +5310,7 @@ namespace {
                     // at the rewind's end (end_of_rewind, close-out step DX4),
                     // before the compare at e; not again here.
                     std::string follow_error;
+                    kill_before(t + 1u);
                     if (!step(follow_error)) { failure = "follow: the step at " + std::to_string(t) + " failed: " + follow_error; break; }
                     bmmo::physics::drain_event_log(physics);
                     ++follow_ticks;
@@ -5423,7 +5505,12 @@ namespace {
                     " name alone would have taken another, %llu ambiguous\n", static_cast<unsigned long long>(owner_decided),
                     static_cast<unsigned long long>(owner_ambiguous));
         const bool owners_ok = census_ties == 0 && owner_ambiguous == 0 && (args.holds.empty() || owner_decided > 0);
-        const bool pass = failed == 0 && run == static_cast<int>(schedule.size()) && (!trafo || trafo->failures() == 0)
+        if (args.drop_revive >= 0)   // step FB
+            std::printf("savestate-check: revive (step FB): ball %s killed %d time(s) at tick %lld, made again at %d restore(s)%s%s\n",
+                        revive_ball.c_str(), kills, args.drop_revive, revives, revive_error.empty() ? "" : "; ",
+                        revive_error.c_str());
+        const bool revive_ok = args.drop_revive < 0 || (revives > 0 && revive_error.empty() && !revive_forces.empty());
+        const bool pass = revive_ok && failed == 0 && run == static_cast<int>(schedule.size()) && (!trafo || trafo->failures() == 0)
                        && (!passes || ((passes_made > 0 || window_moves.empty()) && pass_recreate_failures == 0
                                        && pass_missing == 0 && fixed_births_missing == 0))
                        && owners_ok;
@@ -9902,6 +9989,8 @@ namespace {
             why = "--drop-kill: after the drop (--drop-settle), and with --savestate-check before the window (the lead)";
         else if (args.drop_kill_player && args.drop_kill < 0)
             why = "--drop-kill-player goes with --drop-kill";
+        else if (args.drop_revive >= 0 && (!args.savestate_check || args.drop_entity.empty() || !args.trafo.players.empty()))
+            why = "--drop-revive: the drop scene's --savestate-check, without trafo inputs";
         else if (args.late_ball.type >= 0
                  && ((!args.late_sector_check && args.late_run.empty()) || args.late_ball.tick <= args.late_a))
             why = "--late-ball: with --late-sector-check, its tick after A";

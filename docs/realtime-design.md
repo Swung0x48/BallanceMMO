@@ -4758,3 +4758,99 @@ original level's airship zone (no driven recipe reaches one; the arena loaded in
 changed: any in-tolerance
 snapshot correction still writes awake rows without their record extra and parts a world by about 1e-9 (L13X
 diagnosis, item 3); `arena_map_test.py`'s snapshots-on default without `--scenario`.
+
+## Built (a force block's controller follows its ball through a rewind, step FB, 2026-11-16)
+
+**Why.** Public test 2 (2026-11-15, build 87a07d10, snapshots off), S14: one client (client A below) parted from the
+server at tick 2 038 and never healed (56 of 59 FINAL rows differ, no resync). A pause-menu restart removed its paper
+ball at 2 041 while it hung in the start fan (P_Modul_18_MF002, its unit's force block `unit:P_Modul_18_MF002/11/S4`),
+and a late remote input rewound 2 041 -> 2 037 in the same frame. The core remade the ball for 2 037-2 041; the script
+restore found the fan block still holding the controller of the deleted body (`core_is_going_to_be_deleted_event`
+had cleared its `m_Core`, the block keeps the pointer until its Shutdown), rewrote that orphan's point and force,
+and the remade ball ran the replayed ticks without the fan's push. `--savestate-diff` of anchor against
+after-restore: byte-identical at the anchors 2 023 and 2 031, at 2 037 only the core's `unit:...S4` controller
+missing.
+
+**Why another client's revive in the same session kept its controller (client B, the control).** A trace build
+(physics_RT printing every force block event with the CK frame, an own export of 87a07d10) replayed both captures.
+The fan block's Shutdown came one frame after the removal, its target reading `BMMO_NoBall` by then. Client B:
+removal at 2 497 (frame F, core deleted), at F+1 the fan block's Shutdown deleted the orphan and cleared local 0,
+then the same frame's rewind (anchor 2 488, now 2 498) restored the block from NULL through the create path onto the
+remade ball - exact. Client A: removal at 2 041 and the rewind in that same frame, before the fan's next pass: the
+restore met the orphan. The trigger is a rewind whose live tick is the removal's own tick, with a force block on the
+removed body.
+
+**The change (engine change #27, `physics_RT/Behaviors/PhysicsForce.cpp`).** `BmmoPhysicsForceBlockState` reports
+a controller with no core as none; `BmmoPhysicsForceBlockRestore` deletes such an orphan as it deletes a controller
+the record does not have, and a record with one then makes it on the target's body through the existing create path.
+A controller still on a body is only rewritten, as before, whichever body it pushes: the cause is the orphan alone,
+and when the block is restored its target may not be yet (`restore_behavior` restores a block's tail during the
+walk, a target fed from a sibling or another script is written later), so a rule that also moved a live controller
+to "the target's current body" could move a correct one onto the wrong body. Not "re-create every controller every
+restore". The savestate restore, which follows the script restore, puts the core's and the unit's controller order
+back (step 12, matched by the block's name), so the re-made controller takes its recorded place; the F3X owner check
+still passes (40/40, 24 placed by owner, 0 ambiguous). No struct, record, bridge API or savestate format change.
+Accepted limit: an orphan and no controller differ for one input only, a Create before the Shutdown (a no-op on an
+orphan, a creation on none). Recorded as none, an orphan anchor replayed with such a Create inside the window makes a
+pushing controller the live world never had; before the change that order was faithful and the opposite one (an
+orphan anchor restored after the Shutdown) was not. Neither is exact without a third recorded state; the force
+scripts checked alternate the two edges (P_Modul_18 through its TurnON / TurnOFF permissions, P_Modul_26 through its
+Sequencer), so there the sequence does not occur. The other blocks with a per-body handle are not the same hole: the
+joint and spring blocks (Hinge, Ball Joint, Slider, Spring) hold an IVP constraint or actuator that IVP deletes itself
+with the core (the local dangles; the session releases joint handles when it destroys a body), Buoyancy keeps only a
+flag, and `PhysicsCollDetection` keeps an orphan listener the same way but no record or restore carries listener
+state.
+
+**Checks.** SimTool `--drop-revive TICK` (new, `sim_tool.cpp`; drop scene, `--savestate-check --frames`): player
+1's ball unphysicalized before the step that makes record TICK (straight pass, replays, re-made live worlds), the
+records give it the next generation from TICK on, and the core's half of `restore_lives` makes it again where the
+anchor had it, as a client's core revives its own ball; the run fails when no force block pushes the ball at the
+kill. The scene: a paper ball in P_Modul_18_MF002's fan with a second ball beside it, `--level 13 --savestate-check
+--frames --drop A01_Floor_01 0 --drop-player-at -1217 8.3 935.5 --drop-second-ball 0 -1218.5 8.3 935.5 --ticks 40
+--savestate-lead 44 --drop-revive 90 --savestate-rounds 80:10,86:4,88:3,89:1,85:12,91:3`. HEAD: FAIL round 0,
+`core of 'Ball_Paper_BMMO_1': no live controller 'force:P_Modul_18_MF002/11'`; the fix: PASS 6/6 (and 40/40 at
+seeds 1 and 7 with `--rounds 40 --drop-revive 100 --capture-cache verify`). The same scene with the ball away from any fan fails as vacuous (no force block).
+With `--player-mechanisms 2`, the product's slot layout, HEAD passes too, and the trace says why: each ball has its
+own fan unit there, so the removed ball's fan shuts its block in the frame after the removal (target `BMMO_NoBall`,
+client B's order), and every round of the check restores many frames later, from a NULL local, through the create
+path. In the shared layout the second ball holds the fan on, the block is never shut, and every restore across the
+kill meets the orphan. The orphan lives at a restore in the product only when the rewind runs in the removal's own
+frame, which no `--savestate-check` round does; so the scene checks the restore of an orphan (the state the product
+meets for that one frame), and the product path itself is covered by the public-test replay below. The gate runs the
+scene after the owner check.
+
+Real case, an intervention build on the 87a07d10 base (an own export with the engine, this fix as the only engine
+change, the replay-only mod patches of the investigation plus one more: the session handshake carries
+physics_RT.dll's sha256, so a rebuilt DLL diverged at that send until the mod reported the shipped DLL's hash in a
+replay). The local build computes the shipped world: unfixed, its FINAL rows equal the shipped DLL's run row for row
+(15-2 003, 1 989 ticks), and its anchor 2 023 / 2 031 / 2 037 blobs equal the shipped run's but for 23 unused slots
+of the object cache ring (`object=-`) and, in the fixed run, the ring's reuse index.
+
+| client A's S14 replay, dense (checkpoint every tick) | anchor 2 037: record vs after restore | FINAL rows vs the server's dense FULL rows |
+|---|---|---|
+| shipped DLL | differ: `unit:P_Modul_18_MF002/11/S4 @Ball_Paper` missing | first differing tick 2 038; 3 334 of 5 357 shared ticks differ to 5 371 |
+| re-create every controller (diagnostic) | identical | equal 1 900-2 597 (stopped at 2 700) |
+| the first form of the fix (a controller kept only on the target's body) | identical (2 023, 2 031, 2 037) | 5 486 of 5 489 shared ticks equal (15-5 503); 4 393-4 395 below |
+| this fix (the orphan only), stopped at 5 500 | - | 5 354 of 5 357 shared ticks equal (15-5 371); 4 393-4 395 below |
+
+The full replay diverged at frame 6 061 of 39 712 and the process then hung. The divergence follows from the fix:
+with the fork gone, client A's own ball follows the server's world, where it rolled off the course at about 5 590
+(server y -8.3 at 5 580, -52 at 5 660), while its live, forked world kept it on the course (y -7.9 at its FINAL
+5 940); the corrected client's BallOff changed its own input send (ticks 5 645-5 646), and a capture recorded in the
+forked world cannot be followed past that. The hang came after it: the hang watch's dump has the main thread in
+`std::this_thread::sleep_until` under `BallanceMMOClient::OnProcess` (the frame pacing), not in physics. The three
+differing ticks are a second, separate difference that FB did not make: `P_Ball_Stone_MF001` (a level stone ball
+falling below y -1 000 off the course) has rows on the server at 4 393-4 395 and none on the client from 4 393 (none
+on either from 4 396; every other body equal there). Client B's S14 replayed the same way shows the same three ticks
+with the fix and with the shipped DLL (rows 15-4 423 otherwise equal), so it predates the change: the clients remove
+that falling mechanism three ticks before the server's world - open, cause not traced (the dense server rows are
+SimTool's replay of the server journal; the server's own FULL rows have no checkpoint at those ticks).
+
+**Not exercised / open:** retail play of the case; a server with the fix producing a RESYNC with a force block on a
+removed ball (the state now reads none there: the blob's bytes move, a body does not); a rewind whose live tick is the
+removal of a ball under another module's force block than the fan (the same code path); a Create input before the
+Shutdown on an orphan in force scripts other than P_Modul_18 and P_Modul_26 (the accepted limit above); a headless
+session test of the same-frame case (a beam out of the arena fan with a forced rewind across it does not hit it:
+the fan's Shutdown comes first there too); client A's S14 after 5 646 (needs another capture of that world); the
+4 393 stone-ball removal timing (open, above).
+

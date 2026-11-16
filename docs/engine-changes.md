@@ -1051,6 +1051,37 @@ Retail: CK2 is the headless engine's only (retail runs the 2002 CK2.dll); physic
 where nothing displays the times. K7's capture reads only BallanceMMO's named clock sites
 (`session/clock_site.hpp`), not the engine's timer.
 
+## 27. A force block's orphaned controller reads and restores as none (physics_RT)
+
+File: `Source/BuildingBlocks/physics_RT/Behaviors/PhysicsForce.cpp` (`BmmoPhysicsForceBlockState`,
+`BmmoPhysicsForceBlockRestore`, the bridge's helpers of API v14; the block's own code is untouched).
+
+When a body is deleted, `PhysicsControllerForce::core_is_going_to_be_deleted_event` takes the controller off the
+core and clears `m_Core`, but the block keeps the pointer in local 0 until its Shutdown input deletes it. In the
+traced case (P_Modul_18's fan) the Shutdown came one frame after the removal, with the block's target reading
+`BMMO_NoBall`, so the orphan lived one frame. A rollback whose live tick is the removal's own tick (public test 2,
+S14: a pause-menu restart removed a client's paper ball at 2041 under the start fan and a late remote input rewound
+2041 -> 2037 in the same frame) meets it: the core remakes the ball for 2037-2041, the script restore found a
+controller and only rewrote its point and force, the remade ball ran the replayed ticks without the fan's push, and
+the world forked from 2038 and never healed.
+
+Now the state reports an orphan (no `m_Core`) as no controller, and the restore deletes an orphan as it deletes a
+controller the record does not have; a record that has one then makes it on the target's body through the existing
+create path (`new PhysicsControllerForce`, `SetBehavior`). A controller still on a body is only rewritten, as before:
+the block's target may not be restored yet when the block is (a target fed from a sibling or another script is
+written later in the walk), so the restore does not move a live controller to another body. The savestate restore
+that follows the script restore puts the core's and the unit's controller order back (step 12; the controller's
+name is the block's, engine change #18), so a re-made controller takes its recorded place.
+
+Accepted limit: an orphan and no controller differ for one input only, a Create before the Shutdown (a no-op on an
+orphan, a creation on none). An anchor that recorded an orphan as none, replayed with such a Create inside the
+window, makes a pushing controller the live world never had; before the change that order was faithful and the
+opposite one (an orphan anchor restored after the Shutdown) was not. Neither is exact without a third recorded state.
+The force scripts checked alternate the two edges (P_Modul_18 through its TurnON / TurnOFF permission locals,
+P_Modul_26 through its Sequencer's two outputs), so there the sequence does not occur. No struct, record, savestate
+format, bridge API or protocol change (the bridge's `exists` keeps its meaning); physics_RT.dll's hash changes, so
+the session handshake refuses a client with the old DLL.
+
 ---
 
 ## Bridge notes: the script replay's record, version 2 (no engine change)
