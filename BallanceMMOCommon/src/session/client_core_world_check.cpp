@@ -40,6 +40,14 @@ namespace bmmo::session {
             for (const auto& [id, remote]: s.remotes_)
                 if (in_zone(remote.entity)) latched.push_back(id);
         });
+        // Step ZRX: a release applied at tick + 1 closed the span at the
+        // clock that ends this tick's step, so a rewind re-stepping the tick
+        // after the release reads the ball out; every world that stepped the
+        // tick before the release (the live head, the server) holds it latched.
+        for (const auto& release: s.airship_releases_)
+            if (release.tick == tick + 1
+                && (release.player == s.own_id_ || s.remotes_.count(release.player) != 0))
+                latched.push_back(release.player);
         std::sort(latched.begin(), latched.end());
         latched.erase(std::unique(latched.begin(), latched.end()), latched.end());
         s.world_check_.zones[tick] = std::move(latched);

@@ -5135,3 +5135,35 @@ missing last good, the `no records kept` line, the holder dropped at a hole in t
 an undecided pair, the journal stopping between `opened` and `decided`, the keep-local set-aside, a controller or
 unit shared by two balls (S14's server has an entry with six ball owners; the owner sort covers it by
 construction), records holding DX1's inert unborn bodies.
+
+## Built (a release at the next tick counts as latched in the world check, step ZRX, 2026-11-16)
+
+**Why.** The fork detection design's M1 (`.local-tools/work/DESIGN/fork_detection.md` 15.0: FD1's world check at a
+release, cadence 66, the AR leg's scene) found one differing sample in 2 of 9 runs: the releasing member at T = R - 1
+after a rewind re-stepped T past its own applied release. The engine closes the release's span at `gone = now`, the
+IVP clock of R's pre-step, which is the clock at the end of T's step, and the span holds only while `now < gone`; so
+the zone read after a replayed T answers "out" where the live read of T and the server's read after its step of T
+answer "latched". Not a world difference (the PSIs of T's step all run below `gone`); only the world check's latched
+set, and so its folds and report, differed. A non-owner meets the same edge when a rewind deeper than the release's
+lateness re-steps R - 1.
+
+**Client** (`client_core_world_check.cpp`, `world_check_zone`). After the zone reads, every release in
+`s.airship_releases_` at `tick + 1` whose player is the own player or a current remote is added to the tick's
+latched set, as it is in every world that steps T without a rewind. The server takes the sample of T at the end of
+tick T and applies a release at the start of its tick, so it holds the ball latched at R - 1 by code order (a late
+release it re-stamps later is latched there too). Core only: no physics_RT, wire, protocol or journal change.
+Rejected: `<=` in the engine's span rule (it is also the PSI listener's and the collision filter's: a world change).
+
+**Evidence** (`.local-tools/work/FD3/m1`, E-cores, headless). The M1 arms again on this build: R = 791, 792, 793, a
+zone entry at 792 with R 858, sparse k = 8 and two releasers (792 + 794, 791 + 793) all give every sample equal; in
+the R = 793 arms the releaser applies at 793, then forced rewinds based at 787 and 790 re-step 792, and its 792
+report now lists itself latched (before: one zone-only differing sample). The L13X leg at cadence 66: 0 episodes.
+No reference run has a release at R = 1 (mod 66) under a rewind, so every reference compares unchanged.
+
+**Accepted limits.** At R - 1 the released ball leaves both folds (before ZRX it was marked zone, not compared,
+either); the sample at or after R compares it. For R = 793 / 794 in M1's scene no sample after the release is
+reported (the ball is back in the zone from about 846 and the releasers finish the level with 858's record still
+held), so those runs test the R - 1 / R - 2 edge only.
+
+**Not exercised:** a non-owner meeting the edge, a refused own release with a sample at R - 1, a release by a remote
+that left, retail.
