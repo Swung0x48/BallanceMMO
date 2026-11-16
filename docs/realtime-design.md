@@ -5064,3 +5064,74 @@ session), a leave in mid-episode, the 660-tick gap across two episodes, presence
 blind stretch live, PENDING live, retail as the forked side (nothing injects into a retail world: its notice
 handling, DETAIL answer and lines run only on the headless core), the per-tick fold's cost on retail x86 and the
 runner's step cost at 13 clients (A4's cost check).
+
+## Built (fork detection blobs, step FD2, 2026-11-16)
+
+**Why.** FD1 says that a world differs, which body and from which tick; it cannot say why. The fork detection
+design (`.local-tools/work/DESIGN/fork_detection.md` 6.4, 15.2) adds the hidden state: when the server decides an
+episode, the forked client journals its whole rollback records around the first differing sample, so the IVP state
+behind the fork (collision pairs, contacts, cores, controllers) can be compared offline with a replay of the server
+journal, with no diagnostic build. Report only, like FD1: nothing here writes any world, and the agreeing case
+journals nothing new (no reference run decides an episode).
+
+**Client** (`client_core_world_check.cpp`, state per core in `s.world_check_`). The rollback's retirement loop
+shows the retire observer a `retired_whole {savestate&, scripts&}` for a record leaving the history whole (`full`,
+with its savestate; null for a sparse, verify-sparse, live-light or blob-less record and in `retire_remaining`);
+the observer may move from it, since the record is dropped right after (the retirement order is unchanged).
+`world_check_keep` moves the newest such record's blob and script bytes into a one-slot holder with the record's
+balls by owner (the own entity, each mirror's owner); each sample tick's retirement moves it into a two-entry ring.
+`opened` moves the ring's records of T into the episode's pending pair: first bad, the record in (T - 66, T], and
+last good, the one in (T - 132, T - 66] (a record from before a hole in the retired ticks is dropped at the hole, so
+it is never taken for a sample's). `decided` journals the pair as two `STATE` records, after its own line, with one
+line more: `world check: episode 1: the records of tick 720 (first bad) and 656 (last good) journaled (240 KB)`, or
+`no records kept (...)` when the ring had lost them (a report held back while a resync was pending, an `opened` more
+than a sample late), or `records not journaled (the journal stopped)`; a re-judge's second `decided` writes nothing.
+An episode closed before any decision (a lead, equal again) drops its pair. The cap: two episodes a session, spent
+only when the records are written; nothing is held when the journal does not record or the cap is spent. Resident:
+three records (about 0.4 MB), five while an episode is undecided. A re-assign clears the holder and the ring (the
+old numbering's samples) and keeps an undecided episode's pair (its ticks are the episode's; the records before a
+resync show the fork).
+
+**Journal.** Tag 13 `STATE` (docs/session-journal-plan.md, 'The episodes' blobs'), version 10 unchanged: the
+record's own blob (raw; the host journal's zstd stream compresses it on the writer thread) and its local v2 script
+bytes (the portable capture reads the live world, not a record; nothing reads them yet). A blob carries its
+process's environment identity, so a run-to-run compare of a run with a decided episode takes
+`JOURNAL_IGNORE_KINDS=STATE` (the FD1 leg's list has it).
+
+**SimTool.** `--state-from JOURNAL DIR` (each STATE record as `.sav`, `.scr` and a `.map` of balls by owner);
+`--dump-savestate-at TICKS DIR` on a `--replay-session` (a comma list or FROM:TO; the replayed world's blob and its
+balls by owner: the server's side; step SFD's `BMMO_REPLAY_SAVESTATE_DUMP=FROM,UNTIL,DIR` is now read into the same
+dump); `--world-fold FROM:TO` (the server's per-tick position folds, printed as a DETAIL's ring); `--savestate-diff
+A B --savestate-map A.map [--savestate-map B.map]`, the mapped diff: each blob's describe text as a multiset of
+normalized lines (every ball renamed `player<owner>`, the per-process fields dropped - environment, CK ids, overlap
+nodes, record and system numbers, the callback queue, the object cache -, every list but a controller list sorted,
+a controller entry's owners sorted after the rename, keep-local bodies and the client's outside zero-force
+controllers set aside), the bodies ranked by differing lines, a record both sides have shown as its differing
+fields and a differing list field as the items only one side has (`-item` A only, `+item` B only). SimTool only:
+physics_RT is unchanged.
+
+**Evidence** (`.local-tools/work/FD2`, E-cores). The FD1 leg's scene (the Pusher moved 1 mm at 700 in client 1):
+client 1 journals two STATE records, first bad 720 and last good 656 (240 KB), no other client any; last good is
+identical to the server replay's 656 under the map (485 lines each); first bad differs and ranks P_Modul_01_Pusher
+first (28 lines), then its rail P_Modul_01_Rinne (22), the movable list (`-P_Modul_01_Pusher`) and each ball's hull
+entry against the Pusher; client 1's fold ring equals the server's per-tick folds to 699 and parts at 700, the
+mechanism half only. Noise floor: an agreeing client's 101 records 640-740 are identical to the server's under the
+map, and the same records against the server's one tick later differ (five ticks tried). Every journal of the run equals the `--no-world-check` control's with
+FD's kinds and STATE left out. Public test 2's FB fork (S14), from the forked client's capture replays on
+diagnostic builds (retail x86 blobs through the x64 tool, its balls mapped by hand) against SimTool's server
+replay: with the pre-#27 engine, the record of 2037 is identical and the state after the faulty restore differs in
+exactly the forked ball's core and unit controller lists, `+{... unit:P_Modul_18_MF002/11/S4 ...}` (the server
+has it); with #27, identical. No reference run decides an episode: core_ref_s22's strict replay and wire check,
+the fast LBM's 89 journals and the L6 journals compare equal with nothing left out.
+
+**Accepted limits.** Two episodes a session; a sample-cadence pair (a body gone before the first differing sample
+is in neither record). Which S14 record FD2 would have kept is not settled: the newest whole record at or before
+2046 is 2040 if the replayed 2041-2046 were light records and 2046 if whole, and at 2046 the forked ball is gone in
+both worlds. The rename maps whole tokens only (a ball name inside a `:` or `/` joined token is not renamed). The
+mapped diff has no test of its own (the FD2 leg is its guard).
+
+**Not exercised:** a retail STATE record (no retail world is forked by a test), the cap, a lead's dropped pair, a
+missing last good, the `no records kept` line, the holder dropped at a hole in the retired ticks, a re-assign with
+an undecided pair, the journal stopping between `opened` and `decided`, the keep-local set-aside, a controller or
+unit shared by two balls (S14's server has an entry with six ball owners; the owner sort covers it by
+construction), records holding DX1's inert unborn bodies.

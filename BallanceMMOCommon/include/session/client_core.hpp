@@ -1325,6 +1325,29 @@ namespace bmmo::session {
             // re-anchor's hole), DETAIL answers and those whose sample had
             // left the ring, notices, episodes opened.
             uint64_t reports = 0, held = 0, skipped = 0, details = 0, detail_misses = 0, notices = 0, episodes = 0;
+            // Step FD2 (design 6.4): the blobs of an episode.  `whole` holds
+            // the newest whole record that retired (its blob and scripts
+            // moved out of the history); at each sample's retirement it moves
+            // into `ring` (the last two samples').  An `opened` notice moves
+            // the ring's entries for its T into `pending` - the one in
+            // (T - 66, T] (first bad) and the one in (T - 132, T - 66] (last
+            // good) - journaled as STATE records when the server decides the
+            // episode (a lead never decides) and dropped when it closes
+            // undecided.  Kept only while the journal records and fewer than
+            // kStateEpisodes episodes have journaled theirs: 3 records
+            // resident, 5 while an episode is undecided.
+            struct record_blob {
+                uint32_t tick = 0;
+                uint8_t role = 0;   // JOURNAL_STATE_* once pending
+                std::vector<uint8_t> savestate, scripts;
+                std::vector<std::pair<uint32_t, std::string>> names;   // the record's balls: owner, entity
+            };
+            static constexpr uint32_t kStateEpisodes = 2;
+            std::optional<record_blob> whole;
+            std::deque<record_blob> ring;
+            std::vector<record_blob> pending;
+            uint32_t pending_episode = 0;   // the episode whose records `pending` holds (0: none; episodes count from 1)
+            uint32_t state_episodes = 0;
         };
         world_check_client world_check_;
     };
@@ -2208,6 +2231,11 @@ namespace bmmo::session {
                                 bmmo::session::world_check::why why);
         void world_check_send(const client_core_state::world_check_client::sample& sample, uint8_t flags, bool rows);
         void world_check_rewind(uint32_t anchor, uint32_t now, rewind_cause cause, uint64_t depth, std::string_view body);
+        // Step FD2: a whole record leaving the history (kept as the newest),
+        // and the episode's blobs journaled at its decision.
+        void world_check_keep(uint32_t tick, bmmo::session::rollback_engine::retired_whole& whole,
+                              const bmmo::session::rollback_tracked& tracked, const std::map<std::string, uint32_t>& names);
+        void world_check_journal_states(uint32_t episode);
         // The session's end: an open episode closes `ended` here; the counters' line.
         void world_check_end();
         // A physicalized mirror without navigation is driven from now on, if

@@ -84,9 +84,12 @@ TAG_WAIT = 9        # version 7: the server's wait in a player's relay header fr
 TAG_SCHEMA = 10
 TAG_STAT = 11
 TAG_CLOCK = 12
+TAG_STATE = 13      # fork detection step FD2: a client's whole record for a world check episode (no version change)
+STATE_ROLES = {1: "first_bad", 2: "last_good"}
 TAG_NAMES = {TAG_HEADER: "HEADER", TAG_PLAYER: "PLAYER", TAG_INPUT: "INPUT", TAG_EVENT: "EVENT",
              TAG_TICK: "TICK", TAG_CHECKPOINT: "CHECKPOINT", TAG_NOTE: "NOTE", TAG_CORRECTION: "CORRECTION",
-             TAG_RESYNC: "RESYNC", TAG_WAIT: "WAIT", TAG_SCHEMA: "SCHEMA", TAG_STAT: "STAT", TAG_CLOCK: "CLOCK"}
+             TAG_RESYNC: "RESYNC", TAG_WAIT: "WAIT", TAG_SCHEMA: "SCHEMA", TAG_STAT: "STAT", TAG_CLOCK: "CLOCK",
+             TAG_STATE: "STATE"}
 # A SCHEMA kind's class: 0 logical, 1 a clock read at a recorded clock site, 2 a raw clock read or a link's status.
 STAT_LOGICAL, STAT_CLOCK_SITE, STAT_RAW = 0, 1, 2
 
@@ -486,7 +489,7 @@ class JournalTick(object):
     """Every record of one tick; a group exists when the tick has any record."""
 
     __slots__ = ("tick", "players", "inputs", "events", "has_tick", "record",
-                 "checkpoints", "notes", "corrections", "resyncs", "waits", "stats")
+                 "checkpoints", "notes", "corrections", "resyncs", "waits", "stats", "states")
 
     def __init__(self, tick):
         self.tick = tick
@@ -501,6 +504,7 @@ class JournalTick(object):
         self.resyncs = []
         self.waits = []
         self.stats = []
+        self.states = []   # step FD2
 
     def bare(self):
         """Only a TICK record: nothing a triage pass wants to look at."""
@@ -777,6 +781,9 @@ class JournalReader(object):
         elif tag == TAG_WAIT:
             record = self._wait(cursor)
             journal.group(record["tick"]).waits.append(record)
+        elif tag == TAG_STATE:
+            record = self._state(cursor, journal.summary)
+            journal.group(record["tick"]).states.append(record)
         elif tag == TAG_SCHEMA:
             journal.schema = parse_schema(payload)
             cursor.off = len(payload)
@@ -941,6 +948,20 @@ class JournalReader(object):
     @staticmethod
     def _wait(cursor):
         return {"tick": cursor.u32(), "player": cursor.u32(), "wait": cursor.u8()}
+
+    @staticmethod
+    def _state(cursor, summary=False):
+        # Step FD2: u32 tick, u32 episode, u8 role, u16 n x (u32 owner, str entity), then the blob and the
+        # scripts as u32-sized byte strings (summary: their sizes only).
+        record = {"tick": cursor.u32(), "episode": cursor.u32(), "role": STATE_ROLES.get(cursor.u8(), "other")}
+        record["names"] = [(cursor.u32(), cursor.string()) for _ in range(cursor.u16())]
+        for name in ("savestate", "scripts"):
+            size = cursor.u32()
+            start = cursor._take(size)
+            record[name + "_bytes"] = size
+            if not summary:
+                record[name] = bytes(cursor.data[start:start + size])
+        return record
 
     @staticmethod
     def _resync(cursor):
@@ -1153,6 +1174,8 @@ def canonical(path, mode="run", checkpoint_sets=False, ignore_kinds=None):
                 payload = payload[:4] + _U16.pack(len(text)) + text
         elif tag == TAG_CHECKPOINT and "CHECK" in ignore and len(payload) > 4 and payload[4] & CHECKPOINT_CHECK:
             continue   # step FD1: JOURNAL_IGNORE_KINDS's CHECK leaves out the world check's episode rows
+        elif tag == TAG_STATE and "STATE" in ignore:
+            continue   # step FD2: JOURNAL_IGNORE_KINDS's STATE leaves out the episodes' blobs
         elif tag == TAG_CHECKPOINT and checkpoint_sets:
             c = JournalReader._checkpoint(_Cursor(payload))
             payload = (c["tick"], c["flags"], tuple(sorted(repr(sorted(b.items())) for b in c["bodies"])))

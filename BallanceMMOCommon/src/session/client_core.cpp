@@ -406,7 +406,8 @@ namespace bmmo::session {
                 [this, names = std::map<std::string, uint32_t>{}, unconfirmed_logs = 0u, sticky_logged = false](
                     uint32_t tick, const bmmo::session::rollback_tracked& tracked,
                     const std::map<std::string, bmmo_physics_body_state>& bodies,
-                    const std::map<std::string, bmmo::session::input_frame>& inputs, bool at_end) mutable {
+                    const std::map<std::string, bmmo::session::input_frame>& inputs, bool at_end,
+                    bmmo::session::rollback_engine::retired_whole* whole) mutable {
                     using bmmo::session::world_check::why;
                     for (const auto& [id, remote]: s.remotes_)
                         if (!remote.entity.empty()) names[remote.entity] = id;
@@ -471,6 +472,7 @@ namespace bmmo::session {
                     // rows are built only for a tick the world check samples
                     // or the journal keeps.
                     if (config.world_check) world_check_fold(tick, bodies, tracked, names);
+                    if (config.world_check && whole) world_check_keep(tick, *whole, tracked, names);   // step FD2
                     const bool sample = config.world_check && !at_end && s.assigned_
                                         && tick % bmmo::session::world_check::kSampleTicks == 0;
                     const bool final_row = config.journal_final_checkpoints && journal_.final_due(tick);
@@ -1392,6 +1394,11 @@ namespace bmmo::session {
         s.world_check_.samples.clear();
         s.world_check_.rewinds.clear();
         s.world_check_.holding = false;
+        // Step FD2: the held records name the old numbering's samples; an
+        // undecided episode's `pending` stays on purpose - its ticks are the
+        // episode's own, and the records before a resync show the fork.
+        s.world_check_.whole.reset();
+        s.world_check_.ring.clear();
         // A newer base answers every resync asked for so far, and any
         // the limiter still owes: its full snapshot replaces the world.
         s.resync_in_flight_ = false;

@@ -61,6 +61,9 @@ namespace bmmo::session {
                                            {t, s.last_assign_first_tick_, 1, static_cast<int>(world_check::why::resync_pending),
                                             0u, 0u, 0u, std::string_view(), std::string_view(), 2, 0u, 0u, 0u});
             }
+            // Step FD2: a record from before the hole is no sample's record.
+            w.whole.reset();
+            w.ring.clear();
         }
         if (!w.folds.empty() && tick != w.fold_last + 1) w.folds.clear();   // the ring holds consecutive ticks
         world_check::position_sums sums;
@@ -81,9 +84,75 @@ namespace bmmo::session {
         w.zones.erase(w.zones.begin(), w.zones.lower_bound(tick));   // a retired tick is not stepped again
     }
 
+    // Step FD2: the newest whole record that retired, its blob and scripts
+    // moved out of the history (the record is dropped right after), with its
+    // balls by owner - kept only while the episodes' blobs may still be
+    // journaled.
+    void session_client_core::world_check_keep(uint32_t tick, rollback_engine::retired_whole& whole,
+                                               const rollback_tracked& tracked,
+                                               const std::map<std::string, uint32_t>& names) {
+        auto& w = s.world_check_;
+        if (!s.assigned_ || w.state_episodes >= wc_client::kStateEpisodes || !journal_.journalling()) return;
+        auto& r = w.whole.emplace();
+        r.tick = tick;
+        r.savestate = std::move(whole.savestate);
+        r.scripts = std::move(whole.scripts);
+        if (!tracked.own_entity.empty()) r.names.emplace_back(s.own_id_, tracked.own_entity);
+        for (const auto& entity: tracked.remote_entities) {
+            const auto it = names.find(entity);
+            const uint32_t owner = it != names.end() ? it->second : mirror_player_of(entity);
+            if (owner != 0) r.names.emplace_back(owner, entity);
+        }
+    }
+
+    // Once per episode the core kept records for (opened while the journal
+    // recorded and the cap was unused): one line, whatever became of them.
+    void session_client_core::world_check_journal_states(uint32_t episode) {
+        auto& w = s.world_check_;
+        w.pending_episode = 0;
+        if (w.pending.empty()) {
+            // A report held back while a resync was pending, or an `opened`
+            // more than a sample late: the ring no longer had T's records.
+            logf("world check: episode %u: no records kept (first bad and last good had left the ring)", episode);
+            return;
+        }
+        size_t bytes = 0;
+        uint32_t first_bad = 0, last_good = 0;
+        const bool recording = journal_.journalling();
+        if (recording)
+            for (const auto& r: w.pending) {
+                journal_.writer().state(r.tick, episode, r.role, r.names, r.savestate, r.scripts);
+                bytes += r.savestate.size() + r.scripts.size();
+                (r.role == JOURNAL_STATE_FIRST_BAD ? first_bad : last_good) = r.tick;
+            }
+        w.pending.clear();
+        if (!recording) {
+            // The cap or a writer failure stopped the journal after `opened`:
+            // nothing written, the episode cap not spent.
+            logf("world check: episode %u: records not journaled (the journal stopped)", episode);
+            return;
+        }
+        ++w.state_episodes;
+        // The cap and a full queue are seen here, on the tick thread (the
+        // record that trips either is dropped); "journaled" is queued.
+        logf("world check: episode %u: the records of tick %s (first bad) and %s (last good) %s (%zu KB)", episode,
+             first_bad ? std::to_string(first_bad).c_str() : "none", last_good ? std::to_string(last_good).c_str() : "none",
+             journal_.journalling() ? "journaled" : "not all journaled (the journal stopped)", bytes / 1024);
+        if (w.state_episodes >= wc_client::kStateEpisodes) {
+            w.whole.reset();
+            w.ring.clear();
+        }
+    }
+
     void session_client_core::world_check_sample(uint32_t tick, const std::vector<body_state>& rows,
                                                  world_check::why why) {
         auto& w = s.world_check_;
+        // Step FD2: the sample's record (the newest whole one at or before it).
+        if (w.whole) {
+            w.ring.push_back(std::move(*w.whole));
+            w.whole.reset();
+            while (w.ring.size() > 2) w.ring.pop_front();
+        }
         wc_client::sample sample;
         sample.tick = tick;
         sample.why = why;
@@ -209,6 +278,23 @@ namespace bmmo::session {
             w.episode_buckets = msg.buckets;
             w.row_reports = 0;
             ++w.episodes;
+            // Step FD2: the records of T (first bad) and of the sample
+            // before (last good) wait for the decision: first bad in
+            // (T - 66, T], last good in (T - 132, T - 66].
+            w.pending.clear();
+            w.pending_episode =
+                journal_.journalling() && w.state_episodes < wc_client::kStateEpisodes ? msg.episode : 0;
+            for (auto it = w.ring.begin(); w.pending_episode != 0 && it != w.ring.end();) {
+                const uint32_t before = msg.tick - it->tick;
+                if (before < world_check::kSampleTicks) it->role = JOURNAL_STATE_FIRST_BAD;
+                else if (before < 2 * world_check::kSampleTicks) it->role = JOURNAL_STATE_LAST_GOOD;
+                else {
+                    ++it;
+                    continue;
+                }
+                w.pending.push_back(std::move(*it));
+                it = w.ring.erase(it);
+            }
             // The DETAIL answer, at once: the sample's rows of the named
             // classes, the folds and the rewinds.  A sample that has left
             // the ring (it cannot in practice: `opened` comes one trip after
@@ -258,10 +344,17 @@ namespace bmmo::session {
                  "rule %s (report only)",
                  msg.tick, msg.episode, what.c_str(), heal.c_str(),
                  world_check::rule_name(static_cast<world_check::fork_rule>(msg.rule)));
+            // Step FD2: the episode's records, after the line that says why
+            // (a re-judge's second `decided` finds none pending).
+            if (msg.episode == w.pending_episode) world_check_journal_states(msg.episode);
             break;
         }
         case world_check::fork_action::closed: {
             if (msg.episode == w.episode) w.open = false;
+            if (msg.episode == w.pending_episode) {   // closed undecided (a lead, or equal again before any decision)
+                w.pending.clear();
+                w.pending_episode = 0;
+            }
             if (outcome == world_check::fork_outcome::lead) {
                 logf("world check: tick %u: lead (%s, one sample), closed", msg.tick, kinds_text(msg.kinds).c_str());
                 break;
@@ -305,6 +398,10 @@ namespace bmmo::session {
                  static_cast<unsigned long long>(w.notices), static_cast<unsigned long long>(w.details),
                  static_cast<unsigned long long>(w.detail_misses));
         w.reports = w.held = w.skipped = 0;
+        w.whole.reset();
+        w.ring.clear();
+        w.pending.clear();
+        w.pending_episode = 0;
     }
 
 }

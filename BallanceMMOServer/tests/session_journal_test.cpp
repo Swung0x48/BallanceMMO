@@ -462,6 +462,43 @@ TEST(SessionJournal, ResyncRecordRoundTrip) {
     EXPECT_EQ(2u, kJournalOldestReadable) << "version 2, 3 and 4 files still read";
 }
 
+// Fork detection step FD2: a STATE record (a client's whole record of a
+// world check episode) reads back by its own tick, written late after a
+// later tick's records.  An older reader skips tag 13 as any unknown tag
+// (SessionJournal.UnknownTagIsSkippedAndCounted; kJournalMaxTag was 12).
+TEST(SessionJournal, StateRecordRoundTrip) {
+    const temp_dir dir("state");
+    const auto path = dir.file("session.bmjc");
+    {
+        journal_writer writer;
+        std::string error;
+        ASSERT_TRUE(writer.open(path, make_header(), 0, error)) << error;
+        writer.note(800, "later");
+        std::vector<uint8_t> blob(90000, 7);
+        blob.back() = 9;
+        writer.state(720, 1, JOURNAL_STATE_FIRST_BAD, {{65538, "Ball_Stone"}, {65537, "Ball_Stone_BMMO_65537"}}, blob,
+                     std::vector<uint8_t>(40, 's'));
+        writer.close();
+    }
+    journal out;
+    std::string error;
+    ASSERT_TRUE(read_journal(path, out, error)) << error;
+    EXPECT_TRUE(out.warning.empty()) << out.warning;
+    ASSERT_EQ(2u, out.ticks.size());
+    ASSERT_EQ(720u, out.ticks[0].tick);
+    ASSERT_EQ(1u, out.ticks[0].states.size());
+    const journal_state& st = out.ticks[0].states[0];
+    EXPECT_EQ(1u, st.episode);
+    EXPECT_EQ(JOURNAL_STATE_FIRST_BAD, st.role);
+    ASSERT_EQ(2u, st.names.size());
+    EXPECT_EQ(65537u, st.names[1].first);
+    EXPECT_EQ("Ball_Stone_BMMO_65537", st.names[1].second);
+    EXPECT_EQ(90000u, st.savestate.size());
+    EXPECT_EQ('\x09', st.savestate.back());
+    EXPECT_EQ(std::string(40, 's'), st.scripts);
+    EXPECT_EQ(13u, kJournalMaxTag);
+}
+
 // Step TRL (version 9): an add's life in the PLAYER record (written for a
 // later life only), and the lives of a RESYNC record's trafo entries
 // (written only when one is not 1) - a session without a rejoin writes the

@@ -152,6 +152,24 @@ tick of the compare). A checkpoint with flag CHECK (64) carries a trailing `u32 
 an episode's rows of its sample tick, `LOCAL | FINAL | CHECK` (a client's) or `FULL | CHECK` (the server's late
 rows); `JOURNAL_IGNORE_KINDS` takes `CHECK` to leave them out of a compare.
 
+### The episodes' blobs (step FD2, 2026-11-16; version 10 unchanged)
+
+| tag | payload |
+|---|---|
+| `STATE` (13) | `u32 tick, u32 episode, u8 role` (1 first bad, 2 last good), `u16 n` + n x (`u32 owner, str entity`: the record's balls by owner), then `u32 size` + the IVP savestate blob (this world's own, as the rollback record held it) and `u32 size` + the record's script bytes (local v2) |
+
+A client writes them when the server decides a world check episode (`fork_notice` `decided`): the whole retired
+record in (T - 66, T] (first bad) and the one in (T - 132, T - 66] (last good), at most two episodes a session, and
+only while the journal records; a lead (never decided) and an episode closed before a decision write none. The
+record is written late, after later ticks' records, under its own tick (as a CHECK row is). The blob carries its
+process's environment identity (bytes 8-15), so two runs' STATE records differ there although every field renders
+the same: a run-to-run compare of journals with a decided episode takes `JOURNAL_IGNORE_KINDS=STATE`. Nothing reads
+the script bytes yet; they are kept for a later script-level compare. An older reader skips tag 13 as an unknown
+tag. `journal_trace.py` reads it (summary mode keeps the sizes only); SimTool `--list` prints one line per record and
+`--state-from JOURNAL DIR` writes each as `<tick>_<role>.sav / .scr / .map`, for `--savestate-diff A B
+--savestate-map A.map --savestate-map B.map` against a server replay's `--dump-savestate-at TICKS DIR` (docs/realtime-design.md
+'Built (fork detection blobs, step FD2, 2026-11-16)').
+
 The resync note keeps its rows and bytes; its capture and coding times (raw reads that differed between any two
 runs) moved to `resync_cost`.
 

@@ -1114,8 +1114,13 @@ namespace bmmo::session {
             if (capture_now) note_globals_change(world, state, history_.empty() ? nullptr : &history_.back());
             history_.push_back(std::move(state));
             while (history_.size() > thresholds_.history_ticks) {
-                const tick_state& oldest = history_.front();
-                if (retire_observer_) retire_observer_(oldest.tick, oldest.tracked, oldest.bodies, oldest.inputs, false);
+                tick_state& oldest = history_.front();
+                if (retire_observer_) {
+                    retired_whole whole{oldest.savestate, oldest.scripts};
+                    const bool has_blob = oldest.full && oldest.have_savestate && !oldest.savestate.empty();
+                    retire_observer_(oldest.tick, oldest.tracked, oldest.bodies, oldest.inputs, false,
+                                     has_blob ? &whole : nullptr);
+                }
                 history_.pop_front();
             }
         }
@@ -1133,9 +1138,18 @@ namespace bmmo::session {
         // `at_end`: shown by retire_remaining (records still being predicted
         // when the session ends), not by leaving the history (step FD1: the
         // world check never reports those).
+        // `whole` (step FD2, fork detection 6.4): a record leaving the history
+        // whole (`full`) with its IVP savestate shows the observer its blob and
+        // script bytes, which it may move from - the record is dropped right
+        // after; null for a sparse record, one without a blob, and at_end.
+        struct retired_whole {
+            std::vector<uint8_t>& savestate;
+            std::vector<uint8_t>& scripts;
+        };
         using retire_observer = std::function<void(uint32_t tick, const rollback_tracked& tracked,
                                                    const std::map<std::string, bmmo_physics_body_state>& bodies,
-                                                   const std::map<std::string, input_frame>& inputs, bool at_end)>;
+                                                   const std::map<std::string, input_frame>& inputs, bool at_end,
+                                                   retired_whole* whole)>;
         void set_retire_observer(retire_observer observer) { retire_observer_ = std::move(observer); }
         // The session's end (step D0 gate): every record still held is shown
         // to the observer, oldest first, as the newest the client ever had
@@ -1143,7 +1157,8 @@ namespace bmmo::session {
         // is unset so no record is shown twice.  Returns how many.
         size_t retire_remaining() {
             if (!retire_observer_) return 0;
-            for (const tick_state& state: history_) retire_observer_(state.tick, state.tracked, state.bodies, state.inputs, true);
+            for (const tick_state& state: history_)
+                retire_observer_(state.tick, state.tracked, state.bodies, state.inputs, true, nullptr);
             retire_observer_ = nullptr;
             return history_.size();
         }

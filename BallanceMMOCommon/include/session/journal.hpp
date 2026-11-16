@@ -82,6 +82,14 @@
 //                     run-to-run compare skips
 //                     (journal_stats.hpp has the layout; an older reader
 //                     skips all three as unknown tags)
+//   tag 13 STATE      (fork detection step FD2, version 10 still): a client's
+//                     whole rollback record of one tick, written when a world
+//                     check episode is decided: u32 tick, u32 episode, u8 role
+//                     (JOURNAL_STATE_*), u16 n + n x (u32 owner, str entity) -
+//                     the record's balls by owner - then the IVP savestate
+//                     (this world's own blob) and the record's script bytes
+//                     (local v2) as u32-sized byte strings.  An older reader
+//                     skips it as an unknown tag.
 //
 // Every record but the header carries a tick as its first field, so a reader
 // groups the file by tick without understanding a single tag.  The length
@@ -125,7 +133,8 @@ namespace bmmo::session {
     enum class journal_tag : uint8_t {
         header = 0, player = 1, input = 2, event = 3, tick = 4,
         checkpoint = 5, note = 6, correction = 7, resync = 8, wait = 9,
-        schema = 10, stat = 11, clock = 12   // step JNL
+        schema = 10, stat = 11, clock = 12,   // step JNL
+        state = 13                            // step FD2
     };
     enum class journal_kind : uint8_t { server = 0, client = 1 };
 
@@ -156,7 +165,7 @@ namespace bmmo::session {
     constexpr const char* kServerJournalExtension = ".bmjs";
     constexpr const char* kClientJournalExtension = ".bmjc";
     constexpr const char* kLegacyJournalExtension = ".bmjr";
-    constexpr uint8_t kJournalMaxTag = static_cast<uint8_t>(journal_tag::clock);
+    constexpr uint8_t kJournalMaxTag = static_cast<uint8_t>(journal_tag::state);
     // A str never exceeds this; a longer one makes the record invalid.
     constexpr size_t kJournalMaxString = 4096;
     // Step JNL: a STAT / CLOCK text value's limit (the whole u16 length: the
@@ -754,6 +763,22 @@ namespace bmmo::session {
         std::vector<journal_trafo_entry> trafo;
     };
 
+    // tag 13 STATE (step FD2): a client's whole record of `tick` for world
+    // check episode `episode` - the first one at or before the episode's
+    // first differing sample (first bad) or the one a sample before it
+    // (last good) - with the record's balls by owner, so the blob can be
+    // compared with a server replay's under mapped names (SimTool
+    // --state-from, --savestate-diff --savestate-map).
+    constexpr uint8_t JOURNAL_STATE_FIRST_BAD = 1;
+    constexpr uint8_t JOURNAL_STATE_LAST_GOOD = 2;
+    struct journal_state {
+        uint32_t tick = 0;
+        uint32_t episode = 0;
+        uint8_t role = 0;
+        std::vector<std::pair<uint32_t, std::string>> names;   // owner, entity
+        std::string savestate, scripts;
+    };
+
     // tag 9 WAIT (version 7, step R12): the server's wait for `player` as
     // its relay header carries it from `tick` on.
     struct journal_wait {
@@ -1020,6 +1045,29 @@ namespace bmmo::session {
             record(journal_tag::resync, payload);
         }
 
+        void state(uint32_t tick, uint32_t episode, uint8_t role,
+                   const std::vector<std::pair<uint32_t, std::string>>& names, const std::vector<uint8_t>& savestate,
+                   const std::vector<uint8_t>& scripts) {
+            if (!writable()) return;
+            last_tick_ = tick;
+            std::string payload;
+            payload.reserve(16 + savestate.size() + scripts.size() + 32 * names.size());
+            journal_detail::write_u32(payload, tick);
+            journal_detail::write_u32(payload, episode);
+            journal_detail::write_u8(payload, role);
+            const size_t n = std::min<size_t>(names.size(), 0xFFFF);
+            journal_detail::write_u16(payload, static_cast<uint16_t>(n));
+            for (size_t i = 0; i < n; ++i) {
+                journal_detail::write_u32(payload, names[i].first);
+                journal_detail::write_str(payload, names[i].second);
+            }
+            for (const std::vector<uint8_t>* bytes: {&savestate, &scripts}) {
+                journal_detail::write_u32(payload, static_cast<uint32_t>(bytes->size()));
+                payload.append(reinterpret_cast<const char*>(bytes->data()), bytes->size());
+            }
+            record(journal_tag::state, payload);
+        }
+
         void wait(uint32_t tick, uint32_t player, uint8_t wait) {
             if (!writable()) return;
             last_tick_ = tick;
@@ -1233,6 +1281,7 @@ namespace bmmo::session {
         std::vector<journal_resync> resyncs;   // version 4
         std::vector<journal_wait> waits;       // version 7
         std::vector<journal_stat> stats;       // step JNL: STAT and CLOCK, file order
+        std::vector<journal_state> states;     // step FD2
     };
 
     struct journal {
@@ -1680,6 +1729,31 @@ namespace bmmo::session {
                 case journal_tag::schema: {
                     if (!read_schema_payload(payload, out.schema)) break;
                     out.has_schema = true;
+                    ++delivered;
+                    return true;
+                }
+                case journal_tag::state: {
+                    journal_state st;
+                    st.tick = in.u32();
+                    st.episode = in.u32();
+                    st.role = in.u8();
+                    const uint16_t n = in.u16();
+                    for (uint16_t k = 0; in.ok && k < n; ++k) {
+                        const uint32_t owner = in.u32();
+                        std::string entity = in.str();
+                        if (in.ok) st.names.emplace_back(owner, std::move(entity));
+                    }
+                    for (std::string* bytes: {&st.savestate, &st.scripts}) {
+                        const uint32_t size = in.u32();
+                        if (!in.ok || !in.bytes(*bytes, size)) {
+                            in.ok = false;
+                            break;
+                        }
+                    }
+                    if (!in.ok) break;
+                    auto& group = groups[st.tick];
+                    group.tick = st.tick;
+                    group.states.push_back(std::move(st));
                     ++delivered;
                     return true;
                 }

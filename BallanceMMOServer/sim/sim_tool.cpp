@@ -69,6 +69,7 @@
 #include <physics/physics_state.hpp>
 #include <session/journal.hpp>
 #include <session/lifecycle.hpp>
+#include <session/world_check.hpp>   // step FD2: --world-fold
 #include <physics/physics_direct.hpp>
 #include <session/rollback_binding.hpp>
 #include <session/rollback_binding_scripts.hpp>
@@ -97,6 +98,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <regex>
 #include <set>
 #include <string>
 #include <string_view>
@@ -322,6 +324,23 @@ namespace {
         // two clients' journals only show a position drift.
         std::string savestate_diff[2];
         std::string savestate_describe;
+        // Fork detection step FD2 (design 6.4, 15.2): the blobs of a world
+        // check episode against a server journal's replay.
+        // --savestate-map FILE (once per side, A's first): --savestate-diff
+        // in its mapped mode - each world's balls named by owner ("owner
+        // entity" lines: a STATE record's map, --dump-savestate-at's .map),
+        // every record matched by name, not by position.
+        std::vector<std::string> savestate_maps;
+        // --state-from JOURNAL DIR: every STATE record of a client journal as
+        // DIR/<tick>_<role>.sav / .scr / .map.
+        std::string state_from[2];
+        // --replay-session: --dump-savestate-at TICKS DIR (TICKS a comma list
+        // or FROM:TO) writes the replayed world's blob of each such tick to
+        // DIR/<tick>.sav with its balls by owner in DIR/<tick>.map;
+        // --world-fold FROM:TO prints the server's per-tick position folds
+        // (world_check::position_sums, design 6.3a) as a DETAIL report's ring.
+        std::string dump_savestate_at, dump_savestate_at_dir;
+        long long world_fold_from = -1, world_fold_to = -1;
         std::string describe_script;      // --describe-script NAME: print that root script's graph
         // --portable-scripts-check (resync design 7.2, step A1): the portable
         // script record against the v2 record, at anchor+30 and after each
@@ -819,6 +838,31 @@ namespace {
         return true;
     }
 
+    // Step FD2's switches (their own function: the main chain is at C1061's limit).
+    bool parse_fork_check_arg(const std::string& arg, const std::function<const char*()>& next, arguments& out) {
+        const char* v = nullptr;
+        if (arg == "--savestate-map") {
+            if (!(v = next()) || out.savestate_maps.size() == 2) return false;   // one per side
+            out.savestate_maps.push_back(v);
+        } else if (arg == "--state-from" || arg == "--dump-savestate-at") {
+            std::string& first = arg == "--state-from" ? out.state_from[0] : out.dump_savestate_at;
+            std::string& second = arg == "--state-from" ? out.state_from[1] : out.dump_savestate_at_dir;
+            if (!(v = next())) return false;
+            first = v;
+            if (!(v = next())) return false;
+            std::error_code ec;   // the engine's boot changes the working directory (to the game's Bin)
+            second = std::filesystem::absolute(v, ec).string();
+            if (ec) second = v;
+        } else if (arg == "--world-fold") {
+            if (!(v = next()) || std::sscanf(v, "%lld:%lld", &out.world_fold_from, &out.world_fold_to) != 2
+                || out.world_fold_from < 0 || out.world_fold_to < out.world_fold_from)
+                return false;
+        } else {
+            return false;
+        }
+        return true;
+    }
+
     // Step G2's drop-scene switches (their own function: parse()'s else-if
     // chain is at MSVC's nesting limit, C1061).
     bool parse_union_arg(const std::string& arg, const std::function<const char*()>& next, arguments& out) {
@@ -1206,12 +1250,12 @@ namespace {
                 (arg == "--probe-census" ? out.probe_census
                  : arg == "--release-check" ? out.probe_release_check : out.force_census) = true;
             else if (!parse_trafo_arg(arg, next, out) && !parse_record_format_arg(arg, next, out)
-                     && !parse_union_arg(arg, next, out)) return false;
+                     && !parse_union_arg(arg, next, out) && !parse_fork_check_arg(arg, next, out)) return false;
         }
         // --list of a journal and the savestate file verbs are pure file
         // reading: no game data needed.
         return !out.root.empty() || !out.replay_session.empty() || !out.savestate_diff[0].empty()
-            || !out.savestate_describe.empty() || !out.describe_script.empty();
+            || !out.savestate_describe.empty() || !out.describe_script.empty() || !out.state_from[0].empty();
     }
 
     bool gameplay_ingame_active(const bmmo::sim::headless_engine& engine) {
@@ -3645,6 +3689,343 @@ namespace {
         bmmo::sim::physics_world::step_state counters;
     };
 
+    // ---- Step FD2 (fork detection 6.4, 15.1 row 1): two worlds' blobs
+    // compared under mapped names.  diff_savestate walks two blobs record by
+    // record in each world's own object order, which only works for two
+    // copies of one world; a client's record and a server replay's blob name
+    // the balls differently (Ball_<type> / a mirror's name against
+    // Ball_<type>_BMMO_<id>) and number collisions, systems and units in
+    // their own engine orders.  So each blob's describe text is compared as
+    // a multiset of normalized lines: every ball renamed to player<owner>
+    // (the map files), the per-process fields (the environment, CK ids,
+    // overlap-tree nodes, record numbers, the callback queue's blocks, the
+    // object cache) left out, order-only lists sorted, the keep-local bodies
+    // (resync_rules.hpp: each world's own) and the client's outside zero-force
+    // controllers (outside_controllers.hpp, never on the server) set aside.
+    // Two agreeing worlds give no line (FD2's noise run: an agreeing client
+    // and the server replay, 640-740, 0 lines).
+    std::map<std::string, std::string> read_ball_map(const std::string& path, bool& ok) {
+        std::map<std::string, std::string> out;
+        ok = false;
+        FILE* f = std::fopen(path.c_str(), "rb");
+        if (!f) return out;
+        char line[4200];
+        while (std::fgets(line, sizeof(line), f)) {
+            unsigned long owner = 0;
+            int at = 0;
+            if (std::sscanf(line, "%lu %n", &owner, &at) != 1 || at <= 0) continue;
+            std::string entity(line + at);
+            while (!entity.empty() && (entity.back() == '\n' || entity.back() == '\r')) entity.pop_back();
+            if (!entity.empty()) out[entity] = "player" + std::to_string(owner);
+        }
+        std::fclose(f);
+        ok = true;
+        return out;
+    }
+
+    bool write_ball_map(const std::string& path, const std::vector<std::pair<uint32_t, std::string>>& names) {
+        std::string text;
+        for (const auto& [owner, entity]: names) text += std::to_string(owner) + " " + entity + "\n";
+        return write_text_file(path, text);
+    }
+
+    struct mapped_describe {
+        std::map<std::string, int> lines;   // normalized line -> count
+        size_t outside = 0, keep_local = 0;
+    };
+
+    // A describe list's items, split at its top-level commas (a controller
+    // entry {.. @A,B} names its owners comma-joined).
+    std::vector<std::string> split_list(const std::string& list) {
+        std::vector<std::string> items;
+        int depth = 0;
+        for (size_t k = 0, from = 0; k <= list.size(); ++k) {
+            if (k == list.size() || (list[k] == ',' && depth == 0)) {
+                if (k > from) items.push_back(list.substr(from, k - from));
+                from = k + 1;
+            } else if (list[k] == '{') {
+                ++depth;
+            } else if (list[k] == '}') {
+                --depth;
+            }
+        }
+        return items;
+    }
+
+    mapped_describe mapped_lines(const std::string& text, const std::map<std::string, std::string>& renames) {
+        static const std::regex dropped(" (entity_id|node|parent|behavior|ov_root|cache_reuse_index)=-?[0-9]+"
+                                        "| (children|system|unit)=(\\[[^\\]]*\\]|-?[0-9]+)| environment=[^ ]*");
+        // A record's number, and a controller entry's system / unit number.
+        static const std::regex numbered("#[0-9]+(\\.[0-9]+)?|(\\{k[0-9]+ s)-?[0-9]+");
+        static const std::vector<std::string> outside =
+            bmmo::physics::outside_controllers::controller_names(bmmo::physics::outside_controllers::default_outside_force_blocks());
+        const auto delimiter = [](char c) { return std::strchr(" |[](),{}@=", c) != nullptr; };
+        // Each token renamed; whether one names a keep-local body or an outside controller.
+        const auto pass = [&](const std::string& in, bool& local, bool& out_ctl) {
+            std::string result;
+            local = out_ctl = false;
+            for (size_t i = 0; i < in.size();) {
+                if (delimiter(in[i])) { result += in[i++]; continue; }
+                size_t j = i;
+                while (j < in.size() && !delimiter(in[j])) ++j;
+                std::string token = in.substr(i, j - i);
+                if (const auto it = renames.find(token); it != renames.end()) token = it->second;
+                else if (bmmo::session::keep_local_body(token)) local = true;
+                if (std::find(outside.begin(), outside.end(), token) != outside.end()) out_ctl = true;
+                result += token;
+                i = j;
+            }
+            return result;
+        };
+        mapped_describe out;
+        size_t start = 0;
+        while (start < text.size()) {
+            size_t end = text.find('\n', start);
+            if (end == std::string::npos) end = text.size();
+            std::string line = text.substr(start, end - start);
+            start = end + 1;
+            const std::string kind = line.substr(0, line.find(' '));
+            if (kind.empty() || kind == "cache" || kind == "ovnode" || kind == "callback" || kind == "world") continue;
+            bool local = false, out_ctl = false;
+            line = pass(line, local, out_ctl);
+            line = std::regex_replace(line, dropped, "");
+            line = std::regex_replace(line, numbered, "$2#");
+            // Every [..] list (split_list): an item naming
+            // a set-aside body or controller out, a controller's owners sorted
+            // (each world orders them by its own names), and every list but a
+            // controller list (the order the engine runs them in) sorted: the
+            // rest is each engine's bookkeeping order.
+            std::string rebuilt;
+            for (size_t i = 0; i < line.size();) {
+                const size_t open = line.find('[', i);
+                const size_t close = open == std::string::npos ? std::string::npos : line.find(']', open);
+                if (close == std::string::npos) {
+                    rebuilt += line.substr(i);
+                    break;
+                }
+                rebuilt += line.substr(i, open + 1 - i);
+                const bool controllers = rebuilt.size() >= 13 && rebuilt.compare(rebuilt.size() - 13, 13, "controllers=[") == 0;
+                std::vector<std::string> items;
+                for (std::string& item: split_list(line.substr(open + 1, close - open - 1))) {
+                    bool item_local = false, item_outside = false;
+                    const size_t at = item.find(" @");
+                    if (item.front() == '{' && item.back() == '}' && at != std::string::npos) {
+                        pass(item.substr(0, at), item_local, item_outside);
+                        std::vector<std::string> owners;
+                        for (std::string& owner: split_list(item.substr(at + 2, item.size() - at - 3))) {
+                            bool owner_local = false, unused = false;
+                            pass(owner, owner_local, unused);
+                            if (!owner_local) owners.push_back(std::move(owner));
+                        }
+                        if (owners.empty()) item_local = true;
+                        std::sort(owners.begin(), owners.end());
+                        item = item.substr(0, at + 2);
+                        for (size_t k = 0; k < owners.size(); ++k) item += (k ? "," : "") + owners[k];
+                        item += '}';
+                    } else {
+                        pass(item, item_local, item_outside);
+                    }
+                    if (item_outside) ++out.outside;
+                    else if (item_local) ++out.keep_local;
+                    else items.push_back(std::move(item));
+                }
+                if (!controllers) std::sort(items.begin(), items.end());
+                for (size_t k = 0; k < items.size(); ++k) rebuilt += (k ? "," : "") + items[k];
+                rebuilt += ']';
+                i = close + 1;
+            }
+            bool still_local = false, ignored = false;
+            pass(rebuilt, still_local, ignored);
+            if (still_local) {
+                ++out.keep_local;
+                continue;
+            }
+            ++out.lines[rebuilt];
+        }
+        return out;
+    }
+
+    // The bodies a describe line is about: a per-object record's name, the
+    // objects a collision, contact, pair or info record names.
+    std::vector<std::string> line_subjects(const std::string& line) {
+        static const std::regex pair_names("\\(([^|()]+)\\|([^|()]+)\\)|objects=([^ |]+)\\|([^ ]+)");
+        const size_t sp = line.find(' ');
+        const std::string kind = line.substr(0, sp);
+        const std::string name = sp == std::string::npos ? std::string() : line.substr(sp + 1, line.find(' ', sp + 1) - sp - 1);
+        if (kind == "object" || kind == "core" || kind == "hull" || kind == "ov" || kind == "lists") return {name};
+        std::vector<std::string> out;
+        std::smatch m;
+        if ((kind == "unit" || kind == "system") && line.find(" cores=[") != std::string::npos) {   // a unit's or system's cores
+            const size_t from = line.find(" cores=[") + 8, to = line.find(']', from);
+            for (size_t a = from; a < to;) {
+                const size_t comma = std::min(line.find(',', a), to);
+                if (comma > a) out.push_back(line.substr(a, comma - a));
+                a = comma + 1;
+            }
+            if (!out.empty()) return out;
+        }
+        if (std::regex_search(line, m, pair_names)) {
+            for (int g = 1; g <= 4; ++g)
+                if (m[g].matched) out.push_back(m[g].str());
+        } else {
+            out.push_back(kind + " " + name);
+        }
+        return out;
+    }
+
+    // "field=value" pairs of a line (a value may hold spaces: a controller list).
+    std::vector<std::pair<std::string, std::string>> line_fields(const std::string& line) {
+        static const std::regex field(" ([a-z_0-9]+)=");
+        std::vector<std::pair<std::string, std::string>> out;
+        std::vector<std::pair<size_t, std::smatch>> at;
+        for (auto it = std::sregex_iterator(line.begin(), line.end(), field); it != std::sregex_iterator(); ++it)
+            at.emplace_back(static_cast<size_t>(it->position()), *it);
+        for (size_t k = 0; k < at.size(); ++k) {
+            const size_t value = at[k].first + at[k].second.length();
+            const size_t end = k + 1 < at.size() ? at[k + 1].first : line.size();
+            out.emplace_back(at[k].second[1].str(), line.substr(value, end - value));
+        }
+        return out;
+    }
+
+    int run_savestate_mapped(const arguments& args, const std::vector<uint8_t> (&blobs)[2]) {
+        std::map<std::string, std::string> maps[2];
+        for (int k = 0; k < 2 && k < static_cast<int>(args.savestate_maps.size()); ++k) {
+            bool ok = false;
+            maps[k] = read_ball_map(args.savestate_maps[k], ok);
+            if (!ok) {
+                std::fprintf(stderr, "cannot read --savestate-map %s\n", args.savestate_maps[k].c_str());
+                return 1;
+            }
+        }
+        if (args.savestate_maps.size() == 1) maps[1] = maps[0];
+        const mapped_describe a = mapped_lines(bmmo::physics::describe_savestate(blobs[0].data(), blobs[0].size()), maps[0]);
+        const mapped_describe b = mapped_lines(bmmo::physics::describe_savestate(blobs[1].data(), blobs[1].size()), maps[1]);
+        std::vector<std::string> only[2];
+        size_t count[2] = {0, 0};
+        for (int side = 0; side < 2; ++side) {
+            const auto& mine = side == 0 ? a.lines : b.lines;
+            const auto& theirs = side == 0 ? b.lines : a.lines;
+            for (const auto& [line, n]: mine) {
+                count[side] += static_cast<size_t>(n);
+                const auto it = theirs.find(line);
+                for (int extra = n - (it == theirs.end() ? 0 : it->second); extra > 0; --extra) only[side].push_back(line);
+            }
+        }
+        std::printf("mapped: %zu and %zu lines (set aside: %zu and %zu outside zero-force controllers, %zu and %zu "
+                    "keep-local records or entries)\n",
+                    count[0], count[1], a.outside, b.outside, a.keep_local, b.keep_local);
+        if (only[0].empty() && only[1].empty()) {
+            std::printf("identical under the map\n");
+            return 0;
+        }
+        // The bodies the differing lines are about, the most lines first.
+        std::map<std::string, std::set<std::string>> kinds_of;
+        std::map<std::string, size_t> lines_of;
+        for (const auto& side: only)
+            for (const auto& line: side)
+                for (const auto& subject: line_subjects(line)) {
+                    kinds_of[subject].insert(line.substr(0, line.find(' ')));
+                    ++lines_of[subject];
+                }
+        std::vector<std::pair<size_t, std::string>> ranked;
+        for (const auto& [subject, n]: lines_of) ranked.emplace_back(n, subject);
+        std::sort(ranked.begin(), ranked.end(), [](const auto& x, const auto& y) {
+            return x.first != y.first ? x.first > y.first : x.second < y.second;
+        });
+        std::printf("differ: %zu lines only in A, %zu only in B; %zu bodies:", only[0].size(), only[1].size(), ranked.size());
+        for (const auto& [n, subject]: ranked) {
+            std::string kinds;
+            for (const auto& k: kinds_of[subject]) kinds += (kinds.empty() ? "" : ",") + k;
+            std::printf(" %s (%zu: %s)", subject.c_str(), n, kinds.c_str());
+        }
+        std::printf("\n");
+        // The lines, a record both sides have as its differing fields.
+        std::map<std::string, std::vector<std::string>> by_key[2];
+        for (int side = 0; side < 2; ++side)
+            for (const auto& line: only[side]) {
+                const size_t sp = line.find(' ');
+                by_key[side][line.substr(0, line.find(' ', sp + 1))].push_back(line);
+            }
+        int shown = 0;
+        const int limit = std::max(args.max_diff, 20);
+        std::set<std::string> keys;
+        for (const auto& side: by_key)
+            for (const auto& [key, lines]: side) keys.insert(key);
+        for (const auto& key: keys) {
+            if (shown++ >= limit) {
+                std::printf("  ... (--max-diff N lists more)\n");
+                break;
+            }
+            const auto ia = by_key[0].find(key), ib = by_key[1].find(key);
+            if (ia != by_key[0].end() && ib != by_key[1].end() && ia->second.size() == 1 && ib->second.size() == 1) {
+                const auto fa = line_fields(ia->second[0]), fb = line_fields(ib->second[0]);
+                std::string fields;
+                for (size_t k = 0; k < std::min(fa.size(), fb.size()); ++k) {
+                    if (fa[k] == fb[k]) continue;
+                    const std::string &va = fa[k].second, &vb = fb[k].second;
+                    const auto is_list = [](const std::string& v) { return v.size() >= 2 && v.front() == '[' && v.back() == ']'; };
+                    if (fa[k].first == fb[k].first && is_list(va) && is_list(vb)) {
+                        // A list (a body's controllers, a unit's cores): the
+                        // items only one side has, each named whole.
+                        std::map<std::string, int> items;
+                        for (const auto& item: split_list(va.substr(1, va.size() - 2))) ++items[item];
+                        for (const auto& item: split_list(vb.substr(1, vb.size() - 2))) --items[item];
+                        fields += " " + fa[k].first + ":";
+                        for (const auto& [item, n]: items)
+                            for (int m = 0; m < (n < 0 ? -n : n); ++m) fields += std::string(n > 0 ? " -" : " +") + item.substr(0, 200);
+                        if (std::all_of(items.begin(), items.end(), [](const auto& x) { return x.second == 0; }))
+                            fields += " (the same items, another order)";
+                        fields += ";";
+                        continue;
+                    }
+                    fields += " " + fa[k].first + "=" + va.substr(0, 160) + " -> " + (fb[k].first == fa[k].first ? "" : fb[k].first + "=")
+                              + vb.substr(0, 160) + ";";
+                }
+                if (fa.size() != fb.size()) fields += " (" + std::to_string(fa.size()) + " vs " + std::to_string(fb.size()) + " fields)";
+                std::printf("  ~ %s:%s\n", key.c_str(), fields.c_str());
+                continue;
+            }
+            for (int side = 0; side < 2; ++side) {
+                const auto it = by_key[side].find(key);
+                if (it == by_key[side].end()) continue;
+                for (const auto& line: it->second) std::printf("  %c %s\n", side == 0 ? 'A' : 'B', line.substr(0, 400).c_str());
+            }
+        }
+        return 3;
+    }
+
+    // --state-from JOURNAL DIR (step FD2): a client journal's STATE records
+    // as files.
+    int run_state_from(const arguments& args) {
+        bmmo::session::journal journal;
+        std::string error;
+        if (!bmmo::session::read_journal(args.state_from[0], journal, error)) {
+            std::fprintf(stderr, "%s\n", error.c_str());
+            return 1;
+        }
+        std::error_code ec;
+        std::filesystem::create_directories(args.state_from[1], ec);
+        int written = 0;
+        for (const auto& group: journal.ticks)
+            for (const auto& st: group.states) {
+                const char* role = st.role == bmmo::session::JOURNAL_STATE_FIRST_BAD ? "first_bad"
+                                 : st.role == bmmo::session::JOURNAL_STATE_LAST_GOOD ? "last_good" : "other";
+                const std::string base = (std::filesystem::path(args.state_from[1])
+                                          / (std::to_string(st.tick) + "_" + role)).string();
+                const bool ok = write_text_file(base + ".sav", st.savestate) && write_text_file(base + ".scr", st.scripts)
+                             && write_ball_map(base + ".map", st.names);
+                std::string balls;
+                for (const auto& [owner, entity]: st.names) balls += " " + entity + "=" + std::to_string(owner);
+                std::printf("state tick %u episode %u %s: blob %zu bytes, scripts %zu bytes, balls%s -> %s.sav%s\n", st.tick,
+                            st.episode, role, st.savestate.size(), st.scripts.size(), balls.c_str(), base.c_str(),
+                            ok ? "" : " (NOT WRITTEN)");
+                if (ok) ++written;
+            }
+        std::printf("%d STATE records written\n", written);
+        return written > 0 ? 0 : 1;
+    }
+
     // --savestate-diff A B and --savestate-describe FILE: savestate blobs
     // written by BallanceMMOSessionClient --dump-savestate.  The diff is
     // diff_savestate's first differing field (the environment identity
@@ -3686,6 +4067,7 @@ namespace {
                 return 1;
             }
         }
+        if (!args.savestate_maps.empty()) return run_savestate_mapped(args, blobs);   // step FD2
         if (!args.own_cores.empty()) {
             // Step DX3 (design 9.3 (b)): the named difference set aside.
             // rc 0 only when nothing but the named difference differs (the
@@ -6010,6 +6392,35 @@ namespace {
                     ++delivered;
                     return true;
                 }
+                case bmmo::session::journal_tag::state: {
+                    // Step FD2: a client's whole record for a world check
+                    // episode (--state-from extracts it).
+                    const uint32_t tick = in.u32();
+                    const uint32_t episode = in.u32();
+                    const uint8_t role = in.u8();
+                    const uint16_t n = in.u16();
+                    for (uint16_t k = 0; in.ok && k < n; ++k) {
+                        in.u32();
+                        in.str();
+                    }
+                    uint32_t sizes[2] = {0, 0};
+                    for (uint32_t& size: sizes) {
+                        size = in.u32();
+                        std::string skipped;
+                        if (!in.ok || !in.bytes(skipped, size)) {
+                            in.ok = false;
+                            break;
+                        }
+                    }
+                    if (!in.ok) break;
+                    seen_tick(tick);
+                    std::printf("tick %-8u state episode=%u role=%s balls=%u savestate=%u scripts=%u bytes\n", tick, episode,
+                        role == bmmo::session::JOURNAL_STATE_FIRST_BAD ? "first_bad"
+                        : role == bmmo::session::JOURNAL_STATE_LAST_GOOD ? "last_good" : "other",
+                        static_cast<unsigned>(n), sizes[0], sizes[1]);
+                    ++delivered;
+                    return true;
+                }
                 case bmmo::session::journal_tag::wait: {
                     // Version 7 (step R12): the server's wait in a player's
                     // relay header from `tick` on (a client's: the header's
@@ -6779,6 +7190,39 @@ namespace {
         }
 
         size_t simulated = 0, matched = 0, compared = 0, checkpoints = 0, checkpoint_mismatches = 0;
+        // Step FD2: --dump-savestate-at's ticks (a comma list or FROM:TO) -
+        // or step SFD's BMMO_REPLAY_SAVESTATE_DUMP=FROM,UNTIL,DIR, the same
+        // dump (its DIR as given, resolved after the engine's boot as before);
+        // --world-fold's ring.
+        std::set<uint32_t> dump_at;
+        bool dump_range = false;
+        unsigned dump_from = 0, dump_until = 0;
+        std::string dump_dir = args.dump_savestate_at_dir;
+        if (!args.dump_savestate_at.empty()) {
+            if (std::sscanf(args.dump_savestate_at.c_str(), "%u:%u", &dump_from, &dump_until) == 2) dump_range = true;
+            else
+                for (size_t at = 0; at <= args.dump_savestate_at.size();) {
+                    const size_t comma = std::min(args.dump_savestate_at.find(',', at), args.dump_savestate_at.size());
+                    const std::string item = args.dump_savestate_at.substr(at, comma - at);
+                    char* end = nullptr;
+                    const unsigned long tick = std::strtoul(item.c_str(), &end, 10);
+                    if (item.empty() || *end != '\0') {
+                        std::fprintf(stderr, "--dump-savestate-at: '%s' is not a tick list or FROM:TO\n",
+                                     args.dump_savestate_at.c_str());
+                        return 2;
+                    }
+                    dump_at.insert(static_cast<uint32_t>(tick));
+                    at = comma + 1;
+                }
+        } else if (const char* spec = std::getenv("BMMO_REPLAY_SAVESTATE_DUMP"); spec && *spec) {
+            char dir[1024] = {0};
+            if (std::sscanf(spec, "%u,%u,%1023[^\n]", &dump_from, &dump_until, dir) == 3) {
+                dump_range = true;
+                dump_dir = dir;
+            }
+        }
+        std::string world_folds;
+        uint32_t world_fold_first = 0, world_fold_ticks = 0;
         long long first_divergence = -1, first_checkpoint_divergence = -1;
         std::string dump_before;   // --dump-entity: the tick before the divergence
         bool warned_offset = false;
@@ -7015,29 +7459,39 @@ namespace {
             }
             ++simulated;
             last_written_tick = group.tick;
-            // Step SFD: BMMO_REPLAY_SAVESTATE_DUMP=FROM,UNTIL,DIR writes the
-            // stepped world's savestate blob of every tick in [FROM, UNTIL] to
-            // DIR/<tick>.sav - the server's side of a client's --dump-savestate,
-            // for --savestate-diff / --savestate-describe (the hidden collision
-            // state a row does not show).
-            if (const char* spec = std::getenv("BMMO_REPLAY_SAVESTATE_DUMP"); spec && *spec) {
-                unsigned from = 0, until = 0;
-                char dir[1024] = {0};
-                if (std::sscanf(spec, "%u,%u,%1023[^\n]", &from, &until, dir) == 3 && group.tick >= from && group.tick <= until) {
-                    std::vector<uint8_t> blob;
-                    std::string dump_error;
-                    if (bmmo::physics::get_savestate(world->physics(), blob, dump_error)) {
-                        std::error_code ec;
-                        std::filesystem::create_directories(dir, ec);
-                        const std::filesystem::path path = std::filesystem::path(dir) / (std::to_string(group.tick) + ".sav");
-                        if (FILE* f = std::fopen(path.string().c_str(), "wb")) {
-                            std::fwrite(blob.data(), 1, blob.size(), f);
-                            std::fclose(f);
-                        }
-                    } else {
-                        std::fprintf(stderr, "tick %u: savestate dump: %s\n", group.tick, dump_error.c_str());
-                    }
+            // Step FD2: --dump-savestate-at, the server's side of a client's
+            // STATE record (and of a client's --dump-savestate, step SFD), with
+            // the balls by owner for --savestate-map.
+            if (dump_range ? group.tick >= dump_from && group.tick <= dump_until : dump_at.count(group.tick) != 0) {
+                std::vector<uint8_t> blob;
+                std::string dump_error;
+                if (bmmo::physics::get_savestate(world->physics(), blob, dump_error)) {
+                    std::error_code ec;
+                    std::filesystem::create_directories(dump_dir, ec);
+                    const std::string base = (std::filesystem::path(dump_dir) / std::to_string(group.tick)).string();
+                    std::vector<std::pair<uint32_t, std::string>> balls;
+                    for (const uint32_t id: world->player_ids())
+                        if (std::string entity = world->player_ball_entity(id); !entity.empty()) balls.emplace_back(id, std::move(entity));
+                    if (!write_text_file(base + ".sav", std::string(blob.begin(), blob.end())) || !write_ball_map(base + ".map", balls))
+                        std::fprintf(stderr, "tick %u: cannot write %s.sav / .map\n", group.tick, base.c_str());
+                } else {
+                    std::fprintf(stderr, "tick %u: --dump-savestate-at: %s\n", group.tick, dump_error.c_str());
                 }
+            }
+            // Step FD2: --world-fold, the position fold a client's world check
+            // takes of every retired tick (client_core_world_check.cpp
+            // world_check_fold), of this world's journal rows.
+            if (args.world_fold_from >= 0 && group.tick >= args.world_fold_from && group.tick <= args.world_fold_to) {
+                std::vector<bmmo::session::body_state> rows;
+                world->snapshot_for_journal(rows);
+                const uint64_t fold = bmmo::session::world_check::position_fold(rows);
+                char text[20];
+                std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(fold));
+                if (world_fold_ticks == 0) world_fold_first = group.tick;
+                world_folds += text;
+                ++world_fold_ticks;
+                std::printf("world-fold tick %u mechanisms %08x balls %08x\n", group.tick, static_cast<unsigned>(fold >> 32),
+                            static_cast<unsigned>(fold & 0xFFFFFFFFu));
             }
             // Step SP8: the stepped world, before a RESYNC record below replaces
             // it - a client journal's resync tick traces the replay's own state,
@@ -7303,6 +7757,8 @@ namespace {
             out.note(last_written_tick, "end: replay finished");
             out.close();
         }
+        // Step FD2: the ring as fork_detail / fork_notice carry it: "@first", then 16 hex digits a tick.
+        if (world_fold_ticks) std::printf("world-fold @%u %s\n", world_fold_first, world_folds.c_str());
         std::printf("summary: ticks=%zu matched=%zu first_divergence=%lld checkpoints=%zu checkpoint_mismatches=%zu\n",
             simulated, matched, first_divergence, checkpoints, checkpoint_mismatches);
         // FULL step OCK: the surface signature's memo (BMMO_HASH_MEMO) in this
@@ -10481,6 +10937,15 @@ int main(int argc, char** argv) {
             "           [--io-flush MODE | journal=MODE,...]   (step IOF; the SimTool writes --write-journal on its own\n"
             "            thread, with the synchronous journal's flush points: no mode changes them)\n"
             "           [--ignore-resync]\n"
+            "           [--dump-savestate-at TICKS DIR] [--world-fold FROM:TO]  (step FD2: the replayed world's blob\n"
+            "            of each tick (a comma list or FROM:TO) as DIR/<tick>.sav with its balls by owner in .map; the\n"
+            "            server's per-tick position folds of FROM..TO as a world check DETAIL's ring)\n"
+            "       BallanceMMOSimTool --state-from <client.bmjc> DIR   (step FD2: its STATE records as\n"
+            "            DIR/<tick>_<role>.sav / .scr / .map)\n"
+            "       BallanceMMOSimTool --savestate-diff A.sav B.sav --savestate-map A.map [--savestate-map B.map]\n"
+            "            [--max-diff N]   (step FD2: two worlds' blobs, balls by owner, records matched by name;\n"
+            "            a differing list field shows the items only A has as -item, only B has as +item;\n"
+            "            exit 0 identical, 3 differ)\n"
             "           [--placement-trace PATH [--drop-sector N] [--placement-trace-player ID]] [--drop-sectors-above N]\n"
             "           (step SP8, the networked invariant: sector N's rows (default 1) traced after every replayed\n"
             "            tick, with player ID's ball line; Sector events of sectors above N skipped)\n"
@@ -10607,6 +11072,7 @@ int main(int argc, char** argv) {
         so.ticks = args.synth_ticks;
         return bmmo::sim::run_synth_trafo_session(so);
     }
+    if (!args.state_from[0].empty()) return run_state_from(args);
     if (!args.savestate_diff[0].empty() || !args.savestate_describe.empty()) return run_savestate_files(args);
     if (!args.describe_script.empty()) return run_describe_script(args);
     if (args.root.empty()) {
