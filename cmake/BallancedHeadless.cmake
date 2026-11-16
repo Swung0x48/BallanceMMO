@@ -133,6 +133,16 @@ function(bmmo_add_ballanced_headless BALLANCED_ROOT OUT_TARGET)
     include("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/PortableMath.cmake")
     bmmo_apply_portable_math_to_all(physics_RTStatic)
     bmmo_link_portable_math(physics_RTStatic PUBLIC)
+    # x87 builds (BMMO_PHYSICS_X87 SOFT or HARD): the game-side routines the 2002 VxMath.dll, CK2_3D.dll and
+    # TT_Toolbox_RT.dll compute in x87 code run on the IVP x87 model too (VX_X87_GAME, headless engine only; the
+    # Player.exe client keeps the 2002 DLLs).  The libraries are built in other directories, hence CMP0079.
+    cmake_policy(SET CMP0079 NEW)
+    if (TARGET ivp_x87_arithmetic AND TARGET VxMathStatic)
+        target_link_libraries(VxMathStatic PRIVATE ivp_x87_arithmetic)
+        target_compile_definitions(VxMathStatic PUBLIC VX_X87_GAME=1)
+        target_link_libraries(CK2_3DStatic PRIVATE ivp_x87_arithmetic)
+        target_link_libraries(TT_Toolbox_RTStatic PRIVATE ivp_x87_arithmetic)
+    endif ()
     if (WIN32 AND TARGET physics_RTStatic)
         target_compile_definitions(physics_RTStatic PRIVATE WIN32 _WINDOWS)
     endif ()

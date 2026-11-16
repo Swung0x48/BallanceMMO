@@ -101,6 +101,7 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#include <fstream>
 
 // The IVP environment's random generator (ivp_utility), as physics_world.cpp
 // declares it: --legacy-restore puts the cursor back the way the old per-body
@@ -113,6 +114,19 @@ namespace {
         std::string root;
         std::string map;                  // --map FILE (step CMAP): a custom map in the level slot
         std::string replay;
+        // --tas FILE: a TASSupport record played as the 2002 game plays it (run_tas).  FILE holds the decompressed
+        // frames <f32 frame ms><u32 key bits> (scripts/tas_raw.py makes it from a .tas).  The defaults are the state
+        // Player.exe with TASSupport (legacy mode) has; with them the 31 Env_A TAS and 16 off-route records replay
+        // frame for frame like the 2002 DLL in an x87 build.
+        std::string tas;
+        std::string tas_trace;        // --tas-trace FILE: the ball's world matrix per frame, TASSupport's trace format
+        int tas_offset = 34;          // --tas-offset N: fixed ticks between Load Level and frame 0 (34 = TASSupport's)
+        int tas_reset_frame = 1;      // --tas-reset-frame R: the physics clock reset before frame R
+        bool tas_orig_random = false; // --tas-orig-random: keep the engine's own Random blocks
+        bool tas_legacy = true;       // --tas-no-legacy: skip TASSupport legacy mode's explosion-script edit
+        int tas_movement_check = 4;   // --tas-movement-check N: the environment's next_movement_check at the reset
+        unsigned tas_seed = 3560118427u;  // --tas-seed S: the ivp_rand seed at the reset (75^21)
+        bool tas_reset_precision = false; // --tas-reset-precision: BMMO's per-level x87 precision reset
         // --replay-session <file.bmjs>: the session black box (design 9.15).
         // --list prints the file and simulates nothing (no --root needed);
         // --journal-trace turns on the world's per-tick diagnostics;
@@ -902,6 +916,15 @@ namespace {
                 out.map = std::filesystem::absolute(v).string();   // the engine chdir's into <root>/Bin
                 continue;
             }
+            if (arg == "--tas") { if (!(v = next())) return false; out.tas = v; continue; }
+            if (arg == "--tas-trace") { if (!(v = next())) return false; out.tas_trace = v; continue; }
+            if (arg == "--tas-offset") { if (!(v = next())) return false; out.tas_offset = std::atoi(v); continue; }
+            if (arg == "--tas-reset-frame") { if (!(v = next())) return false; out.tas_reset_frame = std::atoi(v); continue; }
+            if (arg == "--tas-orig-random") { out.tas_orig_random = true; continue; }
+            if (arg == "--tas-no-legacy") { out.tas_legacy = false; continue; }
+            if (arg == "--tas-movement-check") { if (!(v = next())) return false; out.tas_movement_check = std::atoi(v); continue; }
+            if (arg == "--tas-seed") { if (!(v = next())) return false; out.tas_seed = static_cast<unsigned>(std::strtoul(v, nullptr, 10)); continue; }
+            if (arg == "--tas-reset-precision") { out.tas_reset_precision = true; continue; }
             if (arg == "--root") { if (!(v = next())) return false; out.root = v; }
             else if (arg == "--replay") { if (!(v = next())) return false; out.replay = v; }
             else if (arg == "--replay-session") { if (!(v = next())) return false; out.replay_session = v; }
@@ -1985,6 +2008,135 @@ namespace {
         if (args.list_trafos && args.dump_at < 0) list_trafos(engine);
         if (trafo) return trafo->finish();
         return 0;
+    }
+
+    // TASSupport legacy mode (TASSupport::OnLoadScript): the first "Set Position" block of each trafo explosion script
+    // is removed with BML's ScriptHelper::DeleteBB - deactivated, every link touching it re-pointed to one Nop block -
+    // so the old ball's pieces are never physicalized.  Player.exe with legacy TASSupport has no piece bodies at all.
+    void apply_tas_legacy_edit(bmmo::sim::headless_engine& engine) {
+        CKContext* ctx = engine.context();
+        CKBehavior* nop = nullptr;   // one Nop for all three scripts, as BML creates it once
+        CKBehaviorIO* nop_in = nullptr;
+        CKBehaviorIO* nop_out = nullptr;
+        for (const char* name: {"Ball_Explosion_Wood", "Ball_Explosion_Paper", "Ball_Explosion_Stone"}) {
+            auto* script = static_cast<CKBehavior*>(ctx->GetObjectByNameAndClass(const_cast<CKSTRING>(name), CKCID_BEHAVIOR, nullptr));
+            if (!script) { std::fprintf(stderr, "tas: legacy: no script %s\n", name); continue; }
+            CKBehavior* beh = nullptr;
+            for (int i = 0; i < script->GetSubBehaviorCount() && !beh; ++i) {
+                CKBehavior* sub = script->GetSubBehavior(i);
+                if (sub && sub->GetName() && !std::strcmp(sub->GetName(), "Set Position")) beh = sub;
+            }
+            if (!beh) { std::fprintf(stderr, "tas: legacy: no Set Position in %s\n", name); continue; }
+            beh->Activate(FALSE);
+            int relinked = 0;
+            const int links = script->GetSubBehaviorLinkCount();
+            for (int i = 0; i < links; ++i) {
+                CKBehaviorLink* link = script->GetSubBehaviorLink(i);
+                if (link->GetInBehaviorIO()->GetOwner() == beh || link->GetOutBehaviorIO()->GetOwner() == beh) {
+                    if (!nop) {
+                        nop = static_cast<CKBehavior*>(ctx->CreateObject(CKCID_BEHAVIOR));
+                        nop->InitFromGuid(CKGUID(0x302561c4, 0xd282980));
+                        nop_in = nop->GetInput(0);
+                        nop_out = nop->GetOutput(0);
+                    }
+                    link->SetInBehaviorIO(nop_out);
+                    link->SetOutBehaviorIO(nop_in);
+                    ++relinked;
+                }
+            }
+            std::fprintf(stderr, "tas: legacy: %s Set Position removed (%d links)\n", name, relinked);
+        }
+    }
+
+    int run_tas(bmmo::sim::headless_engine& engine, const arguments& args) {
+        std::vector<std::pair<float, uint32_t>> frames;
+        {
+            std::ifstream in(args.tas, std::ios::binary);
+            float ms = 0.0f;
+            uint32_t bits = 0;
+            while (in.read(reinterpret_cast<char*>(&ms), 4) && in.read(reinterpret_cast<char*>(&bits), 4))
+                frames.emplace_back(ms, bits);
+        }
+        if (frames.empty() || args.level <= 0) {
+            std::fprintf(stderr, "--tas: no frames in %s, or no --level\n", args.tas.c_str());
+            return 2;
+        }
+        engine.set_random_patch(!args.tas_orig_random);
+        std::string error;
+        for (int i = 0; i < args.boot_ticks; ++i)
+            if (!engine.tick(error)) { std::fprintf(stderr, "boot tick failed: %s\n", error.c_str()); return 1; }
+        if (args.tas_legacy) apply_tas_legacy_edit(engine);
+        engine.set_reset_precision_on_load(args.tas_reset_precision);
+        if (!engine.load_level(args.level, error)) { std::fprintf(stderr, "load_level: %s\n", error.c_str()); return 1; }
+        for (int i = 0; i < args.tas_offset; ++i)
+            if (!engine.tick(error)) { std::fprintf(stderr, "offset tick failed: %s\n", error.c_str()); return 1; }
+        auto read_cell = [&](const char* array, int row, int column) {
+            int value = 0;
+            if (CKDataArray* a = engine.data_array(array)) a->GetElementValue(row, column, &value);
+            return value;
+        };
+        int codes[6] = {CKKEY_UP, CKKEY_DOWN, CKKEY_LEFT, CKKEY_RIGHT, CKKEY_LSHIFT, CKKEY_SPACE};
+        for (int k = 0; k < 6; ++k)
+            if (const int code = read_cell("Keyboard", 0, k)) codes[k] = code;
+        FILE* trace = args.tas_trace.empty() ? nullptr : std::fopen(args.tas_trace.c_str(), "w");
+        CKContext* context = engine.context();
+        CKIpionManager* physics = engine.physics();
+        const auto started = std::chrono::steady_clock::now();
+        size_t played = 0;
+        bool finished = false;
+        int finish_frame = -1;
+        for (size_t f = 0; f < frames.size() && !finished; ++f) {
+            if (static_cast<int>(f) == args.tas_reset_frame && physics) {
+                bmmo_physics_clock_state clock{};
+                if (!bmmo::physics::get_clock_state(physics, clock, error)) { std::fprintf(stderr, "clock: %s\n", error.c_str()); return 1; }
+                clock.base_time = 0;
+                clock.current_time = 0;
+                clock.time_of_last_psi = 0;
+                clock.time_of_next_psi = 1.0 / 66;
+                // TASSupport resets the clock only: the movement-check counter and the ivp_rand seed are what the
+                // process left, which in Player.exe is the same on every level (4 and 75^21 after its boot).
+                if (args.tas_movement_check >= 0) clock.next_movement_check = args.tas_movement_check;
+                ivp_srand(static_cast<int>(args.tas_seed));
+                if (!bmmo::physics::set_clock_state(physics, clock, error)) { std::fprintf(stderr, "clock: %s\n", error.c_str()); return 1; }
+                physics->m_DeltaTime = engine.time_manager()->GetLastDeltaTime();
+                std::fprintf(stderr, "tas: physics clock reset before frame %zu (delta %f)\n", f, physics->m_DeltaTime);
+            }
+            engine.set_frame_ms(frames[f].first);
+            unsigned char keyboard[256] = {};
+            const uint32_t bits = frames[f].second;
+            for (int k = 0; k < 6; ++k) keyboard[codes[k] & 0xFF] = (bits >> k) & 1u;
+            keyboard[CKKEY_Q] = (bits >> 6) & 1u;
+            keyboard[CKKEY_ESCAPE] = (bits >> 7) & 1u;
+            keyboard[CKKEY_RETURN] = (bits >> 8) & 1u;
+            engine.set_keyboard_state(keyboard);
+            if (!engine.tick(error)) { std::fprintf(stderr, "frame %zu failed: %s\n", f, error.c_str()); return 1; }
+            ++played;
+            CK3dEntity* ball = nullptr;
+            if (CKDataArray* level = engine.data_array("CurrentLevel")) ball = CK3dEntity::Cast(level->GetElementObject(0, 1));
+            if (trace && ball) {
+                const VxMatrix& m = ball->GetWorldMatrix();
+                std::fprintf(trace, "%zu %s", f + 1, ball->GetName() ? ball->GetName() : "-");
+                for (int r = 0; r < 4; ++r)
+                    for (int c = 0; c < 3; ++c) std::fprintf(trace, " %.9g", m[r][c]);
+                std::fputc('\n', trace);
+            }
+            auto* gameplay = static_cast<CKBeObject*>(context->GetObjectByNameAndParentClass(
+                    const_cast<CKSTRING>("All_Gameplay"), CKCID_BEOBJECT, nullptr));
+            if (gameplay) {
+                gameplay->SetAsWaitingForMessages();
+                for (int i = 0; i < gameplay->GetLastFrameMessageCount(); ++i) {
+                    const char* name = context->GetMessageManager()->GetMessageTypeName(
+                            gameplay->GetLastFrameMessage(i)->GetMsgType());
+                    if (name && std::strcmp(name, "Level_Finish") == 0) { finished = true; finish_frame = static_cast<int>(f + 1); }
+                }
+            }
+        }
+        const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        if (trace) std::fclose(trace);
+        std::fprintf(stderr, "tas: %s at frame %d; %zu frames played in %.3f s = %.1f frames/s, %.4f ms/frame\n",
+                     finished ? "Level_Finish" : "not finished", finish_frame, played, secs, played / secs,
+                     1000.0 * secs / static_cast<double>(played));
+        return finished ? 0 : 3;
     }
 
     int run_replay(bmmo::sim::headless_engine& engine, const arguments& args) {
@@ -10104,6 +10256,9 @@ int main(int argc, char** argv) {
             "[--track ENTITY] [--verbose]\n"
             "       BallanceMMOSimTool --root <game dir> --replay <record.bmrc> [--boot-ticks N]\n"
             "           [--nav clone] (session navigation replica; --nav retail-cxx is a diagnostic mode)\n"
+            "       BallanceMMOSimTool --root <game dir> --level N --tas <frames.raw> [--tas-trace FILE] [--tas-offset 34]\n"
+            "           [--tas-no-legacy] [--tas-movement-check 4] [--tas-seed 3560118427] [--tas-reset-precision]\n"
+            "           (a TASSupport record as the 2002 game plays it; scripts/tas_raw.py makes the frames file)\n"
             "       BallanceMMOSimTool [--root <game dir>] --replay-session <file.bmjs> [--list] [--ticks N]\n"
             "           [--from A --to B] [--dump-entity NAME] [--stop-on-divergence] [--journal-trace]\n"
             "           [--write-journal <out.bmjs>] [--report-every N] [--continue-after-jump]\n"
@@ -10279,7 +10434,8 @@ int main(int argc, char** argv) {
         static_cast<void*>(engine->context()->GetCurrentLevel()),
         engine->context()->IsPlaying() ? 1 : 0, root_scripts(*engine).c_str());
 
-    const int result = args.replay.empty() ? run_free(*engine, args) : run_replay(*engine, args);
+    const int result = !args.tas.empty() ? run_tas(*engine, args)
+                     : args.replay.empty() ? run_free(*engine, args) : run_replay(*engine, args);
     std::fprintf(stderr, "done: %llu ticks in %.2f s\n",
         static_cast<unsigned long long>(engine->ticks()),
         std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());

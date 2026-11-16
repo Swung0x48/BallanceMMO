@@ -344,16 +344,17 @@ namespace bmmo::sim {
                 return false;
             }
         }
+        const float frame_ms = frame_ms_ > 0.0f ? frame_ms_ : bmmo::session::TICK_DELTA_MS;
         time_->SetTimeScaleFactor(1.0f);
-        time_->SetMinimumDeltaTime(bmmo::session::TICK_DELTA_MS);
-        time_->SetMaximumDeltaTime(bmmo::session::TICK_DELTA_MS);
+        time_->SetMinimumDeltaTime(frame_ms);
+        time_->SetMaximumDeltaTime(frame_ms);
         // Re-patch the "Random" block instances while a level is still
         // loading (design 9.10): base.cmo's own instances are already caught
         // by finish_load, this catches whatever a level's file adds, before
         // its scripts get a chance to draw from it.  Stops once
         // Gameplay_Ingame is active so a long session does not keep scanning
         // every object every tick.
-        if (!bmmo::game::script_active(context_, "Gameplay_Ingame")) {
+        if (random_patch_ && !bmmo::game::script_active(context_, "Gameplay_Ingame")) {
             const int patched = bmmo::physics::install_random_block(context_);
             if (patched > 0) log("random block: " + std::to_string(patched) + " instances patched");
         }
@@ -363,7 +364,7 @@ namespace bmmo::sim {
             error = "CKContext::Process failed: " + std::to_string(processed);
             return false;
         }
-        if (std::fabs(time_->GetLastDeltaTime() - bmmo::session::TICK_DELTA_MS) > 1.0e-4f) {
+        if (std::fabs(time_->GetLastDeltaTime() - frame_ms) > 1.0e-4f) {
             error = "behaviour delta drifted from the fixed tick: "
                   + std::to_string(time_->GetLastDeltaTime());
             return false;
@@ -535,7 +536,8 @@ namespace bmmo::sim {
 
     bool headless_engine::load_level(int level, std::string& error) {
         error.clear();
-        if (CKIpionManager* manager = physics()) manager->ResetGamePrecision();   // TASX, as request_level
+        if (reset_precision_on_load_)
+            if (CKIpionManager* manager = physics()) manager->ResetGamePrecision();   // TASX, as request_level
         if (!options_.map_file.empty() && !redirect_level_file(level, error)) return false;
         CKDataArray* current_level = data_array("CurrentLevel");
         if (!current_level) {

@@ -71,6 +71,15 @@ namespace bmmo::sim {
         // Verbatim 256-byte keyboard buffer (a recorded retail frame).
         void set_keyboard_state(const unsigned char* keys);
         void clear_keys();
+        // The behaviour frame's length in ms (0, the default: the session's fixed tick).  A TAS replay sets each
+        // frame's own, as TASSupport sets the time manager's delta.
+        void set_frame_ms(float ms) { frame_ms_ = ms; }
+        // FALSE keeps the "Random" block the engine's own while a level loads (design 9.10 patches it by default).
+        void set_random_patch(bool on) { random_patch_ = on; }
+        // load_level resets the x87 model to 24 bits (BMMO hosts do at every level load, TASX).  FALSE keeps the
+        // process's state, as the 2002 game does (24 bits only until the process's first hull, then 64): a TAS replay
+        // needs it, or every VxMath / CK2_3D operation before the level's first hull runs at the wrong precision.
+        void set_reset_precision_on_load(bool on) { reset_precision_on_load_ = on; }
 
         uint64_t ticks() const { return ticks_; }
         CKContext* context() const { return context_; }
@@ -95,6 +104,9 @@ namespace bmmo::sim {
         CKRenderContext* render_ = nullptr;
         void* game_info_ = nullptr;
         uint64_t ticks_ = 0;
+        float frame_ms_ = 0.0f;
+        bool random_patch_ = true;
+        bool reset_precision_on_load_ = true;
         bool startup_acquired_ = false;
         bmmo::game::level_request level_request_;
         bool map_redirect_pending_ = false;   // step CMAP: a custom map's request not redirected yet
