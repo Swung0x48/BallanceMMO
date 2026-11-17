@@ -689,6 +689,10 @@ namespace bmmo::session {
     constexpr double TICK_MICROS = 1000000.0 / TICK_RATE;
     constexpr float TICK_DELTA_MS = 1000.0f / TICK_RATE;
     constexpr std::chrono::microseconds TICK_DURATION{1000000 / TICK_RATE};
+    // The rollback history's default length (rollback_thresholds::history_ticks):
+    // two 48-tick resim windows (rollback.hpp says why), a record count rather
+    // than a duration.  The server reads it for a client's resync reach.
+    constexpr size_t ROLLBACK_HISTORY_TICKS = 96;
 
     // session_snapshot_msg::body_state::flags bits.
     constexpr uint8_t BODY_FLAG_SIMULATED         = 1u << 0;

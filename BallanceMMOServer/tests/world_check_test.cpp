@@ -648,6 +648,67 @@ TEST(WorldWatch, Heals) {
     drop(209 + 2 * 660 + 16);
     EXPECT_EQ(count(stat_kind::fork_heal, 2, "reassign"), reassigns + 1) << "the second drop falls back";
 
+    // Two heals that did not hold, then the worlds equal again by themselves
+    // (equal_again keeps the count): every kDecayTicks (60 s) of equal samples take one off,
+    // down to 0 (the user, 2026-11-16).
+    world_watch dc(sink);
+    dc.set_heal(true);
+    dc.member(1, caps, "a", 100);
+    dc.ready(1, 100, 100);
+    const auto dc_report = [&](uint32_t tick, const std::vector<body_state>& rows, uint32_t now, uint8_t flags, uint32_t hx) {
+        world_report_in r;
+        r.player = 1; r.epoch = 100; r.tick = tick; r.flags = flags; r.k = 8; r.heal_x = hx;
+        r.terms = wc::fold_rows(rows, {});
+        if (flags & kDetail) { r.rows = rows; r.episode = notices.back().episode; }
+        dc.report(r, now);
+    };
+    constexpr uint32_t S = wc::kSampleTicks, D = world_watch::kDecayTicks, G = world_watch::kGapTicks;
+    const auto k8 = [](uint32_t t) { return (t + 7) / 8 * 8; };   // the first capture tick at or after t (k = 8)
+    const uint32_t t0 = 3 * S;
+    dc.sample(t0, server, {}, false, t0 + 1);
+    dc_report(t0, forked, t0 + 7, 0, 0);
+    dc_report(t0, forked, t0 + 8, kDetail, 0);
+    uint32_t hx = k8(t0 + 9), last_x = 0;
+    for (int i = 1; i <= 2; ++i) {
+        order = dc.next_heal(hx, false, none);
+        ASSERT_TRUE(order) << i;
+        dc.heal_sent(*order, hx, 2048, false, hx + 1);
+        const uint32_t v = (hx / S + 1) * S;
+        dc.sample(v, server, {}, false, v + 1);
+        dc_report(v, forked, v + 5, 0, hx);
+        EXPECT_EQ(last(stat_kind::fork_verify)[8], std::to_string(i));
+        last_x = hx;
+        hx = k8(hx + 1 + G);   // the fixed gap from heal_sent at hx + 1
+        dc.step(hx - 1);
+    }
+    const auto decays = [&] { return count(stat_kind::fork_verify, 4, "decay"); };
+    uint32_t e = (hx / S + 1) * S;   // the first equal sample: equal_again, the run starts
+    const uint32_t run_start = e;
+    const auto equal_to = [&](uint32_t until) {
+        for (; e <= until; e += S) {
+            dc.sample(e, server, {}, false, e + 1);
+            dc_report(e, server, e + 5, 0, last_x);
+        }
+    };
+    equal_to(run_start + D - S);
+    EXPECT_EQ(decays(), 0) << "one sample short: not yet";
+    equal_to(run_start + D);
+    EXPECT_EQ(decays(), 1);
+    EXPECT_EQ(last(stat_kind::fork_verify)[8], "1");
+    // A differing sample ends the run: the next kDecayTicks count from its next equal one.
+    dc.sample(e, server, {}, false, e + 1);
+    dc_report(e, ball, e + 5, 0, last_x);
+    dc_report(e, ball, e + 6, kDetail, last_x);
+    e += S;
+    const uint32_t second = e;   // equal again (self_healed before any heal): the run restarts
+    equal_to(second + D - S);
+    EXPECT_EQ(decays(), 1) << "the run restarted at " << second;
+    equal_to(second + D);
+    EXPECT_EQ(decays(), 2);
+    EXPECT_EQ(last(stat_kind::fork_verify)[8], "0");
+    equal_to(second + 2 * D);
+    EXPECT_EQ(decays(), 2) << "never below 0";
+
     // Off: no queue, FD1's would-heal only.
     world_watch off(sink);
     off.member(1, caps, "a", 100);

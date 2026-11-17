@@ -157,6 +157,7 @@ namespace bmmo::sim {
         static constexpr uint32_t kBlindTicks = 10 * bmmo::session::TICK_RATE;
         static constexpr uint32_t kReopenTicks = 60 * bmmo::session::TICK_RATE;   // 3960: a close's keys reopen it
         static constexpr uint32_t kKickAfter = 6;                                  // heals in a row that did not hold
+        static constexpr uint32_t kDecayTicks = 60 * bmmo::session::TICK_RATE;    // 3960 equal ticks take one off the count
         static constexpr uint32_t kVerifyWaitTicks = bmmo::session::TICK_RATE;   // the other members' reports of T
 
     private:
@@ -235,6 +236,12 @@ namespace bmmo::sim {
             bool queued = false, kicked = false;
             uint32_t failed_in_row = 0;          // definition B: heal_failed alone, reset by healed / re_fork
             std::vector<uint32_t> failed_heals;  // the X of each counted one
+            // The user, 2026-11-16: every kDecayTicks of compared samples all
+            // equal, with no episode open, take one off failed_in_row (down
+            // to 0).  The run starts at its first such sample; a differing or
+            // uncompared sample ends it.
+            bool equal_run = false;
+            uint32_t equal_since = 0;
             std::string last_keys, last_shared;  // the last heal_failed's
             uint8_t k = 0;                       // from its reports
             bmmo::session::resync_ref_id held_ref;
@@ -261,6 +268,7 @@ namespace bmmo::sim {
 
         void agree(const world_report_in& r, const char* result, uint8_t kinds = 0, const std::vector<uint32_t>& owners = {});
         void not_compared(member_state& m, const world_report_in& r, const char* result);
+        void decay(member_state& m, uint32_t tick);
         void handle(member_state& m, world_report_in& r, uint32_t now);
         void compare(member_state& m, sample_entry& sample, const world_report_in& r, uint32_t now);
         void open(member_state& m, sample_entry& sample, const world_report_in& r,

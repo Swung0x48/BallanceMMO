@@ -2533,7 +2533,8 @@ public:
     // past that base: the state of base - 1 would have no own ball, and the
     // client's hold would wait for a birth past its reach, time out and ask
     // again (RSO).
-    static constexpr int32_t kForkBirthReach = 95 - 40;   // a 96-tick history's reach, less 40 (7.2)
+    // The default history's reach (its length - 1) less 7.2's 40-tick margin.
+    static constexpr int32_t kForkBirthReach = static_cast<int32_t>(bmmo::session::ROLLBACK_HISTORY_TICKS) - 1 - 40;
     uint32_t on_fork_reassign(uint32_t session, uint32_t player, uint32_t episode, uint32_t last_full, bool guard) {
         std::lock_guard lk(state_mutex_);
         auto it = physics_sessions_.find(session);

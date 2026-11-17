@@ -918,6 +918,8 @@ def world_check_listing(paths, no_episodes=False, min_compared=None, tail=2 * SA
                     else:
                         e['close'] = '%s at %d (samples %d, forked %d ticks, own %d)' % (
                             v['outcome'], v['first'] + v['forked_ticks'], v['samples'], v['forked_ticks'], v['own_ticks'])
+                elif s['name'] == 'fork_verify' and v['outcome'] == 'decay':
+                    print('  decay p%d at %d: failed heals in a row now %d' % (v['player'], v['tick'], v['count']))
                 elif s['name'] in ('fork_heal', 'fork_verify', 'fork_kick', 'fork_reopen') and v['episode'] in episodes:
                     e = episodes[v['episode']]
                     if s['name'] == 'fork_heal':

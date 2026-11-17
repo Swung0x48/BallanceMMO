@@ -196,6 +196,32 @@ namespace bmmo::sim {
     void world_watch::not_compared(member_state& m, const world_report_in& r, const char* result) {
         agree(r, result);
         m.cause = result;
+        m.equal_run = false;
+    }
+
+    // An equal sample T with no episode open and no heal out: extend the run
+    // and take one off the count for each whole kDecayTicks of it.
+    void world_watch::decay(member_state& m, uint32_t tick) {
+        if (m.ep || m.heal.k != heal_state::kind::none || m.kicked) {
+            m.equal_run = false;
+            return;
+        }
+        if (!m.equal_run) {
+            m.equal_run = true;
+            m.equal_since = tick;
+            return;
+        }
+        if (tick - m.equal_since < kDecayTicks) return;
+        m.equal_since = tick;
+        if (m.failed_in_row == 0) return;
+        --m.failed_in_row;
+        if (!m.failed_heals.empty()) m.failed_heals.erase(m.failed_heals.begin());
+        put(stat_kind::fork_verify, {m.id, 0u, 0u, tick, "decay", "", "", 0, m.failed_in_row, ""});
+        notice n;
+        n.player = m.id;
+        n.line = m.name + ": equal for " + std::to_string(kDecayTicks) + " ticks to tick " + std::to_string(tick)
+               + ", failed heals in a row now " + std::to_string(m.failed_in_row) + " of " + std::to_string(kKickAfter);
+        emit(std::move(n));
     }
 
     void world_watch::compare(member_state& m, sample_entry& sample, const world_report_in& r, uint32_t now) {
@@ -232,8 +258,10 @@ namespace bmmo::sim {
                                  : !ep.decided && ep.unsettled_a ? wc_outcome::lead
                                  : !ep.final ? wc_outcome::self_healed : wc_outcome::equal_again, now);
             }
+            decay(m, r.tick);
             return;
         }
+        m.equal_run = false;
         ++differing_;
         if (!m.ep) return open(m, sample, r, diff, now);
         if (outstanding) return;

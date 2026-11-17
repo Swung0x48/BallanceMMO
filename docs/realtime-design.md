@@ -5338,9 +5338,16 @@ headless clients coordinated, 150 ms, snapshots off, the Pusher `P_Modul_01_Push
 
 **Accepted, and the user's to confirm** (each journaled so either reading recomputes): a heal_failed with some keys
 shared and some this member's alone counts; a member silent past the verify's 66-tick wait reads as not reporting the
-same; the count survives an `equal_again` close (definition B taken literally); the removal of a session's only
+same; the removal of a session's only
 member ends the session, and its Ready starts a new one. `physics.fork_heal` is not in the `server_config` record (an
 agreeing journal is then the same with the heal on and off; the startup line says it).
+
+**The count's decay (the user, 2026-11-16: "超过60秒对应的tick数如果一直都一致就能计数-1 ... 不要减到负的，到0为止").** An
+`equal_again` close keeps the count, but every 3960 ticks (60 s) of compared samples all equal, with no episode open
+and no heal out, take one off it, down to 0 (`world_watch::decay`). A differing or uncompared sample ends the run;
+the next run starts at its first equal sample. Each step down is one `fork_verify` record with outcome `decay` and
+its new count (episode 0) and one server log line. So a client whose fork comes back within a minute of going away
+keeps counting toward the kick, and failures an hour apart do not add up.
 
 **Not exercised:** F5 (an own death window, a trafo pass), a resync at a late join, an airship release, a sector
 activation or the level end beside a heal, 7.2's guard holding a fallback back (no run has the own birth that far

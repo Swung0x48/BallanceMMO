@@ -689,7 +689,7 @@ namespace bmmo::session {
         // late_tick_base in BallanceMMOServer/server.cpp); the history holds
         // two windows so the anchor tick of a full resim is still recorded
         // when its snapshot arrives.
-        size_t history_ticks = 96;
+        size_t history_ticks = ROLLBACK_HISTORY_TICKS;
         uint32_t max_resim_ticks = 48;   // give up (hard set only) beyond this lag
     };
 
