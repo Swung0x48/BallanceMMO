@@ -1214,6 +1214,9 @@ public:
         callbacks.on_player_added = [this](const bmmo::sim::member_change& c) { on_player_added(c); };
         callbacks.on_player_removed = [this](const bmmo::sim::member_change& c) { on_player_removed(c); };
         callbacks.on_world_fork = [this](uint32_t session, const bmmo::sim::world_watch::notice& n) { on_world_fork(session, n); };
+        callbacks.on_fork_reassign = [this](uint32_t session, uint32_t player, uint32_t episode, uint32_t last_full, bool guard) {
+            return on_fork_reassign(session, player, episode, last_full, guard);
+        };
         callbacks.on_player_add_failed = [this](const bmmo::sim::member_change& c, const std::string& error) {
             on_player_add_failed(c, error);
         };
@@ -1247,11 +1250,12 @@ public:
         if (virtual_) rc.clock = virtual_;
         runner_ = std::make_unique<bmmo::sim::session_runner>(rc, callbacks);
         Printf("Physics sessions enabled (game root %s, input delay >= %u ticks (per session, from ping), "
-               "snapshot interval %u, full every %u, journal %s, patience %s, lead adjust %s, input hints %s).",
+               "snapshot interval %u, full every %u, journal %s, patience %s, lead adjust %s, input hints %s, fork heal %s).",
                config_.physics_game_root,
                config_.physics_input_delay, rc.snapshot_interval, rc.full_snapshot_interval,
                rc.journal_dir.empty() ? std::string("off") : rc.journal_dir.string(), rc.patience ? "on" : "off",
-               rc.lead_adjust ? "on" : "off", rc.input_hints ? "on" : "off");
+               rc.lead_adjust ? "on" : "off", rc.input_hints ? "on" : "off",
+               rc.fork_heal ? "on" : config_.physics_fork_heal ? "off (snapshots on: reports only)" : "off");
     }
 
     bmmo::room::error_code check_physics_mods(const bmmo::server_room& r) {
@@ -2008,6 +2012,8 @@ public:
         msg.ref_tick = out.ref_tick;
         msg.ref_check = out.ref_check;
         msg.raw_size = out.raw_size;
+        msg.flags = out.flags;       // step FD3b: a fork heal's, in place
+        msg.episode = out.episode;
         msg.frame = out.frame;
         // The body caps the rows at MAX_BODIES_PER_SNAPSHOT and each byte
         // section at kMaxBytesField: a state that large is sent cut, and the
@@ -2306,6 +2312,20 @@ public:
                                       (it == clients_.end() ? std::string("?") : std::string(it->second.name)) + " (resync)", assigned_lead);
     }
 
+    // The base resync_member gives `c` now and its lead: the same rule, read
+    // through reanchor_base (no DX9 line), so a caller can decide on it and
+    // pass it in (step FD3b: one clock read, not two that can differ by a tick).
+    uint32_t resync_base_now(const physics_session_state& s, bmmo::net::connection c, uint32_t* assigned_lead) const {
+        const auto lead = s.leads.find(c);
+        const bool state = lead != s.leads.end() && (lead->second.caps & bmmo::session::CAP_RESYNC_STATE) != 0;
+        if (lead != s.leads.end() && bmmo::sim::uses_player_lead(config_.physics_lead_adjust, lead->second.caps))
+            return runner_->reanchor_base(s.id, bmmo::sim::effective_lead_ticks(lead->second.assigned_lead, lead->second.offset),
+                                          state, assigned_lead);
+        const auto it = clients_.find(c);
+        const uint32_t rtt_ms = it == clients_.end() ? 0u : it->second.ping_peak_ms;
+        return runner_->reanchor_base(s.id, bmmo::sim::resync_lead_ticks(s.input_delay, rtt_ms), state, assigned_lead);
+    }
+
     // The lead a late joiner is anchored at.  On the per-player path
     // (physics.lead_adjust on and the joiner declared CAP_LEAD,
     // uses_player_lead) it is the player's own (late-player design 2.5,
@@ -2471,11 +2491,11 @@ public:
     void on_world_fork(uint32_t session, const bmmo::sim::world_watch::notice& n) {
         std::lock_guard lk(state_mutex_);
         if (!n.line.empty()) Printf("Physics session %u: world check: %s", session, n.line.c_str());
-        if (!n.send) return;
         auto it = physics_sessions_.find(session);
         if (it == physics_sessions_.end()) return;
         const auto c = static_cast<bmmo::net::connection>(n.player);
         if (std::find(it->second.members.begin(), it->second.members.end(), c) == it->second.members.end()) return;
+        if (!n.send) return;
         bmmo::session_world_fork_msg msg;
         msg.session = session;
         msg.episode = n.episode;
@@ -2494,6 +2514,42 @@ public:
         msg.worst = n.worst;
         msg.serialize();
         send(c, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
+        // Step FD3b (5.3, the user's Q10 "A"): out of the physics session
+        // only, as a member that did not report ready; the player stays in
+        // the room, and a Ready late-joins the session again as a new
+        // membership (a fresh count).
+        if (n.kick) {
+            send_session_end(session, c, n.reason);
+            physics_session_member_left(c, "removed by the world check: its heals did not hold");
+            rooms_.set_ready(c, false);   // as a finisher: in the room, not ready
+            notify_ready_changed(c);
+        }
+    }
+
+    // Step FD3b (fork detection 7.6, 7.2): the fallback heal, a re-assign
+    // resync the member did not ask for, on the simulation thread as
+    // on_resync_base_missed's; returns the base.  With `guard`, 0 (not now)
+    // while the member's own birth is known more than kForkBirthReach ticks
+    // past that base: the state of base - 1 would have no own ball, and the
+    // client's hold would wait for a birth past its reach, time out and ask
+    // again (RSO).
+    static constexpr int32_t kForkBirthReach = 95 - 40;   // a 96-tick history's reach, less 40 (7.2)
+    uint32_t on_fork_reassign(uint32_t session, uint32_t player, uint32_t episode, uint32_t last_full, bool guard) {
+        std::lock_guard lk(state_mutex_);
+        auto it = physics_sessions_.find(session);
+        if (it == physics_sessions_.end()) return 0;
+        auto& s = it->second;
+        const auto c = static_cast<bmmo::net::connection>(player);
+        if (std::find(s.members.begin(), s.members.end(), c) == s.members.end()) return 0;
+        uint32_t lead = 0;
+        const uint32_t base = resync_base_now(s, c, &lead);
+        if (const auto birth = s.last_physicalize.find(c);
+                guard && birth != s.last_physicalize.end() && static_cast<int32_t>(birth->second.tick - base) > kForkBirthReach)
+            return 0;
+        resync_member(s, c, last_full, "fork", "episode " + std::to_string(episode), base, lead);
+        Printf(kVerbose, "Physics session %u: world check: %s re-assigned at %u (episode %u's fallback heal).", session,
+               get_client_name(c), base, episode);
+        return base;
     }
 
     // Step INT (protocol 41): a member's player intent, journaled as
@@ -3296,13 +3352,18 @@ public:
         if (auto lead = s.leads.find(c); lead != s.leads.end()) lead->second.resync_claim = msg.held;
         ++s.resyncs;   // step SLQ
         ++s.member_resyncs[c];
-        resync_member(s, c, msg.last_full_tick, "resync");
+        resync_member(s, c, msg.last_full_tick, "resync", bmmo::session_resync_msg::reason_name(msg.why));
     }
 
     // The resync answer (handle_session_resync, and again for a base the
     // runner stepped before the request reached it): returns the base.
-    // `why` (step JNL, the journal's resync_request): "resync", "start" or "again".
-    uint32_t resync_member(physics_session_state& s, bmmo::net::connection c, uint32_t last_full_tick, const char* why) {
+    // `why` (step JNL, the journal's resync_request): "resync", "start",
+    // "again" or "fork" (step FD3b's fallback); `reason` the request's
+    // reason byte's name or the fork's episode.  `base` (step FD3b): a base
+    // the caller already read (reanchor_base), taken as is - a second read
+    // could land a tick later.
+    uint32_t resync_member(physics_session_state& s, bmmo::net::connection c, uint32_t last_full_tick, const char* why,
+                           const std::string& reason = {}, uint32_t base = 0, uint32_t base_lead = 0) {
         // On the per-player path (lead_adjust on, the member declared
         // CAP_LEAD), at L_eff (late-player design 2.5, 2.8): the lead of the
         // member's first assignment plus its acknowledged offset, the lead
@@ -3322,8 +3383,8 @@ public:
         const bool state = lead != s.leads.end() && (lead->second.caps & bmmo::session::CAP_RESYNC_STATE) != 0;
         // One rule call (step DX9: each logs its line; the per-player
         // lead's replaced the default one's, unread, before).
-        uint32_t assigned_lead = 0;
-        const uint32_t assigned =
+        uint32_t assigned_lead = base_lead;
+        const uint32_t assigned = base != 0 ? base :
             lead != s.leads.end() && bmmo::sim::uses_player_lead(config_.physics_lead_adjust, lead->second.caps)
                 ? runner_->reanchor_tick(s.id, bmmo::sim::effective_lead_ticks(lead->second.assigned_lead, lead->second.offset),
                                          state, std::string(get_client_name(c)) + " (resync, L_eff)", &assigned_lead)
@@ -3347,10 +3408,10 @@ public:
             const auto lead = s.leads.find(c);
             runner_->request_resync_state(s.id, c, assigned,
                                           lead != s.leads.end() ? lead->second.resync_claim : bmmo::session::resync_ref_id{},
-                                          last_full_tick, counted_through, why);
+                                          last_full_tick, counted_through, why, reason);
         } else {
             runner_->request_full_snapshot(s.id);
-            journal_snapshot_request(s, c, assigned, last_full_tick, counted_through, why);
+            journal_snapshot_request(s, c, assigned, last_full_tick, counted_through, why, reason);
         }
         Printf(kVerbose, "Physics session %u: %s resynced at tick %u (last full snapshot it had: %u; held counted through tick %u).",
                s.id, get_client_name(c), assigned, last_full_tick, counted_through);
@@ -3790,13 +3851,15 @@ public:
     // Step JNL: a request the legacy full snapshot answers, in the journal
     // as request_resync_state records the others (state 0).
     void journal_snapshot_request(const physics_session_state& s, bmmo::net::connection c, uint32_t base,
-                                  uint32_t last_full, uint32_t counted_through, const char* why) {
-        bmmo::session::journal_stat_value text;
-        text.type = 's';
+                                  uint32_t last_full, uint32_t counted_through, const char* why,
+                                  const std::string& reason = {}) {
+        bmmo::session::journal_stat_value text, because;
+        text.type = because.type = 's';
         text.s = why;
+        because.s = reason;
         runner_->journal_clock(s.id, bmmo::session::stat_kind::resync_request,
                                {stat_int(c), stat_int(base), stat_int(last_full), stat_int(counted_through), text,
-                                stat_int(0)});
+                                stat_int(0), because});
     }
 
     // Step JNL: one integer value of a CLOCK record posted to the runner.

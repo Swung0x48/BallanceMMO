@@ -486,7 +486,7 @@ namespace bmmo::session {
             if (!s.resync_pending_) {
                 logf("spawn ghost: %s forgotten at tick %u is outside the rollback history at local tick %u: resync",
                      f.group.c_str(), f.until, now);
-                request_resync("a re-taken order's spawn ghost record beyond the reach", true);
+                request_resync(resync_why::past_reach, "a re-taken order's spawn ghost record beyond the reach", true);
             }
         }
     }
@@ -582,7 +582,7 @@ namespace bmmo::session {
         // anchor of a pending exact resync - the ticks (R, base - 1] the
         // stall never ran, drained at base - is covered by the server's
         // state of base - 1: applied live, no rewind, no miss.
-        if (s.resync_pending_ && s.resync_exact_ && static_cast<int32_t>(event_tick - s.resync_base_) < 0) {
+        if (state_covers(event_tick)) {
             logf("lifecycle event of %u stamped tick %u precedes the resync's anchor %u: the server's state covers it", player,
                  event_tick, s.resync_base_ - 1);
             return false;
@@ -629,7 +629,7 @@ namespace bmmo::session {
         }
         logf("lifecycle event of %u stamped tick %u is outside the rollback history at local tick %u: "
              "applied live, resync", player, event_tick, now);
-        request_resync("a late lifecycle event beyond the reach", true);
+        request_resync(resync_why::past_reach, "a late lifecycle event beyond the reach", true);
         return false;
     }
 
@@ -637,7 +637,7 @@ namespace bmmo::session {
         if (!s.life_batch_.collecting || !config.rollback || !config.lifecycle_rewind || event_tick == 0) return false;
         const uint32_t now = current_tick();
         if (static_cast<int32_t>(event_tick - now) > 0) return false;
-        if (s.resync_pending_ && s.resync_exact_ && static_cast<int32_t>(event_tick - s.resync_base_) < 0) return false;
+        if (state_covers(event_tick)) return false;
         const uint32_t anchor = event_tick - 1;
         return s.rollback_.knows_tick(anchor) && now - anchor <= window_rewind_reach(event_tick);
     }
@@ -694,7 +694,7 @@ namespace bmmo::session {
             ++s.merge_unrecorded_;
             return false;
         }
-        if (s.resync_pending_ && s.resync_exact_ && static_cast<int32_t>(tick - s.resync_base_) < 0) {   // 2
+        if (state_covers(tick)) {   // 2
             ++s.merge_resync_base_;
             return false;
         }
@@ -816,7 +816,7 @@ namespace bmmo::session {
         s.life_rewinds_missed_ += batch.events;
         logf("lifecycle: the rewind to tick %u for %u late event(s) was refused at local tick %u: applied live, %s",
              anchor, batch.events, now, s.resync_pending_ ? "the pending resync covers them" : "resync");
-        if (!s.resync_pending_) request_resync("a late lifecycle event beyond the reach", true);
+        if (!s.resync_pending_) request_resync(resync_why::past_reach, "a late lifecycle event beyond the reach", true);
     }
 
     // ------------------------------------------------------------ events
@@ -1027,6 +1027,7 @@ namespace bmmo::session {
                 note_sector_stamp(event.player, event.sector, event.tick);
                 const bool late = static_cast<int32_t>(event.tick - current_tick()) <= 0;
                 if (late && config.rollback && event.sector > 0 && !s.sectors_.covers(event.sector, event.tick)) {
+                    if (heal_covers(event.tick)) break;   // step FD3b: in the server's state of the heal's X
                     if (sector_rewind_reachable(event.tick)) {
                         client_core_state::late_sector entry;
                         entry.tick = event.tick;
@@ -1042,7 +1043,7 @@ namespace bmmo::session {
                     ++s.sector_rewinds_missed_;
                     logf("late sector stamp for tick %u is outside the rollback history at local tick %u: stamped live, resync",
                          event.tick, current_tick());
-                    request_resync("a late Sector event beyond the reach", true);
+                    request_resync(resync_why::past_reach, "a late Sector event beyond the reach", true);
                     break;
                 }
                 s.sectors_.stamp(event.player, event.sector, event.tick);
@@ -2079,7 +2080,7 @@ namespace bmmo::session {
             return false;
         // As rewind_for_lifecycle: a pending exact resync's state of base - 1
         // covers a change before its base (no rewind, no resync of its own).
-        if (s.resync_pending_ && s.resync_exact_ && static_cast<int32_t>(anchor + 1 - s.resync_base_) < 0) {
+        if (state_covers(anchor + 1)) {
             logf("%s precedes the pending resync's anchor %u: the server's state covers it", reason.c_str(),
                  s.resync_base_ - 1);
             return true;
@@ -2132,7 +2133,7 @@ namespace bmmo::session {
             ++s.own_death_moves_resynced_;
             say(textf("%s at local tick %u: %s, resync", head.c_str(), now, why.c_str()));
             journal_.note(head + ": " + why + ", resync");
-            request_resync("own death moved: resync", true);
+            request_resync(resync_why::own_life, "own death moved: resync", true);
         };
         // Review finding 3: the refusals that need no record changed come
         // before any is - a rewind of another event before the resync
@@ -3577,7 +3578,7 @@ namespace bmmo::session {
         logf("%s at local tick %u: no record of it (past the history), resync", head.c_str(), current_tick());
         journal_.note(head + ": no record of it (past the history), resync");
         ++s.own_moves_resynced_;
-        request_resync("own birth moved past the history", true);
+        request_resync(resync_why::own_life, "own birth moved past the history", true);
     }
 
     // The answer to a birth set aside (own_unanswered_), which leaves the
@@ -3765,7 +3766,7 @@ namespace bmmo::session {
             } else {
                 logf("own birth stamped %u: its re-report for tick %u has no echo by the server's tick %u; the original's "
                      "record is gone, resync", copy.link, copy.origin, server_tick);
-                request_resync("own birth: resync", true);
+                request_resync(resync_why::own_life, "own birth: resync", true);
             }
         }
     }
@@ -3829,7 +3830,7 @@ namespace bmmo::session {
         if (!owed) return;
         journal_.note("own birth: a re-report made at " + std::to_string(newest) + ", past the tick base "
                       + std::to_string(s.tick_base_) + ": resync");
-        request_resync("own birth: a re-report made past the resync base", true);
+        request_resync(resync_why::own_life, "own birth: a re-report made past the resync base", true);
     }
 
     // FULL step R6P (the user's Q-R6-NEVER (a); core design "As built (step
@@ -4005,7 +4006,7 @@ namespace bmmo::session {
         ++s.own_moves_resynced_;
         logf("%s at local tick %u: %s, resync", head.c_str(), now, why.c_str());
         journal_.note(head + ": " + why + ", resync");
-        request_resync("own birth: resync", true);
+        request_resync(resync_why::own_life, "own birth: resync", true);
     }
 
     // Design 2.3, without own body control: the birth's Physicalize sent

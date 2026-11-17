@@ -5239,3 +5239,112 @@ would ask whether the body is alive at the anchor, a change outside BLR.
 after its first birth (RO1's guard, above), the prop's replayed rows between the anchor and its removal (the leg
 judges the removal and revive lines only), retail, the LBM and L6 legs (the full gate);
 the fd2g1 LBM and L6 client logs have no "no birth known" line, so their revives did not meet the old limit.
+
+## Built (the fork heal, step FD3, 2026-11-16)
+
+**Why.** FD1 and FD2 find and record a world that forked from the server's; the user chose to heal it ("A": the heals
+next, no report-only public test first), under the rules of 2026-11-15/16: the server's world is always the
+authority; no frequent snapshots (an agreeing world gets no state; a heal is one state of one tick X for one member);
+a short fork is allowed; every disagreement, heal, failed heal and removal is reported in the human log and the
+journal on both sides, one line per action. A heal that does not hold is retried in place ("原地再修一次") at a fixed
+10 s gap between one member's heals; more than 6 heals in a row that did not hold remove the member (only a
+`heal_failed` counts; a verified heal - healed or re-fork - resets the count). Q9 ("不算"): a heal_failed whose every
+still-differing key some other member reported with the same term at that sample is shared and does not count.
+Q10 ("A"): the removal takes the member out of the physics session only; it stays in the room, and a Ready late-joins
+the session again with a fresh count. The design is `.local-tools/work/DESIGN/fork_detection.md` 5.3-5.5, 7.1-7.6 and
+15.4.
+
+**Server** (`sim/world_watch.hpp/.cpp`, pure, the simulation thread its only caller, every deadline a session tick;
+the runner's `emit_fork_heal`). With the heal on (`physics.fork_heal`, default on, and snapshots off: `snapshot_interval
+>= 255`; with snapshots on the server only reports, as FD1, and says so at startup), a decided episode's member is
+queued at its would-heal tick (never within 660 ticks of its previous heal). After stepping t the runner captures its
+state of X = t for the first queued member whose X can be t - a tick it records whole (`t % k == 0`, k from its
+reports), no other resync state emitted at t, no resync of the member pending - codes it against the state the
+member's reports say it holds, and sends a `healing` notice and the state (`SessionResyncState` IN_PLACE, the episode)
+on the reliable channel; at most one a tick. Nothing else: no assignment, buffer reset, lead or lateness reset. The
+first compared report after X that carries `heal_x >= X` verifies: every key of the episode equal - `healed`, the
+count 0, closed; a key differing again whose ball's owner had a Physicalize, airship release or zone entry in the
+server's world in (X, T] - `re_fork`, count 0; else `heal_failed`, which waits until every other member reported T (at
+most 66 ticks) for the grouping, counts unless shared, and is retried in place at the gap. A sample with a key of the
+episode latched, a zone-only difference, or a presence-only one outside the episode's keys decides nothing. When the
+count is 6 and a 7th heal is due, `fork_kick`, the notice `kick`, then the server's `send_session_end` with the reason,
+`physics_session_member_left` and the member set not ready in its room. A client that says it could not apply the
+state (HEAL_MISSED), or whose state never showed in a report for 660 ticks, is healed by the fallback re-assign
+(`resync_member(..., "fork")` through the runner's synchronous `on_fork_reassign`): the base read once through
+`reanchor_base` and passed in, held back while the member's own Physicalize is stamped more than 55 ticks past it
+(7.2's guard, asked again every tick for at most 660 ticks), verified from that base; a state the client dropped
+(another epoch, a resync of its own pending) is due again at the gap, and a second drop falls back. A re-assign
+supersedes a decided episode only (an undecided one goes on as FD1's). A difference within 3960 ticks of a close with
+a key in common reopens the episode under its id (`fork_reopen`; a line only after a verified heal).
+
+**Client** (`client_core_resync.cpp` `apply_heal`, `client_core_world_check.cpp`). An IN_PLACE state is taken only in
+the current epoch, with no resync pending or in flight, X recorded whole and the re-step within the reach; it runs
+`apply_server_state(st, X, now, own_birth, in_place)` - FD3a's steps 1b-7, without the re-assign's synthetic anchor,
+history invalidation, own-frame resend, lives rebase, relay restart or hold - then `retire_before(X)` (the samples
+before X report PRE_HEAL), FD2's holder and ring cleared, `held_floor_ = X`, `state_anchored_` with `resync_base_ = X
++ 1`. A state waiting for bodies (a birth or death stamped at or before X still queued) is kept and tried again each
+frame after the drain, bounded as a resync state's wait. After the apply, a late frame, lifecycle event or Sector
+stamp at or before X is the state's (`heal_covers`: no rewind, no resync of its own; an own pass the server moved past
+X is re-derived from X); with no heal applied the lifecycle guards are a pending exact resync's, as before. Reports
+carry `heal_x`, the held reference, the last full snapshot and k; HEAL_MISSED once (left_history, light,
+resync_pending, other_epoch, waiting, refused, undecodable). An open episode's reports carry its rows while it is
+undecided, up to its heal tick and from a `healing` notice to its verify. Every request_resync carries its class (the
+SessionResync reason byte). Test only: `core_config::inject_fork` (headless `--inject-fork TICK ENTITY DX[:every]`,
+`--inject-until T`, `--heal-miss`; retail `session inject-fork TICK ENTITY DX`), applied live at post_step's entry and
+in every replay.
+
+**Reporting, both sides.** Server records (class 1): `fork_heal`, `fork_verify` (with the Q9 grouping per key),
+`fork_kick`, `fork_reopen`; `world_check_end` gains the heal counters; `resync_request` the reason. Client: `heal_apply`
+(logical) and `fork_notice`'s new actions. Lines (default level), e.g. server `Physics session 1: world check: <name>,
+episode 1: healing in place at tick 1256 (33 KB, plain)`, `... closed: healed in place at 1256, equal at 1320 (1 heal,
+forked 9.0 s)`, `... the heal at 1256 did not hold (still differs at 1320: b5; this member's alone); retrying in place
+at 1917 (1 of 6)`, `... 6 heals in a row did not hold (1256-4576), not shared with other members; removed from the
+physics session (stays in the room)`; client `world check: episode 1: the server's state of tick 1256 applied in
+place at tick 1275 (re-stepped 19 ticks)`, `... removed from the physics session: the server's state did not hold
+after 6 heals; press Ready to rejoin`. `journal_judge.py --world-check` lists the heals, verifies and kicks and leaves
+PRE_HEAL samples out of a member's coverage. A headless client journals each later session of one run beside the
+first (`<stem>.rejoin<N>`).
+
+**The wire: protocol 43** (entity/session.hpp's history; docs/rooms-and-sessions-protocol.md): SessionResyncState
+flags + episode, SessionResync's reason byte, SessionWorldReport schema 2, SessionWorldFork's healing / kick /
+verified. A 42 peer is refused at the handshake, and no 43 binary replays a 42 capture strictly (the flags and episode
+sit before the frame): core_ref_s22's arms were recorded again as core_ref_s23.
+
+**Evidence** (the heal leg, `.local-tools/work/FD3/heal_leg.sh`, in the full gate's lane P; the arena in slot 13, 4
+headless clients coordinated, 150 ms, snapshots off, the Pusher `P_Modul_01_Pusher` injected in client 1):
+- M2 / F1 (1 mm at 700, rows every tick, client 1 forcing rewinds): decided LATER, captured at X 1256, applied in
+  place at 1275 (19 ticks re-stepped of a 127 reach), healed at 1320; the server's journal equal to the uninjected
+  control's in run mode with FD's kinds and the heal's capture records left out (every TICK hash, row, input and
+  event); client 1's own ball bit-equal to the control's on 732 ticks from X; every common body equal to the
+  server's on 668 ticks from 1320. The forced fallback (`--heal-miss`): re-assigned at base 1336, equal to the
+  server's from 1386; its own ball differs from the control's on 652 of 653 ticks (worst 60 m: 7.0's substitution,
+  which the in-place heal avoids).
+- F4 (the Pusher moved after every step 700-5200, the balls at the spawn): six heals 664 ticks apart (1256-4576),
+  each `heal_failed` counted 1-6, the removal at 5237 (`fork_kick`, the leave, the lines on both sides, the kick
+  notice and six `heal_apply` records in client 1's first journal); its Ready joined late at base 5307 into a second
+  journal with no heal of a count above 0. F4b (to 2600): three counted, the fourth healed, no removal. F7 (clients 1
+  and 2 alike): every `heal_failed` shared (`b5 1/3`), counted 0, both healed at the retry. The fallback arm healed
+  by the re-assign at X + 1. G1-T: the fallback arm's server capture replayed with `BMMO_RUNNER_JITTER` 2 / 5 / 20 ms
+  gives the same 121 world_agree / fork_* / resync_request records and the live journal in replay mode.
+- A resync of the member's own in flight at the apply: `heal_apply` dropped, the episode superseded by its re-assign.
+- Nothing else moved: the full gate fd3g1 (heal off by default then) against the protocol-42 references with the
+  step's kinds left out - fast LBM 19/19 FINAL exact with rows and 89/89 journals equal to fd1g1's, the L6 re-drive's
+  14/14 journals equal to pf_fd1g1_1's (72 749 rewinds), the dense L6, owner, intent, L13, AR, FD1 (with
+  `--fork-heal off`) and FD2 legs, G1 (29 sectors, 128 members) and retail L12 + L11 all pass; core_ref_s23's
+  l6_pubtest client journals equal s22's (13/13). The references were then recorded on that build (core_ref_s23,
+  LBM fd3g1, L6 pf_fd3g1_1, the K7 L11 captures fd3g1_ctl_h_150_1, each replayed in Player.exe to its end marker at
+  frame 4373 with its journal identical), the default switched on, and the full gate run again on them: with the
+  heal on, every agreeing run's journals equal the heal-off references (no heal, G1 0 decided).
+
+**Accepted, and the user's to confirm** (each journaled so either reading recomputes): a heal_failed with some keys
+shared and some this member's alone counts; a member silent past the verify's 66-tick wait reads as not reporting the
+same; the count survives an `equal_again` close (definition B taken literally); the removal of a session's only
+member ends the session, and its Ready starts a new one. `physics.fork_heal` is not in the `server_config` record (an
+agreeing journal is then the same with the heal on and off; the startup line says it).
+
+**Not exercised:** F5 (an own death window, a trafo pass), a resync at a late join, an airship release, a sector
+activation or the level end beside a heal, 7.2's guard holding a fallback back (no run has the own birth that far
+past the base), a waiting heal state's retry, an undecodable heal state, a natural (not forced) missed state, a kick
+in retail, retail's in-place apply under a 13-player rewind load, the per-tick fold's cost on retail x86, a real (not
+injected) FB-class fault that engine change #27 does not cover, and whether `forget_births_after(X, present)` after an
+in-place re-step keeps the birth of a body remade inside (X, now] (the re-assign's call, unchanged).

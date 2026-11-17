@@ -284,7 +284,7 @@ namespace bmmo::session {
                  "inputs (trafo_missed %llu)", player, tick, why, now, static_cast<unsigned long long>(s.trafo_missed_));
             return;
         }
-        if (s.resync_pending_ && s.resync_exact_ && static_cast<int32_t>(tick - s.resync_base_) < 0) {
+        if (state_covers(tick)) {
             ++s.trafo_covered_;
             logf("trafo: input of %u at tick %u (%s) precedes the pending resync's anchor %u: the server's state covers it",
                  player, tick, why, s.resync_base_ - 1);
@@ -298,7 +298,7 @@ namespace bmmo::session {
                  "resync (trafo_missed %llu)", player, tick, why, now, static_cast<unsigned long long>(s.trafo_missed_));
             journal_.note("trafo input of " + std::to_string(player) + " at tick " + std::to_string(tick)
                           + " missed at local tick " + std::to_string(now) + ": resync");
-            if (!s.resync_pending_) request_resync("a trafo input could not be replayed", true);
+            if (!s.resync_pending_) request_resync(resync_why::unreplayable, "a trafo input could not be replayed", true);
             return;
         }
         ++s.trafo_late_;

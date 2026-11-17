@@ -12,6 +12,8 @@
 #include <vector>
 
 #include <session/world_check.hpp>
+#include <message/session_resync_msg.hpp>
+#include <message/session_resync_state_msg.hpp>
 #include <message/session_world_fork_msg.hpp>
 #include <message/session_world_report_msg.hpp>
 
@@ -133,6 +135,10 @@ TEST(SessionWorldMsgs, RoundTrip) {
     report.balls = {{3, 0x1111}, {7, 0x2222}};
     report.buckets[3] = 0x3333;
     report.latched = {9};
+    // Schema 2 (step FD3b): the heal's fields, HEAL_MISSED's two.
+    report.flags |= bmmo::session_world_report_msg::FLAG_HEAL_MISSED;
+    report.heal_x = 264; report.held = {198, 0xABCD, true}; report.last_full = 66; report.k = 8;
+    report.missed_x = 330; report.missed = static_cast<uint8_t>(bmmo::session_world_report_msg::missed_reason::light);
     auto round = [](bmmo::session_world_report_msg& out, const std::string& bytes) {
         out.raw.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
         return out.deserialize();
@@ -145,13 +151,19 @@ TEST(SessionWorldMsgs, RoundTrip) {
         EXPECT_EQ(back.balls, report.balls);
         EXPECT_EQ(back.buckets[3], 0x3333u);
         EXPECT_EQ(back.latched, report.latched);
+        EXPECT_EQ(back.heal_x, 264u);
+        EXPECT_TRUE(back.held.held);
+        EXPECT_EQ(back.held.check, 0xABCDu);
+        EXPECT_EQ(back.k, 8);
+        EXPECT_EQ(back.missed_x, 330u);
+        EXPECT_STREQ(bmmo::session_world_report_msg::missed_name(back.missed), "light");
         EXPECT_TRUE(back.body_rows.empty());
         EXPECT_TRUE(back.folds.empty());
         // A trailing byte, or another schema, is refused.
         bmmo::session_world_report_msg longer;
         EXPECT_FALSE(round(longer, report.raw.str() + "x"));
         std::string other = report.raw.str();
-        other[sizeof(bmmo::opcode)] = 2;
+        other[sizeof(bmmo::opcode)] = 1;
         bmmo::session_world_report_msg schema;
         EXPECT_FALSE(round(schema, other));
     }
@@ -205,6 +217,30 @@ TEST(SessionWorldMsgs, RoundTrip) {
     bmmo::session_world_fork_msg schema;
     schema.raw.write(other.data(), static_cast<std::streamsize>(other.size()));
     EXPECT_FALSE(schema.deserialize());
+
+    // Step FD3b: the new actions and outcomes have names; IN_PLACE and the
+    // episode on SessionResyncState, the reason byte on SessionResync.
+    EXPECT_STREQ(wc::action_name(wc::fork_action::kick), "kick");
+    EXPECT_STREQ(wc::outcome_name(wc::fork_outcome::heal_failed), "heal_failed");
+    bmmo::session_resync_state_msg state;
+    state.session = 4; state.tick = 1056; state.base = 120; state.raw_size = 3;
+    state.flags = bmmo::session_resync_state_msg::FLAG_IN_PLACE; state.episode = 2;
+    state.frame = {1, 2, 3};
+    state.serialize();
+    bmmo::session_resync_state_msg state_back;
+    state_back.raw.write(state.raw.str().data(), static_cast<std::streamsize>(state.raw.str().size()));
+    ASSERT_TRUE(state_back.deserialize());
+    EXPECT_EQ(state_back.flags, bmmo::session_resync_state_msg::FLAG_IN_PLACE);
+    EXPECT_EQ(state_back.episode, 2u);
+    EXPECT_EQ(state_back.frame, state.frame);
+    bmmo::session_resync_msg resync;
+    resync.session = 4; resync.last_full_tick = 66;
+    resync.why = static_cast<uint8_t>(bmmo::session_resync_msg::reason::own_life);
+    resync.serialize();
+    bmmo::session_resync_msg resync_back;
+    resync_back.raw.write(resync.raw.str().data(), static_cast<std::streamsize>(resync.raw.str().size()));
+    ASSERT_TRUE(resync_back.deserialize());
+    EXPECT_STREQ(bmmo::session_resync_msg::reason_name(resync_back.why), "own_life");
 }
 
 // Step FD1, the server's half (sim/world_watch.hpp): scripted samples,
@@ -353,4 +389,275 @@ TEST(WorldWatch, Episodes) {
     ASSERT_EQ(records.back().kind, stat_kind::world_check_end);
     EXPECT_EQ(records.back().v[4], "5") << "episodes";
     EXPECT_EQ(records.back().v[5], "2") << "leads";
+}
+
+// Step FD3b (15.5): the heal on - one capture a tick at X % k == 0, verify
+// (healed resets the count, a heal that did not hold adds one unless another
+// member reports the same term: the user's Q9), the retry at the fixed gap,
+// the kick instead of a 7th, HEAL_MISSED's fallback re-assign and the
+// reopen.  Members 1 and 4 report; the mechanism is 3 m off (NOW).
+TEST(WorldWatch, Heals) {
+    using bmmo::sim::world_report_in;
+    using bmmo::sim::world_watch;
+    using bmmo::session::stat_kind;
+    struct rec { stat_kind kind; std::vector<std::string> v; };
+    std::vector<rec> records;
+    std::vector<world_watch::notice> notices;
+    world_watch::sink sink;
+    sink.record = [&](stat_kind kind, std::initializer_list<bmmo::session::journal_value> values) {
+        rec r{kind, {}};
+        for (const auto& x: values)
+            r.v.push_back(x.type == 's' ? std::string(x.s) : x.type == 'f' ? std::to_string(x.f) : std::to_string(x.i));
+        records.push_back(std::move(r));
+    };
+    sink.out = [&](const world_watch::notice& n) { notices.push_back(n); };
+    sink.calm = [](uint32_t) { return 0; };
+    uint32_t reassign_base = 0;   // what the server's re-assign gives (0: 7.2's guard holds it back)
+    sink.reassign = [&](uint32_t, uint32_t, uint32_t, bool) { return reassign_base; };
+    world_watch w(sink);
+    w.set_heal(true);
+    const auto count = [&](stat_kind kind, size_t field, const std::string& value) {
+        return std::count_if(records.begin(), records.end(), [&](const rec& r) { return r.kind == kind && r.v[field] == value; });
+    };
+    const auto last = [&](stat_kind kind) {
+        for (auto it = records.rbegin(); it != records.rend(); ++it) if (it->kind == kind) return it->v;
+        return std::vector<std::string>{};
+    };
+    const std::vector<body_state> server = {row(body_kind::Ball, 1, "Ball_Wood_BMMO_1", 0.0),
+                                            row(body_kind::Ball, 4, "Ball_Wood_BMMO_4", 20.0),
+                                            row(body_kind::Mechanism, 5, "A01_Floor_01", 2.0)};
+    auto forked = server;
+    forked[2].position[0] += 3.0;
+    uint32_t heal_x = 0;
+    const auto report = [&](uint32_t player, uint32_t tick, const std::vector<body_state>& rows, uint32_t now,
+                            uint8_t flags = 0, uint32_t missed_x = 0) {
+        world_report_in r;
+        r.player = player;
+        r.epoch = 100;
+        r.tick = tick;
+        r.flags = flags;
+        r.terms = wc::fold_rows(rows, {});
+        if (flags & bmmo::session_world_report_msg::FLAG_DETAIL) {
+            r.rows = rows;
+            r.episode = notices.back().episode;
+        }
+        r.heal_x = player == 1 ? heal_x : 0;
+        r.k = 8;
+        r.missed_x = missed_x;
+        w.report(r, now);
+    };
+    const auto none = [](uint32_t) { return false; };
+    constexpr uint32_t caps = bmmo::session::CAP_WORLD_CHECK | bmmo::session::CAP_RESYNC_STATE;
+    w.member(1, caps, "a", 100);
+    w.member(4, caps, "d", 100);
+    w.ready(1, 100, 100);
+    w.ready(4, 100, 100);
+    constexpr uint8_t kDetail = bmmo::session_world_report_msg::FLAG_DETAIL;
+
+    // Opened and decided NOW: queued; captured at the first tick % k == 0.
+    w.sample(198, server, {}, false, 199);
+    report(4, 198, server, 205);
+    report(1, 198, forked, 205);
+    report(1, 198, forked, 210, kDetail);
+    w.step(211);
+    EXPECT_FALSE(w.next_heal(212, false, none)) << "212 % 8 != 0";
+    EXPECT_FALSE(w.next_heal(216, true, none)) << "another state went out at 216";
+    auto order = w.next_heal(216, false, none);
+    ASSERT_TRUE(order);
+    EXPECT_EQ(order->player, 1u);
+    w.heal_sent(*order, 216, 2048, false, 217);
+    EXPECT_FALSE(w.next_heal(224, false, none)) << "one heal, one capture";
+    EXPECT_EQ(notices.back().action, wc::fork_action::healing);
+    EXPECT_EQ(notices.back().tick2, 216u);
+    // Verified: equal after X - healed, closed.
+    heal_x = 216;
+    w.sample(264, server, {}, false, 265);
+    report(4, 264, server, 270);
+    report(1, 264, server, 270);
+    EXPECT_EQ(count(stat_kind::fork_verify, 4, "healed"), 1);
+    EXPECT_EQ(notices.back().outcome, wc::fork_outcome::healed);
+
+    // Differs again with the key in common: reopened (same id), and the
+    // next heal waits for the fixed gap (217 + 660).
+    w.sample(330, server, {}, false, 331);
+    report(4, 330, server, 340);
+    report(1, 330, forked, 340);
+    report(1, 330, forked, 345, kDetail);
+    EXPECT_EQ(count(stat_kind::fork_reopen, 1, "1"), 1);
+    w.step(876);
+    EXPECT_FALSE(w.heal_queued()) << "the 10 s gap";
+    w.step(877);
+    ASSERT_TRUE(w.heal_queued());
+    // Six heals that did not hold, each 660 ticks after the last, then the
+    // kick instead of a 7th.
+    uint32_t x = 880, now = 881;
+    for (int i = 1; i <= 6; ++i) {
+        order = w.next_heal(x, false, none);
+        ASSERT_TRUE(order) << i;
+        w.heal_sent(*order, x, 2048, true, now);
+        heal_x = x;
+        const uint32_t t = (x / 66 + 1) * 66;
+        w.sample(t, server, {}, false, t + 1);
+        report(4, t, server, t + 5);
+        report(1, t, forked, t + 5);
+        EXPECT_EQ(last(stat_kind::fork_verify)[4], "heal_failed") << i;
+        EXPECT_EQ(last(stat_kind::fork_verify)[7], "1") << "counted: member 4 agrees with the server";
+        EXPECT_EQ(last(stat_kind::fork_verify)[8], std::to_string(i));
+        EXPECT_EQ(notices.back().action, wc::fork_action::verified);
+        now += 660;
+        x = now - 1;
+        while (x % 8) ++x;
+        w.step(now);
+        if (i < 6) EXPECT_TRUE(w.heal_queued()) << i;
+    }
+    EXPECT_FALSE(w.heal_queued()) << "no 7th heal";
+    EXPECT_EQ(count(stat_kind::fork_kick, 5, "6"), 1);
+    EXPECT_EQ(notices.back().action, wc::fork_action::kick);
+    EXPECT_TRUE(notices.back().kick);
+    w.leave(1, now + 2);
+    EXPECT_EQ(last(stat_kind::fork_close)[2], "ended");
+
+    // A rejoin is a fresh member (count 0).  Both members forked the same
+    // way: the heal that does not hold is shared, not counted (Q9).
+    w.member(1, caps, "a", now + 10);
+    w.ready(1, 100, now + 10);
+    uint32_t t = (now / 66 + 2) * 66;
+    w.sample(t, server, {}, false, t + 1);
+    report(4, t, forked, t + 5);
+    report(1, t, forked, t + 5);
+    report(1, t, forked, t + 6, kDetail);
+    w.step(t + 7);
+    x = t + 8;
+    while (x % 8) ++x;
+    order = w.next_heal(x, false, none);
+    ASSERT_TRUE(order);
+    EXPECT_EQ(order->player, 1u) << "decided first";
+    w.heal_sent(*order, x, 2048, false, x + 1);
+    heal_x = x;
+    t = (x / 66 + 1) * 66;
+    w.sample(t, server, {}, false, t + 1);
+    report(1, t, forked, t + 5);
+    EXPECT_EQ(count(stat_kind::fork_verify, 4, "heal_failed"), 6) << "waits for member 4's report of T";
+    report(4, t, forked, t + 6);
+    EXPECT_EQ(count(stat_kind::fork_verify, 4, "heal_failed"), 7);
+    EXPECT_EQ(last(stat_kind::fork_verify)[7], "0") << "shared";
+    EXPECT_EQ(last(stat_kind::fork_verify)[8], "0");
+
+    // HEAL_MISSED: the fallback re-assign, verified from its base.
+    w.step(x + 1 + 660);
+    x = x + 1 + 660;
+    while (x % 8) ++x;
+    order = w.next_heal(x, false, none);
+    ASSERT_TRUE(order);
+    w.heal_sent(*order, x, 2048, false, x + 1);
+    const uint32_t s = (x / 66 + 1) * 66;
+    w.sample(s, server, {}, false, s + 1);
+    report(1, s, forked, s + 5, bmmo::session_world_report_msg::FLAG_HEAL_MISSED, x);
+    EXPECT_EQ(count(stat_kind::fork_heal, 2, "reassign"), 0) << "held back by the guard";
+    reassign_base = s + 40;
+    w.step(s + 6);   // asked again
+    EXPECT_EQ(count(stat_kind::fork_heal, 2, "reassign"), 1);
+    EXPECT_EQ(last(stat_kind::fork_heal)[3], std::to_string(s + 39)) << "X: the base - 1";
+    w.ready(1, s + 40, s + 7);
+    EXPECT_NE(last(stat_kind::fork_close)[2], "superseded") << "its own re-assign";
+
+    // A ball whose owner had a lifecycle event in the server's world after X
+    // differs again: re_fork, count 0 (definition B), healed again at the gap.
+    world_watch rf(sink);
+    rf.set_heal(true);
+    rf.member(1, caps, "a", 100);
+    rf.ready(1, 100, 100);
+    auto ball = server;
+    ball[1].position[0] += 2.0;   // player 4's ball, 2 m
+    const auto rf_report = [&](uint32_t tick, const std::vector<body_state>& rows, uint32_t now, uint8_t flags, uint32_t hx) {
+        world_report_in r;
+        r.player = 1; r.epoch = 100; r.tick = tick; r.flags = flags; r.k = 8; r.heal_x = hx;
+        r.terms = wc::fold_rows(rows, {});
+        if (flags & kDetail) { r.rows = rows; r.episode = notices.back().episode; }
+        rf.report(r, now);
+    };
+    rf.sample(198, server, {}, false, 199);
+    rf_report(198, ball, 205, 0, 0);
+    rf_report(198, ball, 206, kDetail, 0);
+    order = rf.next_heal(208, false, none);
+    ASSERT_TRUE(order);
+    rf.heal_sent(*order, 208, 2048, false, 209);
+    rf.life(4, 200);   // before X: not this heal's
+    rf.life(4, 230);   // its release (or birth, or zone entry) after X
+    rf.life(4, 280);   // after T: not this sample's
+    rf.sample(264, server, {}, false, 265);
+    rf_report(264, ball, 270, 0, 208);
+    EXPECT_EQ(last(stat_kind::fork_verify)[4], "re_fork");
+    EXPECT_EQ(last(stat_kind::fork_verify)[8], "0");
+    EXPECT_EQ(last(stat_kind::fork_verify)[9], "p4@230");
+
+    // A heal the client applied (its report says heal_x >= X) whose verify
+    // waits - the episode's ball latched at the sample - gets no fallback
+    // after 660 ticks.  A re-assign of an undecided episode leaves it open
+    // (FD1's).  A state the client dropped twice falls back.
+    world_watch d(sink);
+    d.set_heal(true);
+    d.member(1, caps, "a", 100);
+    d.ready(1, 100, 100);
+    const auto d_report = [&](uint32_t tick, const std::vector<body_state>& rows, uint32_t now, uint8_t flags, uint32_t hx,
+                              std::vector<uint32_t> latched = {}, uint8_t missed = 0, uint32_t missed_x = 0) {
+        world_report_in r;
+        r.player = 1; r.epoch = 100; r.tick = tick; r.flags = flags; r.k = 8; r.heal_x = hx;
+        r.latched = latched; r.missed = missed; r.missed_x = missed_x;
+        r.terms = wc::fold_rows(rows, r.latched);
+        if (flags & kDetail) { r.rows = rows; r.episode = notices.back().episode; }
+        d.report(r, now);
+    };
+    const auto closes = [&] {
+        return std::count_if(records.begin(), records.end(), [](const rec& r) { return r.kind == stat_kind::fork_close; });
+    };
+    d.sample(198, server, {}, false, 199);
+    d_report(198, ball, 205, 0, 0);
+    const auto closed_before = closes();
+    d.ready(1, 100, 206);
+    EXPECT_EQ(closes(), closed_before) << "undecided: not superseded";
+    d_report(198, ball, 207, kDetail, 0);
+    order = d.next_heal(208, false, none);
+    ASSERT_TRUE(order);
+    d.heal_sent(*order, 208, 2048, false, 209);
+    d.sample(264, server, {4}, false, 265);
+    d_report(264, server, 270, 0, 208, {4});
+    const auto reassigns = count(stat_kind::fork_heal, 2, "reassign");
+    reassign_base = 2000;
+    d.step(209 + 660);
+    EXPECT_EQ(count(stat_kind::fork_heal, 2, "reassign"), reassigns) << "seen: no fallback";
+    // Compared and equal: healed.  Then a state dropped twice: the second falls back.
+    d.sample(330, server, {}, false, 331);
+    d_report(330, server, 340, 0, 208);
+    EXPECT_EQ(last(stat_kind::fork_verify)[4], "healed");
+    d.sample(396, server, {}, false, 397);
+    d_report(396, ball, 400, 0, 208);
+    d_report(396, ball, 401, kDetail, 208);
+    const auto drop = [&](uint32_t at) {
+        d.step(at);
+        uint32_t hx = at;
+        while (hx % 8) ++hx;
+        auto o = d.next_heal(hx, false, none);
+        ASSERT_TRUE(o) << at;
+        d.heal_sent(*o, hx, 2048, false, hx + 1);
+        d_report(396, ball, hx + 2, bmmo::session_world_report_msg::FLAG_HEAL_MISSED, 208, {},
+                 static_cast<uint8_t>(bmmo::session_world_report_msg::missed_reason::resync_pending), hx);
+    };
+    drop(209 + 660);
+    EXPECT_EQ(count(stat_kind::fork_heal, 2, "reassign"), reassigns) << "the first drop: healed again at the gap";
+    drop(209 + 2 * 660 + 16);
+    EXPECT_EQ(count(stat_kind::fork_heal, 2, "reassign"), reassigns + 1) << "the second drop falls back";
+
+    // Off: no queue, FD1's would-heal only.
+    world_watch off(sink);
+    off.member(1, caps, "a", 100);
+    off.ready(1, 100, 100);
+    off.sample(198, server, {}, false, 199);
+    world_report_in r;
+    r.player = 1; r.epoch = 100; r.tick = 198; r.terms = wc::fold_rows(forked, {});
+    off.report(r, 205);
+    r.flags = kDetail; r.rows = forked; r.episode = notices.back().episode;
+    off.report(r, 206);
+    off.step(207);
+    EXPECT_FALSE(off.heal_queued());
 }

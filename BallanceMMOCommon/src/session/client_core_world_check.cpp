@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 namespace bmmo::session {
@@ -51,6 +52,45 @@ namespace bmmo::session {
         std::sort(latched.begin(), latched.end());
         latched.erase(std::unique(latched.begin(), latched.end()), latched.end());
         s.world_check_.zones[tick] = std::move(latched);
+    }
+
+    // Step FD3b (test only; FD1's headless --inject-fork, moved into the
+    // core so retail takes it too): after the step of a spec's tick (every
+    // tick from it to `until` with `every`), live at post_step's entry and in
+    // every replay of it, the body moved along x with its velocities kept.
+    void session_client_core::inject_fork(uint32_t tick, bool live) {
+        if (config.inject_fork.empty() || !s.assigned_ || !platform_.body_state || !platform_.write_body) return;
+        const char* where = live ? "live" : "replayed";
+        for (const auto& spec: config.inject_fork) {
+            const bool due = spec.every ? static_cast<int32_t>(tick - spec.tick) >= 0
+                                              && (spec.until == 0 || static_cast<int32_t>(tick - spec.until) <= 0)
+                                        : tick == spec.tick;
+            if (!due) continue;
+            // Every application of a one-shot is logged; of an `every`, the
+            // live ones on sample ticks.
+            const bool say = !spec.every || (live && tick % world_check::kSampleTicks == 0);
+            std::string entity = spec.entity;
+            if (entity == "own") {
+                entity = s.own_body_entity_;
+            } else if (entity.size() > 1 && entity[0] == 'p'
+                       && std::all_of(entity.begin() + 1, entity.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+                const auto it = s.remotes_.find(static_cast<uint32_t>(std::strtoul(entity.c_str() + 1, nullptr, 10)));
+                entity = it == s.remotes_.end() ? std::string() : it->second.entity;
+            }
+            bmmo_physics_body_state body{};
+            if (entity.empty() || !platform_.body_state(entity, body)) {
+                if (say) logf("inject-fork: no body for %s at the %s step of tick %u", spec.entity.c_str(), where, tick);
+                continue;
+            }
+            body.position[0] += spec.dx;
+            std::string error;
+            if (!platform_.write_body(entity, body.position, body.rotation, body.linear, body.angular, true, error)) {
+                if (say) logf("inject-fork: %s could not be moved at the %s step of tick %u: %s", entity.c_str(), where, tick,
+                              error.c_str());
+                continue;
+            }
+            if (say) logf("inject-fork: %s moved %+g m along x after the %s step of tick %u", entity.c_str(), spec.dx, where, tick);
+        }
     }
 
     void session_client_core::world_check_fold(uint32_t tick, const std::map<std::string, bmmo_physics_body_state>& bodies,
@@ -185,6 +225,8 @@ namespace bmmo::session {
         const bool held = pending && tick - w.hold_from < world_check::kPendingHoldTicks;
         uint8_t flags = why != world_check::why::none ? bmmo::session_world_report_msg::FLAG_UNCONFIRMED : 0;
         if (pending && !held) flags |= bmmo::session_world_report_msg::FLAG_PENDING;
+        // Step FD3b: a record the in-place heal retired (the forked world's).
+        if (w.heal_x != 0 && static_cast<int32_t>(tick - w.heal_x) <= 0) flags |= bmmo::session_world_report_msg::FLAG_PRE_HEAL;
         if (journal_.journalling())
             journal_.writer().stat(tick, stat_kind::world_report,
                                    {tick, s.last_assign_first_tick_, why == world_check::why::none ? 0 : 1,
@@ -195,8 +237,12 @@ namespace bmmo::session {
         if (held) {
             ++w.held;
         } else {
-            const bool rows_due = w.open && !w.decided && w.row_reports < world_check::kRowReports;
-            if (rows_due) ++w.row_reports;
+            // Step FD3b (15.4): the rows ride the reports of an open
+            // episode until its heal tick (a re-judge can still bring it
+            // forward) and from a heal until its verify; not after (FD1's
+            // server never read them past the decision: KL-like recurring
+            // forks would upload them every second).
+            const bool rows_due = w.open && (!w.decided || w.healing || static_cast<int32_t>(tick - w.rows_until) <= 0);
             world_check_send(sample, flags, rows_due);
         }
         w.window_rewinds = w.window_deepest = 0;
@@ -219,6 +265,18 @@ namespace bmmo::session {
         msg.balls = sample.terms.balls;
         std::copy(std::begin(sample.terms.buckets), std::end(sample.terms.buckets), std::begin(msg.buckets));
         msg.latched = sample.latched;
+        // Step FD3b (schema 2): the last in-place heal, the reference a heal
+        // is coded against, a missed heal once.
+        msg.heal_x = w.heal_x;
+        msg.held = s.resync_ref_;
+        msg.last_full = s.last_snapshot_tick_;
+        msg.k = static_cast<uint8_t>(std::min<uint32_t>(s.rollback_.sparse_every(), 0xFF));
+        if (w.missed) {
+            msg.flags |= bmmo::session_world_report_msg::FLAG_HEAL_MISSED;
+            msg.missed_x = w.missed_x;
+            msg.missed = w.missed_reason;
+            s.world_check_.missed = false;
+        }
         // The rows of every player ball and of the mechanisms in the open
         // episode's buckets, by the fold's rules.
         if (rows)
@@ -280,11 +338,10 @@ namespace bmmo::session {
         switch (action) {
         case world_check::fork_action::opened: {
             w.open = true;
-            w.decided = false;
+            w.decided = w.healing = false;
             w.episode = msg.episode;
             w.episode_tick = msg.tick;
             w.episode_buckets = msg.buckets;
-            w.row_reports = 0;
             ++w.episodes;
             // Step FD2: the records of T (first bad) and of the sample
             // before (last good) wait for the decision: first bad in
@@ -333,6 +390,7 @@ namespace bmmo::session {
         }
         case world_check::fork_action::decided: {
             w.decided = true;
+            w.rows_until = msg.tick2;
             // "the ball of player 12, 3.18 m, 2 bodies differ, the own ball 0.01 m"
             const bool own_worst = msg.worst == world_check::ball_key(s.own_id_);
             std::string what = msg.worst.empty() ? kinds_text(msg.kinds) : body_text(msg.worst, s.own_id_);
@@ -349,7 +407,7 @@ namespace bmmo::session {
                 ? std::string("at none of its samples yet (unsettled)")
                 : "by tick " + std::to_string(msg.tick2) + " (" + world_check::tier_name(tier) + ")";
             logf("world check: this world differs from the server's at tick %u (episode %u: %s); the server would heal %s, "
-                 "rule %s (report only)",
+                 "rule %s",
                  msg.tick, msg.episode, what.c_str(), heal.c_str(),
                  world_check::rule_name(static_cast<world_check::fork_rule>(msg.rule)));
             // Step FD2: the episode's records, after the line that says why
@@ -357,8 +415,30 @@ namespace bmmo::session {
             if (msg.episode == w.pending_episode) world_check_journal_states(msg.episode);
             break;
         }
+        case world_check::fork_action::healing:
+            // Step FD3b: the state of X follows on this channel.
+            w.healing = true;
+            logf("world check: episode %u: the server heals this world with its state of tick %u", msg.episode, msg.tick2);
+            break;
+        case world_check::fork_action::verified:
+            w.healing = false;
+            w.rows_until = msg.tick2;
+            if (outcome == world_check::fork_outcome::re_fork)
+                logf("world check: episode %u differs again after the heal (re-fork, %s); the server heals again at tick %u",
+                     msg.episode, msg.worst.c_str(), msg.tick2);
+            else   // `worst`: the keys still differing and whether they are shared (counted toward the removal or not)
+                logf("world check: episode %u: the heal did not hold (still differing: %s); %s at tick %u (%u of 6)", msg.episode,
+                     msg.worst.c_str(), msg.differing >= 6 ? "the next is a removal from the physics session"
+                                                           : "the server retries in place",
+                     msg.tick2, static_cast<unsigned>(msg.differing));
+            break;
+        case world_check::fork_action::kick:
+            // The SessionEnd that follows ends the session as today.
+            logf("world check: episode %u: removed from the physics session: the server's state did not hold after %u heals; "
+                 "press Ready to rejoin", msg.episode, static_cast<unsigned>(msg.differing));
+            break;
         case world_check::fork_action::closed: {
-            if (msg.episode == w.episode) w.open = false;
+            if (msg.episode == w.episode) w.open = w.healing = false;
             if (msg.episode == w.pending_episode) {   // closed undecided (a lead, or equal again before any decision)
                 w.pending.clear();
                 w.pending_episode = 0;
@@ -370,6 +450,8 @@ namespace bmmo::session {
             const char* how = outcome == world_check::fork_outcome::self_healed ? "equal again before its would-heal tick"
                               : outcome == world_check::fork_outcome::equal_again ? "equal again"
                               : outcome == world_check::fork_outcome::ended ? "ended with the member's session"
+                              : outcome == world_check::fork_outcome::healed ? "healed: equal to the server's again"
+                              : outcome == world_check::fork_outcome::superseded ? "superseded by a re-assign"
                                                                             : world_check::outcome_name(outcome);
             logf("world check: episode %u closed at tick %u: %s (%.1f s forked)", msg.episode, msg.tick2, how,
                  static_cast<double>(static_cast<int32_t>(msg.tick2 - msg.tick)) / TICK_RATE);

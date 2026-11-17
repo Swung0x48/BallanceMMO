@@ -101,6 +101,7 @@
 #include "../message/session_lead_msg.hpp"
 #include "../message/session_member_msg.hpp"
 #include "../message/session_remote_input_msg.hpp"
+#include "../message/session_resync_msg.hpp"
 #include "../message/session_resync_state_msg.hpp"
 #include "../message/session_start_msg.hpp"
 #include "../message/session_clock_ack_msg.hpp"
@@ -1189,6 +1190,7 @@ namespace bmmo::session {
         // with a newer base answers it first.
         bool resync_owed_ = false;
         std::string resync_owed_reason_;
+        bmmo::session_resync_msg::reason resync_owed_why_ = bmmo::session_resync_msg::reason::other;
         int consecutive_hard_ = 0;
         // Session-core design 7.1 decision 1 (step B2SW, a core rule for both
         // hosts since): authoritative snapshots in a row whose tick the
@@ -1317,9 +1319,12 @@ namespace bmmo::session {
             bool holding = false;
             uint32_t hold_from = 0;
             // The episode the server opened, until it closes it: its rows
-            // ride on the reports until it is decided (at most kRowReports).
-            bool open = false, decided = false;
-            uint32_t episode = 0, episode_tick = 0, row_reports = 0;
+            // ride on its reports while it is undecided, up to its heal tick
+            // (`rows_until`, a re-judge can still bring it forward) and from
+            // a heal's `healing` notice until its verify (step FD3b; FD1:
+            // until decided).
+            bool open = false, decided = false, healing = false;
+            uint32_t episode = 0, episode_tick = 0, rows_until = 0;
             uint8_t episode_buckets = 0;
             // Counters: reports sent, held back and never retired (a
             // re-anchor's hole), DETAIL answers and those whose sample had
@@ -1348,6 +1353,20 @@ namespace bmmo::session {
             std::vector<record_blob> pending;
             uint32_t pending_episode = 0;   // the episode whose records `pending` holds (0: none; episodes count from 1)
             uint32_t state_episodes = 0;
+            // Step FD3b: the X of the last in-place heal applied (every
+            // report carries it; a sample at or before it is the forked
+            // world's, reported PRE_HEAL), and a heal's state not applied,
+            // said once on the next report (HEAL_MISSED).
+            uint32_t heal_x = 0;
+            bool missed = false;
+            uint32_t missed_x = 0;
+            uint8_t missed_reason = 0;
+            uint64_t heals = 0, heals_missed = 0;
+            // A heal's state waiting for bodies this world does not have yet
+            // (a birth drained late), tried again each frame as a resync
+            // state is (bounded by the same frames and reach).
+            std::optional<bmmo::session_resync_state_msg> heal_waiting;
+            uint32_t heal_wait_frames = 0;
         };
         world_check_client world_check_;
     };
@@ -1557,6 +1576,21 @@ namespace bmmo::session {
         // sample tick.  Report only: off changes no world (the F-leg's
         // control; headless --no-world-check).
         bool world_check = true;
+        // Step FD3b, test only (headless --inject-fork, retail's automation
+        // verb inject-fork): ENTITY - a level name, "own" or "p<id>" -
+        // moved DX m along x after the step of TICK, live and in every
+        // replay of it; `every`: after every step from TICK to `until` (0:
+        // the session's end).
+        struct inject_fork_spec {
+            uint32_t tick = 0, until = 0;
+            std::string entity;
+            double dx = 0.0;
+            bool every = false;
+        };
+        std::vector<inject_fork_spec> inject_fork;
+        // Test only (headless --heal-miss): every in-place heal's state
+        // answered HEAL_MISSED, so the server's fallback re-assign heals.
+        bool heal_miss = false;
     };
 
     // (legacy_calls, the transitional back-calls of design 6.1 "Linking while
@@ -1861,7 +1895,7 @@ namespace bmmo::session {
         double rebase_threshold() const { return bmmo::session::lead_rebase_threshold(s.lead_slew_.outstanding()); }
         // The pacer rebased its schedule: a resync is asked for (the
         // limiter applies).
-        void schedule_rebased(const char* why) { request_resync(why); }
+        void schedule_rebased(const char* why) { request_resync(resync_why::schedule, why); }
         // One step of a SessionLead's slew at `now`: the tick periods since
         // the previous step (at `tick_rate`) and how far the pacer is behind
         // go to lead_slew::advance; the whole delta moved is acknowledged.
@@ -1982,7 +2016,9 @@ namespace bmmo::session {
         // ---- numbering and resync ----
         // `owed`: the own correction needs this resync; one the limiter
         // holds back is asked again by the frame (retry_owed_resync).
-        void request_resync(const char* reason, bool owed = false);
+        // `why` (protocol 43): the class the server journals; `reason` the text.
+        using resync_why = bmmo::session_resync_msg::reason;
+        void request_resync(resync_why why, const char* reason, bool owed = false);
         // Step DX6: a starved input report counted; the run of
         // config.starved_resync_reports asks for a resync.
         void note_starved_report();
@@ -2238,6 +2274,14 @@ namespace bmmo::session {
         void world_check_journal_states(uint32_t episode);
         // The session's end: an open episode closes `ended` here; the counters' line.
         void world_check_end();
+        // Step FD3b: a fork heal's state of X, applied in place (7.1), or
+        // missed / dropped (HEAL_MISSED on the next report); the test
+        // injection after a step (live and replayed).
+        void apply_heal(bmmo::session_resync_state_msg&& msg);
+        // A heal's state not applied: the heal_apply record (also of one
+        // applied), the line and HEAL_MISSED on the next report.
+        void heal_result(uint32_t episode, uint32_t x, uint32_t now, bmmo::session_world_report_msg::missed_reason reason);
+        void inject_fork(uint32_t tick, bool live);
         // A physicalized mirror without navigation is driven from now on, if
         // the host has the navigation (post_step step 16, and every birth).
         // Step DX10: the host's answer (attached for one driven already,
@@ -2547,6 +2591,22 @@ namespace bmmo::session {
         enum class apply_result { waiting, refused, applied };
         apply_result apply_server_state(const bmmo::session_resync_state_msg& st, uint32_t anchor, uint32_t now,
                                         uint32_t own_birth, apply_mode mode, const char* why);
+        // Step RSO's find: the own body this world made after `anchor` whose
+        // birth the server's state of it lacks (0: none); `future` when that
+        // birth is still after `now` (the re-assign waits for it).
+        uint32_t own_birth_after(const bmmo::session_resync_state_msg& st, uint32_t anchor, uint32_t now, bool& future) const;
+        // A late event stamped before resync_base_ is the server's state's:
+        // a pending exact resync's, or (step FD3b) the in-place heal's this
+        // epoch stands on (heal_covers) - no rewind, no resync of its own.
+        bool state_covers(uint32_t tick) const {
+            return (s.resync_pending_ && s.resync_exact_ && static_cast<int32_t>(tick - s.resync_base_) < 0) || heal_covers(tick);
+        }
+        // `tick` at or before the X of the in-place heal applied last, with
+        // no re-assign since (which moves resync_base_ off X + 1).
+        bool heal_covers(uint32_t tick) const {
+            const uint32_t x = s.world_check_.heal_x;
+            return x != 0 && s.state_anchored_ && s.resync_base_ == x + 1 && static_cast<int32_t>(tick - x) <= 0;
+        }
         // The tracked set of a record made now (post_step's, for the
         // synthetic anchor).
         bmmo::session::rollback_tracked tracked_now(bool physicalized) const;

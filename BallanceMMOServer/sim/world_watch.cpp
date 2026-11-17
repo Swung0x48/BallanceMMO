@@ -61,6 +61,12 @@ namespace bmmo::sim {
         r.folds = m.folds;
         r.rewinds = m.rewinds;
         r.resyncs = m.resyncs;
+        r.heal_x = m.heal_x;
+        r.held = m.held;
+        r.last_full = m.last_full;
+        r.k = m.k;
+        r.missed_x = m.missed_x;
+        r.missed = m.missed;
         return r;
     }
 
@@ -89,12 +95,20 @@ namespace bmmo::sim {
         m.base = base;
         if (!m.ready) m.compared_at = now;   // the silent clock starts at the first assignment
         m.ready = true;
+        // Step FD3b: the fallback's own re-assign is its heal (verified from
+        // its base); any other assignment while a decided episode is open - a
+        // resync the member asked for, another re-answer - supersedes it
+        // (7.5).  An undecided one (held unsettled) goes on as FD1's.
+        if (!heal_ || !m.ep || !m.ep->decided) return;
+        if (m.heal.k == heal_state::kind::reassign && m.heal.x == base - 1) return;
+        close(m, now, wc_outcome::superseded, now);
     }
 
     void world_watch::leave(uint32_t player, uint32_t now) {
         const auto it = members_.find(player);
         if (it == members_.end()) return;
         auto& m = it->second;
+        queue_.erase(std::remove(queue_.begin(), queue_.end(), player), queue_.end());
         if (m.ep) close(m, now, wc_outcome::ended, now);
         if (m.blind) blind_end(m, now, false);
         if (m.cap) --capable_;
@@ -148,6 +162,11 @@ namespace bmmo::sim {
         auto& m = it->second;
         m.heard = true;
         m.heard_at = now;
+        // Step FD3b: what the next heal is coded against and captured at.
+        m.k = r.k;
+        m.held_ref = r.held;
+        m.last_full = r.last_full;
+        if (r.flags & bmmo::session_world_report_msg::FLAG_HEAL_MISSED) missed(m, r, now);
         if (r.flags & bmmo::session_world_report_msg::FLAG_DETAIL) detail(m, r, now);
         else handle(m, r, now);
     }
@@ -156,6 +175,8 @@ namespace bmmo::sim {
         if (r.tick % wc::kSampleTicks != 0) return not_compared(m, r, "not_sample");
         if (!m.ready || r.epoch != m.base || static_cast<int32_t>(r.tick - m.base) < 0)
             return not_compared(m, r, "old_epoch");
+        // A record the in-place heal retired, the forked world's (7.1 step 3).
+        if (r.flags & bmmo::session_world_report_msg::FLAG_PRE_HEAL) return not_compared(m, r, "pre_heal");
         if (samples_.empty() || static_cast<int32_t>(r.tick - samples_.back().tick) > 0) {
             if (m.held.size() < kHeld) m.held.push_back(std::move(r));
             else not_compared(m, r, "dropped");
@@ -184,21 +205,39 @@ namespace bmmo::sim {
         agree(r, diff.differs() ? "differs" : "equal", diff.kinds, diff.owners);
         m.compared_at = now;
         if (m.blind) blind_end(m, now, true);
+        // Step FD3b: a heal waiting for the other members' reports of this T
+        // (this one may be the last of them).
+        for (auto& [id, other]: members_)
+            if (other.verify && other.verify->tick == r.tick) try_verify(other, now);
+        // A heal sent and not applied yet (its report has heal_x < X), or
+        // the fallback not assigned yet: the sample says nothing of it.
+        const bool outstanding = heal_ && m.heal.k != heal_state::kind::none && !verifying(m, r);
+        if (heal_ && verifying(m, r)) m.heal.seen = true;   // no fallback for a heal the client applied
         if (!diff.differs()) {
             m.last_equal = r.tick;
             // A key of the episode latched at this sample is not compared:
             // it keeps the episode open.
-            if (m.ep && std::none_of(m.ep->owners.begin(), m.ep->owners.end(), [&](uint32_t o) {
+            if (m.ep && !outstanding && std::none_of(m.ep->owners.begin(), m.ep->owners.end(), [&](uint32_t o) {
                     return contains(sample.latched, o) || contains(r.latched, o);
                 })) {
                 const auto& ep = *m.ep;
-                close(m, r.tick, !ep.decided && ep.unsettled_a ? wc_outcome::lead
+                const bool healed = heal_ && m.heal.k != heal_state::kind::none;
+                if (healed) {
+                    put(stat_kind::fork_verify, {m.id, ep.id, m.heal.x, r.tick, wc::outcome_name(wc_outcome::healed),
+                                                 "", "", 0, 0, ""});
+                    m.failed_in_row = 0;
+                    m.failed_heals.clear();
+                }
+                close(m, r.tick, healed ? wc_outcome::healed
+                                 : !ep.decided && ep.unsettled_a ? wc_outcome::lead
                                  : !ep.final ? wc_outcome::self_healed : wc_outcome::equal_again, now);
             }
             return;
         }
         ++differing_;
         if (!m.ep) return open(m, sample, r, diff, now);
+        if (outstanding) return;
+        if (heal_ && m.heal.k != heal_state::kind::none) return begin_verify(m, sample, r, diff, now);
         auto& ep = *m.ep;
         ep.last = r.tick;
         ++ep.samples;
@@ -221,7 +260,27 @@ namespace bmmo::sim {
     void world_watch::open(member_state& m, sample_entry& sample, const world_report_in& r, const wc::world_diff& diff,
                            uint32_t now) {
         episode ep;
-        ep.id = ++episodes_;
+        // Step FD3b (5.3): a difference within 3960 ticks of an episode's
+        // close with a key in common reopens it (one fork_reopen; a line only
+        // after a verified heal - a lead or a self-heal reopens silently).
+        if (const auto& c = m.last_closed; heal_ && c && now - c->at < kReopenTicks
+                && ((c->buckets & diff.buckets) != 0
+                    || std::any_of(diff.owners.begin(), diff.owners.end(), [&](uint32_t o) { return contains(c->owners, o); }))) {
+            ep.id = c->id;
+            ep.reopened = true;
+            put(stat_kind::fork_reopen, {r.player, ep.id, r.tick, now - c->at});
+            if (c->healed) {
+                notice n;
+                n.player = r.player;
+                n.line = m.name + ", episode " + std::to_string(ep.id) + " differs again at tick " + std::to_string(r.tick)
+                       + ", " + std::to_string(now - c->at) + " ticks after its heal held (reopened: "
+                       + kinds_text(diff.kinds) + ")";
+                emit(std::move(n));
+            }
+            m.last_closed.reset();
+        } else {
+            ep.id = ++episodes_;
+        }
         ep.first = ep.last = r.tick;
         ep.opened_at = now;
         ep.kinds = diff.kinds;
@@ -397,8 +456,8 @@ namespace bmmo::sim {
             const std::string when = tier == wc_tier::now && gap_wait == 0 ? "now"
                 : "by tick " + std::to_string(would_heal) + " (" + wc::tier_name(tier) + (gap_wait ? ", after the 10 s gap" : "") + ")";
             n.line = m.name + "'s world differs from the server's at tick " + std::to_string(ep.first) + " (episode "
-                   + std::to_string(ep.id) + ": " + what + "); would heal " + when + ", rule " + wc::rule_name(rule)
-                   + " (report only)";
+                   + std::to_string(ep.id) + ": " + what + "); " + (heal_ ? "heals " : "would heal ") + when + ", rule "
+                   + wc::rule_name(rule) + (heal_ ? "" : " (report only)");
             emit(std::move(n));
         }
         deadline(m, r.player, now);
@@ -409,14 +468,35 @@ namespace bmmo::sim {
         auto& ep = *m.ep;
         ep.final = true;
         ++would_heals_;
-        m.healed_once = true;
-        m.last_would_heal = now;
         put(stat_kind::fork_decision, {player, ep.id, ep.first, wc::tier_name(ep.tier), wc::rule_name(ep.rule), now, 0, 1});
+        if (!heal_) {
+            m.healed_once = true;
+            m.last_would_heal = now;
+            return;
+        }
+        // Step FD3b: due.  A member whose last 6 heals did not hold, alone,
+        // is taken out of the session instead of a 7th (5.3, Q9 / Q10); a
+        // HEAL_MISSED already asked for the fallback; else the runner
+        // captures its state at its next whole-record tick (next_heal).
+        if (m.kicked || m.heal.k != heal_state::kind::none) return;
+        if (m.failed_in_row >= kKickAfter) return kick(m, now);
+        if (!m.queued) {
+            m.queued = true;
+            queue_.push_back(player);
+        }
     }
 
     void world_watch::close(member_state& m, uint32_t tick, wc_outcome outcome, uint32_t now) {
         const auto ep = *m.ep;
         m.ep.reset();
+        // Step FD3b: what a reopen within 3960 ticks matches.
+        m.queued = false;
+        queue_.erase(std::remove(queue_.begin(), queue_.end(), m.id), queue_.end());
+        m.verify.reset();
+        const bool healed = outcome == wc_outcome::healed;
+        const bool by_reassign = m.heal.k == heal_state::kind::reassign;
+        m.heal = {};
+        if (heal_) m.last_closed = closed_episode{ep.id, now, ep.owners, ep.buckets, healed};
         const uint32_t end_tick = outcome == wc_outcome::ended ? now : tick;
         const uint32_t forked = end_tick - ep.first;
         if (outcome == wc_outcome::lead) ++leads_;
@@ -441,13 +521,26 @@ namespace bmmo::sim {
         if (outcome == wc_outcome::lead) {
             n.line = m.name + ", tick " + std::to_string(ep.first) + ": lead (" + kinds_text(ep.kinds)
                    + ", one sample, episode " + std::to_string(ep.id) + "), closed";
-        } else {
+        } else if (!heal_) {
             const char* how = outcome == wc_outcome::self_healed ? "equal again before its would-heal tick"
                             : outcome == wc_outcome::equal_again ? "equal again"
                                                                  : "ended with the member's session";
             n.line = m.name + ", episode " + std::to_string(ep.id) + " closed at tick " + std::to_string(end_tick) + ": "
                    + how + " after " + std::to_string(forked) + " ticks (" + seconds
                    + " forked; report only, nothing healed)";
+        } else {
+            // Step FD3b.
+            const std::string heals = std::to_string(ep.heals.size()) + " heal" + (ep.heals.size() == 1 ? "" : "s");
+            std::string how;
+            if (outcome == wc_outcome::healed)
+                how = std::string("healed ") + (by_reassign ? "by re-assign at " : "in place at ")
+                    + std::to_string(ep.heals.empty() ? 0 : ep.heals.back()) + ", equal at " + std::to_string(end_tick);
+            else if (outcome == wc_outcome::self_healed) how = "equal again before its heal";
+            else if (outcome == wc_outcome::equal_again) how = "equal again";
+            else if (outcome == wc_outcome::superseded) how = "superseded by a re-assign at " + std::to_string(m.base);
+            else how = "ended with the member's session";
+            n.line = m.name + ", episode " + std::to_string(ep.id) + " closed: " + how + " (" + heals + ", forked "
+                   + seconds + ")";
         }
         emit(std::move(n));
     }
@@ -488,6 +581,15 @@ namespace bmmo::sim {
                     }
                 }
                 deadline(m, player, now);
+                // Step FD3b: a verify past its wait for the other members'
+                // reports, and an in-place state that never showed in a
+                // report (heal_x below X for 660 ticks: lost or dropped
+                // unreported) - the fallback.
+                if (m.verify && after_or_at(now, m.verify->deadline)) try_verify(m, now);
+                if (m.ep && m.heal.k == heal_state::kind::in_place && !m.heal.seen && now - m.heal.sent_at >= kExpectedTicks)
+                    fallback(m, "its state of tick " + std::to_string(m.heal.x) + " never showed in a report", now);
+                else if (m.ep && m.heal.k == heal_state::kind::asked)
+                    fallback(m, "", now);   // held back by the guard: asked again
             }
             if (m.cap && m.ready && !m.blind && now - m.compared_at >= kBlindTicks) {
                 m.blind = true;
@@ -513,11 +615,11 @@ namespace bmmo::sim {
         const double max_s = forked.empty() ? 0.0 : static_cast<double>(forked.back()) / bmmo::session::TICK_RATE;
         const double p50_s = forked.empty() ? 0.0 : static_cast<double>(forked[forked.size() / 2]) / bmmo::session::TICK_RATE;
         put(stat_kind::world_check_end, {members_seen_, sampled_, compared_, differing_, episodes_, leads_, would_heals_,
-                                         blind_max_});
+                                         blind_max_, heals_in_place_, heals_reassign_, heals_failed_, heals_shared_, kicks_});
         char text[256];
         std::snprintf(text, sizeof(text),
                       "%u episode%s (%llu lead%s), %llu would heal, forked s max %.1f / p50 %.1f, blind s max %.1f; "
-                      "%llu samples, %llu reports compared, %llu differing (report only)",
+                      "%llu samples, %llu reports compared, %llu differing",
                       episodes_, episodes_ == 1 ? "" : "s", static_cast<unsigned long long>(leads_), leads_ == 1 ? "" : "s",
                       static_cast<unsigned long long>(would_heals_), max_s, p50_s,
                       static_cast<double>(blind_max_) / bmmo::session::TICK_RATE,
@@ -525,6 +627,19 @@ namespace bmmo::sim {
                       static_cast<unsigned long long>(differing_));
         notice n;
         n.line = text;
+        // Step FD3b: the heals, or FD1's "report only".
+        if (!heal_) {
+            n.line += " (report only)";
+        } else {
+            char heals[160];
+            std::snprintf(heals, sizeof(heals), "; %llu heals (%llu in place, %llu re-assign), %llu did not hold (%llu shared), "
+                          "%llu kicked",
+                          static_cast<unsigned long long>(heals_in_place_ + heals_reassign_),
+                          static_cast<unsigned long long>(heals_in_place_), static_cast<unsigned long long>(heals_reassign_),
+                          static_cast<unsigned long long>(heals_failed_), static_cast<unsigned long long>(heals_shared_),
+                          static_cast<unsigned long long>(kicks_));
+            n.line += heals;
+        }
         emit(std::move(n));
     }
 
@@ -649,5 +764,302 @@ namespace bmmo::sim {
             out += (out.empty() ? "" : "; ") + g.key + " " + std::to_string(g.same) + "/" + std::to_string(g.others)
                  + (g.owner >= 0 ? owner_text[g.owner] : "");
         return out;
+    }
+
+    // ---- Step FD3b: the heal (5.3-5.5, 7.1-7.6, 15.4) ----
+
+    void world_watch::life(uint32_t player, uint32_t tick) {
+        auto& ticks = lives_[player];
+        ticks.push_back(tick);
+        if (ticks.size() > 16) ticks.erase(ticks.begin());
+    }
+
+    bool world_watch::verifying(const member_state& m, const world_report_in& r) const {
+        switch (m.heal.k) {
+        case heal_state::kind::in_place:
+            return static_cast<int32_t>(r.tick - m.heal.x) > 0 && r.heal_x != 0 && static_cast<int32_t>(r.heal_x - m.heal.x) >= 0;
+        case heal_state::kind::reassign:   // its epoch: handle() compares the new one's only
+            return static_cast<int32_t>(r.tick - m.heal.x) > 0;
+        default:
+            return false;
+        }
+    }
+
+    std::optional<world_watch::heal_order> world_watch::next_heal(uint32_t tick, bool other_state,
+                                                                  const std::function<bool(uint32_t)>& pending) {
+        if (!heal_ || other_state) return std::nullopt;
+        for (auto it = queue_.begin(); it != queue_.end(); ++it) {
+            const auto found = members_.find(*it);
+            if (found == members_.end() || !found->second.ep) continue;   // leave() and close() drop it
+            auto& m = found->second;
+            // X is a tick the member records whole (sparse capture, 15.1 row 3).
+            if (m.k > 1 && tick % m.k != 0) continue;
+            if (pending && pending(m.id)) continue;
+            heal_order order{m.id, m.ep->id, m.base, m.ep->would_heal, m.held_ref};
+            m.queued = false;
+            queue_.erase(it);
+            return order;
+        }
+        return std::nullopt;
+    }
+
+    void world_watch::heal_sent(const heal_order& order, uint32_t x, size_t bytes, bool coded, uint32_t now) {
+        const auto it = members_.find(order.player);
+        if (it == members_.end() || !it->second.ep) return;
+        auto& m = it->second;
+        auto& ep = *m.ep;
+        m.heal = {heal_state::kind::in_place, x, now};
+        m.healed_once = true;
+        m.last_would_heal = now;
+        ep.heals.push_back(x);
+        ++ep.in_place;
+        ++heals_in_place_;
+        put(stat_kind::fork_heal, {m.id, ep.id, "in_place", x, order.due, now - order.due, bytes, coded ? 1 : 0, m.failed_in_row});
+        notice n;
+        n.player = m.id;
+        n.send = true;
+        n.episode = ep.id;
+        n.tick = ep.first;
+        n.action = wc_action::healing;
+        n.kinds = ep.kinds;
+        n.owners = ep.owners;
+        n.buckets = ep.buckets;
+        n.tier = ep.tier;
+        n.rule = ep.rule;
+        n.tick2 = x;
+        char size[48];
+        std::snprintf(size, sizeof(size), "%.0f KB, %s", static_cast<double>(bytes) / 1024.0, coded ? "delta" : "plain");
+        n.line = m.name + ", episode " + std::to_string(ep.id) + ": healing in place at tick " + std::to_string(x) + " (" + size
+               + (m.failed_in_row ? ", after " + std::to_string(m.failed_in_row) + " of " + std::to_string(kKickAfter)
+                                    + " that did not hold" : std::string()) + ")";
+        emit(std::move(n));
+    }
+
+    void world_watch::missed(member_state& m, const world_report_in& r, uint32_t now) {
+        using msg = bmmo::session_world_report_msg;
+        const char* why = msg::missed_name(r.missed);
+        if (!heal_ || !m.ep || m.heal.k != heal_state::kind::in_place || r.missed_x != m.heal.x) {
+            put(stat_kind::fork_verify, {m.id, m.ep ? m.ep->id : 0u, r.missed_x, r.tick, "missed", "", "", 0, m.failed_in_row,
+                                         std::string("stale: ") + why});
+            return;
+        }
+        put(stat_kind::fork_verify, {m.id, m.ep->id, r.missed_x, r.tick, "missed", "", "", 0, m.failed_in_row, why});
+        // Dropped (a resync of the member's own under way, whose assignment
+        // supersedes the episode; another epoch): the heal goes out again at
+        // the gap, and a second drop in the episode falls back (7.6).
+        const bool dropped = r.missed == static_cast<uint8_t>(msg::missed_reason::resync_pending)
+                          || r.missed == static_cast<uint8_t>(msg::missed_reason::other_epoch);
+        if (dropped && ++m.ep->drops < 2) {
+            m.heal = {};
+            requeue(m, now);
+            return;
+        }
+        fallback(m, "its state of tick " + std::to_string(r.missed_x) + " could not be applied (" + why
+                    + (dropped ? ", the second drop" : "") + ")", now);
+    }
+
+    // The episode due again (a heal that did not hold, a dropped state): at
+    // NOW, never before the gap.
+    void world_watch::requeue(member_state& m, uint32_t now) {
+        auto& ep = *m.ep;
+        ep.final = false;
+        ep.decided = true;
+        ep.tier = wc_tier::now;
+        ep.would_heal = m.last_would_heal + kGapTicks;
+        if (!after_or_at(ep.would_heal, now)) ep.would_heal = now;
+    }
+
+    // 7.6: the re-assign resync, unasked, through the server (sink.reassign
+    // -> resync_member(..., "fork"), on the simulation thread under
+    // state_mutex_), verified from its base.  7.2's guard can hold it back
+    // while the member's own birth is known past the reach of the base it
+    // would get (asked again every tick, at most 660 ticks).
+    void world_watch::fallback(member_state& m, const std::string& why, uint32_t now) {
+        auto& ep = *m.ep;
+        const bool again = m.heal.k == heal_state::kind::asked;
+        if (!again) m.heal = {heal_state::kind::asked, 0, now};
+        const uint32_t asked_at = m.heal.sent_at;
+        const uint32_t base = sink_.reassign ? sink_.reassign(m.id, ep.id, m.last_full, now - asked_at < kExpectedTicks) : 0;
+        const std::string head = m.name + ", episode " + std::to_string(ep.id) + ": " + (again ? "" : why + "; ");
+        if (base == 0) {
+            if (!again) {
+                notice n;
+                n.player = m.id;
+                n.line = head + "the re-assign waits until its own birth is within a base's reach";
+                emit(std::move(n));
+            }
+            return;
+        }
+        m.heal = {heal_state::kind::reassign, base - 1, now};
+        m.healed_once = true;
+        m.last_would_heal = base - 1;   // the state's tick: the gap counts from it
+        ep.heals.push_back(base - 1);
+        ++ep.reassigned;
+        ++heals_reassign_;
+        put(stat_kind::fork_heal, {m.id, ep.id, "reassign", base - 1, asked_at, now - asked_at, 0, 0, m.failed_in_row});
+        notice n;
+        n.player = m.id;
+        n.line = head + "healing by re-assign at " + std::to_string(base);
+        emit(std::move(n));
+    }
+
+    void world_watch::kick(member_state& m, uint32_t now) {
+        auto& ep = *m.ep;
+        m.kicked = true;
+        ++kicks_;
+        std::string heals;
+        for (uint32_t x: m.failed_heals) heals += (heals.empty() ? "" : " ") + std::to_string(x);
+        put(stat_kind::fork_kick, {m.id, ep.id, heals, m.last_keys, m.last_shared, m.failed_in_row});
+        notice n;
+        n.player = m.id;
+        n.send = true;
+        n.episode = ep.id;
+        n.tick = ep.first;
+        n.action = wc_action::kick;
+        n.kinds = ep.kinds;
+        n.owners = ep.owners;
+        n.buckets = ep.buckets;
+        n.tick2 = now;
+        n.differing = static_cast<uint16_t>(m.failed_in_row);
+        n.kick = true;
+        n.reason = "the world check: the server's state did not hold after " + std::to_string(m.failed_in_row)
+                 + " heals in a row; press Ready to rejoin";
+        const std::string span = m.failed_heals.empty() ? std::string()
+            : " (" + std::to_string(m.failed_heals.front()) + "-" + std::to_string(m.failed_heals.back()) + ")";
+        n.line = m.name + ", episode " + std::to_string(ep.id) + ": " + std::to_string(m.failed_in_row)
+               + " heals in a row did not hold" + span + ", not shared with other members; removed from the physics session "
+                 "(stays in the room)";
+        emit(std::move(n));
+    }
+
+    // 5.4 with 15.0 change 3: the first differing sample after the heal.  A
+    // zone-only difference, or a presence-only one on keys the episode does
+    // not hold, decides nothing (the next sample does).
+    void world_watch::begin_verify(member_state& m, const sample_entry& sample, const world_report_in& r,
+                                   const wc::world_diff& diff, uint32_t now) {
+        auto& ep = *m.ep;
+        ep.last = r.tick;
+        ++ep.samples;
+        if (diff.kinds & wc::KIND_OWN) ++ep.own_samples;
+        if (m.verify || diff.kinds == wc::KIND_ZONE) return;
+        // A key of the episode latched at T is not compared: the next sample decides.
+        if (std::any_of(ep.owners.begin(), ep.owners.end(),
+                        [&](uint32_t o) { return contains(sample.latched, o) || contains(r.latched, o); }))
+            return;
+        const bool outside = (diff.buckets & ep.buckets) == 0
+            && std::none_of(diff.owners.begin(), diff.owners.end(), [&](uint32_t o) { return contains(ep.owners, o); });
+        if (outside && !r.rows.empty() && sample.rows) {
+            std::vector<uint32_t> latched = sample.latched;
+            latched.insert(latched.end(), r.latched.begin(), r.latched.end());
+            if (assess(r.player, sample.rows.get(), r.rows, diff.buckets, latched).presence_only) return;
+        }
+        for (uint32_t o: diff.owners)
+            if (!contains(ep.owners, o)) ep.owners.push_back(o);
+        ep.buckets |= diff.buckets;
+        m.verify = verify_wait{r.tick, now + kVerifyWaitTicks, diff.owners, diff.buckets};
+        try_verify(m, now);
+    }
+
+    // Decided once every other compared member has reported T (or the wait
+    // ran out): the Q9 grouping reads their terms of T.  re_fork when a
+    // differing ball's owner had a lifecycle event in the server's world
+    // after X (resets the count, definition B); else heal_failed, counted
+    // toward the kick unless every still-differing key is shared - some
+    // other member reported the same term at T (the user's Q9, "不算").
+    // Either way the episode stays open at NOW, the next heal at the gap.
+    bool world_watch::try_verify(member_state& m, uint32_t now) {
+        if (!m.verify || !m.ep) {
+            m.verify.reset();
+            return false;
+        }
+        const verify_wait v = *m.verify;
+        if (const sample_entry* sample = find_sample(v.tick); sample && !after_or_at(now, v.deadline))
+            for (const auto& [id, other]: members_)
+                if (id != m.id && other.cap && other.ready && !other.kicked && !sample->reports.count(id)) return false;
+        auto& ep = *m.ep;
+        const uint32_t x = m.heal.x;
+        const auto groups = grouping(m.id, v.tick, v.owners, v.buckets);
+        // The keys still differing, each shared (some other member reported
+        // the same term at T) or this member's alone.
+        std::vector<std::string> keys_v;
+        for (uint32_t o: v.owners) keys_v.push_back(ball_key(o));
+        for (int b = 0; b < wc::kBuckets; ++b)
+            if (v.buckets & (1u << b)) keys_v.push_back("b" + std::to_string(b));
+        std::string keys, shared_keys, alone_keys;
+        const auto append = [](std::string& list, const std::string& key) { list += (list.empty() ? "" : " ") + key; };
+        for (const auto& key: keys_v) {
+            const bool same = std::any_of(groups.begin(), groups.end(), [&](const group& g) { return g.key == key && g.same > 0; });
+            append(keys, key);
+            append(same ? shared_keys : alone_keys, key);
+        }
+        const bool shared = !keys_v.empty() && alone_keys.empty();
+        const std::string shared_text = grouping_record(groups);
+        // A re-fork: a differing ball's owner had a lifecycle event in the
+        // server's world in (X, T].
+        uint32_t cause_player = 0, cause_tick = 0;
+        for (uint32_t o: v.owners) {
+            const auto l = lives_.find(o);
+            if (l == lives_.end()) continue;
+            for (uint32_t t: l->second)
+                if (static_cast<int32_t>(t - x) > 0 && static_cast<int32_t>(t - v.tick) <= 0) cause_player = o, cause_tick = t;
+            if (cause_player) break;
+        }
+        const bool re_fork = cause_player != 0;
+        bool counted = false;
+        if (re_fork) {
+            m.failed_in_row = 0;
+            m.failed_heals.clear();
+        } else {
+            ++heals_failed_;
+            if (shared) {
+                ++heals_shared_;
+            } else {
+                counted = true;
+                ++m.failed_in_row;
+                m.failed_heals.push_back(x);
+            }
+            m.last_keys = keys;
+            m.last_shared = shared_text;
+        }
+        const wc_outcome outcome = re_fork ? wc_outcome::re_fork : wc_outcome::heal_failed;
+        const std::string cause = re_fork ? ball_key(cause_player) + "@" + std::to_string(cause_tick) : std::string();
+        put(stat_kind::fork_verify, {m.id, ep.id, x, v.tick, wc::outcome_name(outcome), keys, shared_text, counted ? 1 : 0,
+                                     m.failed_in_row, cause});
+        m.heal = {};
+        m.verify.reset();
+        requeue(m, now);
+        // How the keys stand, for both sides' lines (the client's is `worst`).
+        const std::string standing = shared ? "shared with other members, not counted"
+            : shared_keys.empty() ? std::string("this member's alone")
+            : shared_keys + " shared with other members, " + alone_keys + " this member's alone: counted";
+        notice n;
+        n.player = m.id;
+        n.send = true;
+        n.episode = ep.id;
+        n.tick = ep.first;
+        n.action = wc_action::verified;
+        n.kinds = ep.kinds;
+        n.owners = v.owners;
+        n.buckets = v.buckets;
+        n.tier = ep.tier;
+        n.rule = ep.rule;
+        n.tick2 = ep.would_heal;
+        n.outcome = outcome;
+        n.differing = static_cast<uint16_t>(m.failed_in_row);
+        n.worst = re_fork ? keys : keys + "; " + standing;
+        const std::string next = m.failed_in_row >= kKickAfter ? "; the next is a removal from the physics session at "
+                                                               : "; retrying in place at ";
+        if (re_fork)
+            n.line = m.name + ", episode " + std::to_string(ep.id) + " differs again at tick " + std::to_string(v.tick)
+                   + " after its heal at " + std::to_string(x) + " (re-fork: " + body_text(ball_key(cause_player))
+                   + " had a lifecycle event at " + std::to_string(cause_tick) + "); healing again at "
+                   + std::to_string(ep.would_heal);
+        else
+            n.line = m.name + ", episode " + std::to_string(ep.id) + ": the heal at " + std::to_string(x)
+                   + " did not hold (still differs at " + std::to_string(v.tick) + ": " + keys + "; " + standing + ")" + next
+                   + std::to_string(ep.would_heal) + " (" + std::to_string(m.failed_in_row) + " of "
+                   + std::to_string(kKickAfter) + ")";
+        emit(std::move(n));
+        return true;
     }
 }

@@ -857,7 +857,12 @@ def _self_test(out_dir):
 # counted.  rc 1 with --no-episodes when any episode is there, with
 # --no-would-heal when one was decided (an episode held unsettled and closed
 # - a lead, a pending own reason - is listed only), with --min-compared when
-# a member's coverage is below it (the gate's G1).
+# a member's coverage is below it (the gate's G1).  Step FD3b: the heals,
+# their verifies, a kick and a reopen are listed with their episode (server:
+# fork_heal / fork_verify / fork_kick / fork_reopen; client: the healing,
+# verified and kick notices and heal_apply), and a sample the member
+# reported PRE_HEAL (the forked world's, retired by an in-place heal) is no
+# compare the server could make: left out of the coverage, listed.
 SAMPLE_TICKS = 66
 
 
@@ -865,6 +870,7 @@ def world_check_listing(paths, no_episodes=False, min_compared=None, tail=2 * SA
     found = 0
     decided = 0
     short = 0
+    heals = kicks = 0
     journals = [(path, jt.read_journal(str(path), summary=True)) for path in paths]
     # The client journals given with a server journal explain its gaps: a sample the client held back while a resync
     # was pending (sent 0) or never retired (sent 2: a re-anchor dropped it) is no compare the server could make.
@@ -876,13 +882,14 @@ def world_check_listing(paths, no_episodes=False, min_compared=None, tail=2 * SA
     for path, journal in journals:
         stats = [s for s in journal.stats if s.get('name') in (
             'world_agree', 'fork_open', 'fork_detail', 'fork_decision', 'fork_close', 'fork_blind', 'world_check_end',
-            'world_report', 'fork_notice')]
+            'world_report', 'fork_notice', 'fork_heal', 'fork_verify', 'fork_kick', 'fork_reopen', 'heal_apply')]
         print('%s:' % pathlib.Path(path).name)
         server = journal.header['kind'] == jt.KIND_SERVER
         episodes = collections.OrderedDict()
         if server:
             results = collections.defaultdict(collections.Counter)
             compared = collections.defaultdict(set)
+            pre_heal = collections.defaultdict(set)
             first_epoch = {}
             for s in stats:
                 v = s['values']
@@ -891,6 +898,8 @@ def world_check_listing(paths, no_episodes=False, min_compared=None, tail=2 * SA
                     first_epoch.setdefault(v['player'], v['epoch'])
                     if v['result'] in ('equal', 'differs'):
                         compared[v['player']].add(v['tick'])
+                    elif v['result'] == 'pre_heal':
+                        pre_heal[v['player']].add(v['tick'])
                 elif s['name'] == 'fork_open':
                     episodes[v['episode']] = {'player': v['player'], 'tick': v['tick'], 'kinds': v['kinds'],
                                               'owners': v['owners'], 'buckets': v['buckets']}
@@ -909,6 +918,23 @@ def world_check_listing(paths, no_episodes=False, min_compared=None, tail=2 * SA
                     else:
                         e['close'] = '%s at %d (samples %d, forked %d ticks, own %d)' % (
                             v['outcome'], v['first'] + v['forked_ticks'], v['samples'], v['forked_ticks'], v['own_ticks'])
+                elif s['name'] in ('fork_heal', 'fork_verify', 'fork_kick', 'fork_reopen') and v['episode'] in episodes:
+                    e = episodes[v['episode']]
+                    if s['name'] == 'fork_heal':
+                        heals += 1
+                        text = '%s heal X %d (due %d, wait %d, %d bytes, count %d)' % (
+                            v['kind'], v['x'], v['due'], v['wait'], v['bytes'], v['count'])
+                    elif s['name'] == 'fork_verify':
+                        text = '%s at %d of X %d%s%s' % (
+                            v['outcome'], v['tick'], v['x'], ' keys %s [%s] counted %d count %d' % (
+                                v['keys'], v['shared'], v['counted'], v['count']) if v['outcome'] == 'heal_failed' else '',
+                            ' cause ' + v['cause'] if v['cause'] else '')
+                    elif s['name'] == 'fork_kick':
+                        kicks += 1
+                        text = 'KICK after %d (heals %s, keys %s)' % (v['count'], v['heals'], v['keys'])
+                    else:
+                        text = 'reopened at %d, %d ticks after its close' % (v['tick'], v['after'])
+                    e.setdefault('heals', []).append(text)
                 elif s['name'] == 'fork_blind':
                     print('  blind p%d %s from %d, %d ticks%s' % (v['player'], v['cause'], v['first'], v['ticks'],
                                                                 ' (ended)' if v['ended'] else ''))
@@ -935,29 +961,40 @@ def world_check_listing(paths, no_episodes=False, min_compared=None, tail=2 * SA
                     expected.update(t for t in range(-(-start // SAMPLE_TICKS) * SAMPLE_TICKS, end + 1, SAMPLE_TICKS))
                 held = expected & unsent.get(player, set()) - compared[player]
                 expected -= held
+                retired = expected & pre_heal[player] - compared[player]
+                expected -= retired
                 got = len(compared[player] & expected)
                 pct = 100.0 * got / len(expected) if expected else 100.0
                 low = min_compared is not None and base is not None and pct < min_compared
                 short += low
                 print('  p%d reports %d: %s; compared %d of %d samples from its first epoch %s to its end - %d ticks '
-                      '(%.1f%%)%s%s' % (player, total, ', '.join('%s %d' % kv for kv in sorted(counts.items())) or 'none',
-                                        got, len(expected), base if base is not None else '-', tail, pct,
-                                        '; %d more not sent around a resync (its journal: %s)' % (
-                                            len(held), ' '.join(map(str, sorted(held)))) if held else '',
-                                        ' BELOW %g%%' % min_compared if low else ''))
+                      '(%.1f%%)%s%s%s' % (player, total, ', '.join('%s %d' % kv for kv in sorted(counts.items())) or 'none',
+                                          got, len(expected), base if base is not None else '-', tail, pct,
+                                          '; %d more not sent around a resync (its journal: %s)' % (
+                                              len(held), ' '.join(map(str, sorted(held)))) if held else '',
+                                          '; %d more reported pre_heal (%s)' % (
+                                              len(retired), ' '.join(map(str, sorted(retired)))) if retired else '',
+                                          ' BELOW %g%%' % min_compared if low else ''))
             for eid, e in episodes.items():
                 print('  episode %d p%d tick %d (kinds %d, owners [%s], buckets %d): %s; %s; %s' % (
                     eid, e['player'], e['tick'], e['kinds'], e['owners'], e['buckets'], e.get('detail', 'no detail'),
                     e.get('decision', 'no decision'), e.get('close', 'OPEN at the end')))
+                for text in e.get('heals', []):
+                    print('    %s' % text)
         else:
             reports = [s['values'] for s in stats if s['name'] == 'world_report']
             sent = collections.Counter(r['sent'] for r in reports)
             print('  reports %d (%d sent, %d held back while a resync was pending, %d never retired), unconfirmed %d' % (
                 len(reports), sent[1], sent[0], sent[2], sum(1 for r in reports if r['verdict'] and r['sent'] != 2)))
             for s in stats:
+                v = s['values']
+                if s['name'] == 'heal_apply':
+                    if v['episode'] in episodes:
+                        episodes[v['episode']].setdefault('heals', []).append('heal_apply %s X %d at %d%s (depth %d of %d)' % (
+                            v['result'], v['x'], v['at'], ' ' + v['reason'] if v['reason'] else '', v['depth'], v['reach']))
+                    continue
                 if s['name'] != 'fork_notice':
                     continue
-                v = s['values']
                 e = episodes.setdefault(v['episode'], {'tick': v['tick']})
                 if v['action'] == 'opened':
                     e['kinds'], e['owners'] = v['kinds'], v['owners']
@@ -967,15 +1004,25 @@ def world_check_listing(paths, no_episodes=False, min_compared=None, tail=2 * SA
                         v['tier'], v['rule'], v['tick2'], v['differing'], v['worst'] or '-', v['worst_m'], v['own_m'])
                 elif v['action'] == 'closed' and 'close' not in e:
                     e['close'] = '%s at %d' % (v['outcome'], v['tick2'])
+                elif v['action'] in ('healing', 'verified', 'kick'):
+                    if v['action'] == 'healing':
+                        heals += 1
+                    elif v['action'] == 'kick':
+                        kicks += 1
+                    e.setdefault('heals', []).append('%s %d%s' % (
+                        v['action'], v['tick2'], ' %s (%s, count %d)' % (v['outcome'], v['worst'], v['differing'])
+                        if v['action'] == 'verified' else ''))
             for eid, e in episodes.items():
                 print('  episode %d tick %d (kinds %s, owners [%s]): %s; %s' % (
                     eid, e['tick'], e.get('kinds', '?'), e.get('owners', ''), e.get('decision', 'no decision'),
                     e.get('close', 'OPEN at the end')))
+                for text in e.get('heals', []):
+                    print('    %s' % text)
         print('  episodes %d' % len(episodes))
         found += len(episodes)
         decided += sum(1 for e in episodes.values() if e.get('decided'))
-    print('world check: %d episodes (%d decided, %d never left unsettled) over %d journals%s' % (
-        found, decided, found - decided, len(paths),
+    print('world check: %d episodes (%d decided, %d never left unsettled), %d heals, %d kicks over %d journals%s' % (
+        found, decided, found - decided, heals, kicks, len(paths),
         '' if min_compared is None else ', %d members below %g%% compared' % (short, min_compared)))
     return 1 if (no_episodes and found) or (no_would_heal and decided) or short else 0
 

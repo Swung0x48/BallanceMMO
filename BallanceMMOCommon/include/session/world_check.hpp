@@ -36,9 +36,6 @@ namespace bmmo::session::world_check {
     // A report held back while a resync is pending at most this long, then
     // sent with PENDING; the same span bounds the server's expected wait (2.3).
     constexpr uint32_t kPendingHoldTicks = 10 * TICK_RATE;
-    // The reports of an open episode that carry rows, until it is decided
-    // (LATER's 396 ticks: 6 samples; 14.0).
-    constexpr uint32_t kRowReports = 6;
 
     // world_diff::kinds and the notices' kinds.
     constexpr uint8_t KIND_OWN = 1;        // the reporting member's own ball
@@ -77,7 +74,11 @@ namespace bmmo::session::world_check {
 
     // SessionWorldFork's fields (14.2); the names go into both journals and
     // the log lines.
-    enum class fork_action : uint8_t { opened = 0, decided = 1, closed = 2 };
+    // Step FD3b (protocol 43): healing (tick2 = X, the state follows),
+    // verified (a heal that did not hold: outcome re_fork or heal_failed,
+    // tick2 the next heal's earliest tick, differing the count after it) and
+    // kick (tick2 the tick the 7th heal would have gone out).
+    enum class fork_action : uint8_t { opened = 0, decided = 1, closed = 2, healing = 3, kick = 4, verified = 5 };
     enum class fork_tier : uint8_t { unsettled = 0, now = 1, soon = 2, later = 3 };
     // (`nearby`, not `near`: windows.h defines near and far as macros.)
     enum class fork_rule : uint8_t {
@@ -85,13 +86,16 @@ namespace bmmo::session::world_check {
         first_presence, first_zone, latched, expected,
         classes,   // decided from the report's classes, the DETAIL answered (a report without rows)
     };
-    enum class fork_outcome : uint8_t { none = 0, lead, self_healed, equal_again, ended };
+    enum class fork_outcome : uint8_t { none = 0, lead, self_healed, equal_again, ended, healed, re_fork, heal_failed, superseded };
 
     inline const char* action_name(fork_action a) {
         switch (a) {
         case fork_action::opened: return "opened";
         case fork_action::decided: return "decided";
         case fork_action::closed: return "closed";
+        case fork_action::healing: return "healing";
+        case fork_action::kick: return "kick";
+        case fork_action::verified: return "verified";
         }
         return "?";
     }
@@ -118,6 +122,10 @@ namespace bmmo::session::world_check {
         case fork_outcome::self_healed: return "self_healed";
         case fork_outcome::equal_again: return "equal_again";
         case fork_outcome::ended: return "ended";
+        case fork_outcome::healed: return "healed";
+        case fork_outcome::re_fork: return "re_fork";
+        case fork_outcome::heal_failed: return "heal_failed";
+        case fork_outcome::superseded: return "superseded";
         }
         return "?";
     }

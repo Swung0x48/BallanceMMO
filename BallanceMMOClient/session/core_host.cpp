@@ -6261,6 +6261,29 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
                            host.sound_unbound, host.sound_contact_calls, host.sound_contact_fixed,
                            host.sound_contact_none, host.sound_stranded);
     }
+    if (what == "inject-fork") {
+        // Step FD3b (test only, fork detection 15.4): 'session inject-fork
+        // TICK ENTITY DX' - ENTITY (a level name, own or p<id>) moved DX m
+        // along x after the step of TICK, live and in every replay of it
+        // (core_config::inject_fork, the headless --inject-fork), in the
+        // running core session.
+        std::string entity;
+        double dx = 0.0;
+        args >> entity >> dx;
+        char* end = nullptr;
+        const unsigned long tick = std::strtoul(value.c_str(), &end, 10);
+        if (value.empty() || (end && *end) || entity.empty() || args.fail() || tick == 0)
+            return "error usage: session inject-fork <tick> <entity> <dx>";
+        if (!core_session_running()) return "error session inject-fork: no core session running";
+        bs::core_config::inject_fork_spec spec;
+        spec.tick = static_cast<uint32_t>(tick);
+        spec.entity = entity;
+        spec.dx = dx;
+        host.core->config.inject_fork.push_back(spec);
+        logger_->Info("Automation: inject-fork %s %+g m after tick %lu armed (session tick %u)", entity.c_str(), dx, tick,
+                      session_tick_now());
+        return std::format("ok inject-fork {} {:+g} m after tick {} armed", entity, dx, tick);
+    }
     if (what == "cadence") {
         // Step A2: 'session cadence N|status' (core_config::
         // remote_cadence_frames, 0-16): for the next session and, at once,

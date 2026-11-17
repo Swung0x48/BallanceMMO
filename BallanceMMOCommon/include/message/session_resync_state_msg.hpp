@@ -85,6 +85,12 @@ namespace bmmo {
         uint8_t ref_kind = session::RESYNC_REF_NONE;
         uint32_t ref_tick = 0, ref_check = 0;   // the reference's resync_ref_id (0 when plain)
         uint32_t raw_size = 0;                  // the decoded body's size
+        // Protocol 43 (fork detection 15.4): a fork heal's state of X
+        // (`tick`), applied in place with no re-assign; `base` is the
+        // member's current assignment base, `episode` the server's.
+        static constexpr uint8_t FLAG_IN_PLACE = 1;
+        uint8_t flags = 0;
+        uint32_t episode = 0;
         std::vector<uint8_t> frame;
 
         session_resync_state_msg() : serializable_message(bmmo::SessionResyncState) {}
@@ -98,6 +104,8 @@ namespace bmmo {
             raw.write(reinterpret_cast<const char*>(&ref_tick), sizeof(ref_tick));
             raw.write(reinterpret_cast<const char*>(&ref_check), sizeof(ref_check));
             raw.write(reinterpret_cast<const char*>(&raw_size), sizeof(raw_size));
+            raw.write(reinterpret_cast<const char*>(&flags), sizeof(flags));
+            raw.write(reinterpret_cast<const char*>(&episode), sizeof(episode));
             write_bytes(raw, frame);
             return raw.good();
         }
@@ -111,6 +119,7 @@ namespace bmmo {
             if (!message_utils::read_variable(raw, &ref_tick)) return false;
             if (!message_utils::read_variable(raw, &ref_check)) return false;
             if (!message_utils::read_variable(raw, &raw_size) || raw_size > session::kMaxResyncRaw) return false;
+            if (!message_utils::read_variable(raw, &flags) || !message_utils::read_variable(raw, &episode)) return false;
             return read_bytes(raw, static_cast<std::streamoff>(raw.tellp()), frame);
         }
 

@@ -196,8 +196,8 @@ namespace bmmo::session {
             // the tick counter runs on, and only a re-anchor brings the two
             // back together (design 4.1, 7 Q1: a core rule for both hosts
             // from R1; retail is the host whose clock can freeze).
-            if (s.rollback_.stats().frozen != frozen_before) request_resync("local physics clock frozen");
-            else if (s.rollback_.stats().globals_failures != globals_before) request_resync("physics globals refused");
+            if (s.rollback_.stats().frozen != frozen_before) request_resync(resync_why::physics_fault, "local physics clock frozen");
+            else if (s.rollback_.stats().globals_failures != globals_before) request_resync(resync_why::physics_fault, "physics globals refused");
             // Session-core design 7.1 decision 1 (step B2SW; the retail host's
             // transitional trigger until then, core_host.cpp): snapshots in a
             // row with no record of their tick are a numbering desync, which
@@ -212,7 +212,7 @@ namespace bmmo::session {
                     // Counted only when the request went out (the limiter
                     // may hold it back).
                     const uint64_t sent_before = s.resyncs_sent_;
-                    request_resync("30 snapshots with no record of their tick");
+                    request_resync(resync_why::corrections, "30 snapshots with no record of their tick");
                     if (s.resyncs_sent_ != sent_before) ++s.unmatched_resyncs_;
                 }
             } else {
@@ -246,7 +246,7 @@ namespace bmmo::session {
                     const auto step = s.corrector_.compare(pose);
                     const double err = s.corrector_.stats().last_error;
                     if (step.action == bmmo::session::correction_step::kind::hard) {
-                        if (++s.consecutive_hard_ >= 3) request_resync("3 hard corrections in a row");
+                        if (++s.consecutive_hard_ >= 3) request_resync(resync_why::corrections, "3 hard corrections in a row");
                         logf("hard correction of own ball for tick %u (error %.4f m, local tick %u)", snapshot.tick, err, current_tick());
                         // Before the set, or the recorded local pose would
                         // be the server's own.
@@ -341,7 +341,7 @@ namespace bmmo::session {
         // longer reaches back to it (kRelayHistory) - only a resync can fill
         // (the user's decision, docs/relay-protocol-design.md 7).
         if (s.assigned_ && static_cast<int32_t>(msg.from - s.relay_held_) > 0) {
-            if (!s.resync_pending_) request_resync("relayed input past the server's history", true);
+            if (!s.resync_pending_) request_resync(resync_why::past_reach, "relayed input past the server's history", true);
             return;
         }
         // Protocol 33: the lifecycle messages it carries, before its frames.
@@ -608,7 +608,7 @@ namespace bmmo::session {
             bmmo::session::input_frame predicted{};
             if (s.rollback_.recorded_body(entity, tick)
                 && !(s.rollback_.recorded_input(entity, tick, predicted) && same_frame(predicted, relayed)))
-                request_resync("a remote frame arrived past the reach and differs from the one stepped", true);
+                request_resync(resync_why::past_reach, "a remote frame arrived past the reach and differs from the one stepped", true);
             return;
         }
         // A frame also stands in for the holes after it (the nearest

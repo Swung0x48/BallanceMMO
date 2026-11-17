@@ -97,6 +97,11 @@ namespace bmmo::session {
         fork_close,          // server: an episode closed
         fork_blind,          // server: a member not compared for 660 ticks, and its end
         world_check_end,     // server: the session's world-check counters
+        fork_heal,           // server: a fork heal sent (in place, or the fallback re-assign)
+        fork_verify,         // server: a heal verified (healed, re_fork, heal_failed)
+        fork_kick,           // server: a member taken out of the physics session after 6 heals that did not hold
+        fork_reopen,         // server: a difference within 3960 ticks of a close reopened its episode
+        heal_apply,          // client: an in-place heal's state applied, missed or dropped
         count
     };
 
@@ -164,7 +169,8 @@ namespace bmmo::session {
         // or "join" (a late joiner's state); `state`: 1 when the server's state
         // follows to the member alone, 0 for the legacy full snapshot.
         constexpr stat_field resync_request[] = {{"player", 'i'}, {"base", 'i'}, {"last_full", 'i'},
-                                                 {"counted_through", 'i'}, {"why", 's'}, {"state", 'i'}};
+                                                 {"counted_through", 'i'}, {"why", 's'}, {"state", 'i'},
+                                                 {"reason", 's'}};
         constexpr stat_field ghost[] = {{"player", 'i'}, {"tick", 'i'}, {"solid", 'i'}};
         constexpr stat_field own_death[] = {{"origin", 'i'}, {"applied", 'i'}, {"at", 'i'}, {"line", 's'}};
         // Microseconds from the boot request (server_boot_requested) to the
@@ -238,7 +244,31 @@ namespace bmmo::session {
         constexpr stat_field fork_blind[] = {{"player", 'i'}, {"cause", 's'}, {"first", 'i'}, {"ticks", 'i'}, {"ended", 'i'}};
         constexpr stat_field world_check_end[] = {
             {"members", 'i'}, {"samples", 'i'}, {"compared", 'i'}, {"differing", 'i'}, {"episodes", 'i'},
-            {"leads", 'i'}, {"would_heals", 'i'}, {"blind_max_ticks", 'i'}};
+            {"leads", 'i'}, {"would_heals", 'i'}, {"blind_max_ticks", 'i'}, {"heals_in_place", 'i'},
+            {"heals_reassign", 'i'}, {"heals_failed", 'i'}, {"heals_shared", 'i'}, {"kicks", 'i'}};
+        // Step FD3b.  `kind`: in_place / reassign; `tick`: the runner's tick
+        // the state was captured after (X; a re-assign's: its base - 1);
+        // `wait`: the ticks from due to the capture (the stagger, k);
+        // `count`: the member's heals in a row that did not hold, before it.
+        constexpr stat_field fork_heal[] = {
+            {"player", 'i'}, {"episode", 'i'}, {"kind", 's'}, {"x", 'i'}, {"due", 'i'}, {"wait", 'i'}, {"bytes", 'i'},
+            {"coded", 'i'}, {"count", 'i'}};
+        // `outcome`: healed / re_fork / heal_failed; `keys` the episode's keys
+        // still differing at `tick`; `shared` per key "key same/others" (the
+        // other members reporting the same term at that sample: the Q9 data);
+        // `counted` 1 when the heal_failed counted toward the kick; `count`
+        // after it.
+        constexpr stat_field fork_verify[] = {
+            {"player", 'i'}, {"episode", 'i'}, {"x", 'i'}, {"tick", 'i'}, {"outcome", 's'}, {"keys", 's'},
+            {"shared", 's'}, {"counted", 'i'}, {"count", 'i'}, {"cause", 's'}};
+        constexpr stat_field fork_kick[] = {
+            {"player", 'i'}, {"episode", 'i'}, {"heals", 's'}, {"keys", 's'}, {"shared", 's'}, {"count", 'i'}};
+        constexpr stat_field fork_reopen[] = {{"player", 'i'}, {"episode", 'i'}, {"tick", 'i'}, {"after", 'i'}};
+        // `result`: applied / missed / dropped; `reason` the
+        // session_world_report_msg::missed_name ("" applied); `depth` the
+        // ticks re-stepped (now - x), `reach` the resync reach then.
+        constexpr stat_field heal_apply[] = {
+            {"episode", 'i'}, {"x", 'i'}, {"at", 'i'}, {"result", 's'}, {"reason", 's'}, {"depth", 'i'}, {"reach", 'i'}};
     }
 
 #define BMMO_STAT_KIND(name, klass, side) \
@@ -310,6 +340,11 @@ namespace bmmo::session {
         BMMO_STAT_KIND(fork_close, clock_site, STAT_SERVER),
         BMMO_STAT_KIND(fork_blind, clock_site, STAT_SERVER),
         BMMO_STAT_KIND(world_check_end, clock_site, STAT_SERVER),
+        BMMO_STAT_KIND(fork_heal, clock_site, STAT_SERVER),
+        BMMO_STAT_KIND(fork_verify, clock_site, STAT_SERVER),
+        BMMO_STAT_KIND(fork_kick, clock_site, STAT_SERVER),
+        BMMO_STAT_KIND(fork_reopen, clock_site, STAT_SERVER),
+        BMMO_STAT_KIND(heal_apply, logical, STAT_CLIENT),
     };
 #undef BMMO_STAT_KIND
     static_assert(sizeof(kStatKinds) / sizeof(kStatKinds[0]) == static_cast<size_t>(stat_kind::count),

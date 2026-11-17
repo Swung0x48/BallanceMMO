@@ -1097,6 +1097,8 @@ def run_case(args, sector, case_dir):
         # lines this harness reads) are verbose lines.
         f'log_verbose: {str(not args.quiet_server_log).lower()}\n'
     )
+    if args.fork_heal:   # step FD3b: physics.fork_heal (the server's default is on)
+        config = config.replace('  lead_adjust:', f'  fork_heal: {str(args.fork_heal == "on").lower()}\n  lead_adjust:', 1)
     (case_dir / 'config.yml').write_text(config, encoding='utf8')
 
     bindir = pathlib.Path(args.bin).resolve()
@@ -4011,6 +4013,8 @@ def main():
     ap.add_argument('--hold', help='lifecycle hold in milliseconds, or drop (A6: 496; A6m/A6b: 300)')
     ap.add_argument('--patience', choices=('off', 'on'), default=None, help='default off (on with --coordinated)')
     ap.add_argument('--lead-adjust', choices=('off', 'on'), default=None, help='default off (on with --coordinated)')
+    ap.add_argument('--fork-heal', choices=('off', 'on'), default=None,
+                    help='step FD3b: physics.fork_heal (heals only with --snapshots off); default: the server\'s (on)')
     ap.add_argument('--input-hints', choices=('off', 'on'), default='on',
                     help='protocol 37: the relay also carries the frames queued at the server (physics.input_hints; '
                          'default on, as the server since 2026-11-10)')

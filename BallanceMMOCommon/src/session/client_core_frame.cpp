@@ -179,14 +179,14 @@ namespace bmmo::session {
         // record is amended, never replayed), and with snapshots off
         // nothing else would ever repair it.  Not while a resync waits
         // for its snapshot: that snapshot is the repair.
-        if (has_own && !s.resync_pending_) request_resync("a substituted own frame could not be replayed", true);
+        if (has_own && !s.resync_pending_) request_resync(resync_why::unreplayable, "a substituted own frame could not be replayed", true);
         // Step T3 (trafo-replication design 4.7): a trafo input applied
         // nowhere - no snapshot can make, reset or blow pieces.
         if (trafo) {
             ++s.trafo_missed_;
             logf("trafo: the input rewind from tick %u was refused at local tick %u: resync (trafo_missed %llu)", anchor, now,
                  static_cast<unsigned long long>(s.trafo_missed_));
-            if (!s.resync_pending_) request_resync("a trafo input could not be replayed", true);
+            if (!s.resync_pending_) request_resync(resync_why::unreplayable, "a trafo input could not be replayed", true);
         }
     }
 
@@ -394,7 +394,11 @@ namespace bmmo::session {
                  applied);
             return true;
         }
-        if (sector_rewind_reachable(origin)) {
+        // Step FD3b: both ticks at or before an in-place heal's X: the
+        // server's state of X holds the pass; an origin before X and a server
+        // tick after it: re-derived from X (rewind_for_sectors).
+        if (heal_covers(origin) && heal_covers(applied)) return true;
+        if (sector_rewind_reachable(heal_covers(origin) ? s.world_check_.heal_x + 1 : origin)) {
             client_core_state::late_sector late;
             late.tick = origin;
             late.player = s.own_id_;
@@ -407,7 +411,7 @@ namespace bmmo::session {
         ++s.sector_rewinds_missed_;
         logf("own sector %d moved %u -> %u by the server at local tick %u: outside the rollback history, resync", sector,
              origin, applied, current_tick());
-        if (!s.resync_pending_) request_resync("an own Sector moved beyond the reach", true);
+        if (!s.resync_pending_) request_resync(resync_why::past_reach, "an own Sector moved beyond the reach", true);
         return true;
     }
 
@@ -420,10 +424,20 @@ namespace bmmo::session {
         if (s.sector_late_.empty()) return;
         std::vector<client_core_state::late_sector> late;
         late.swap(s.sector_late_);
+        // Step FD3b: a stamp at or before an in-place heal's X is in the
+        // server's state of X; an own pass the server moved past X is
+        // re-derived from X (the records before it are retired).
+        late.erase(std::remove_if(late.begin(), late.end(), [this](const client_core_state::late_sector& l) {
+                       return heal_covers(l.tick) && (!l.moved || heal_covers(l.applied));
+                   }), late.end());
+        if (late.empty()) return;
         const uint32_t now = current_tick();
-        uint32_t anchor_tick = late.front().tick;
+        const auto from = [this](const client_core_state::late_sector& l) {
+            return heal_covers(l.tick) ? s.world_check_.heal_x + 1 : l.tick;
+        };
+        uint32_t anchor_tick = from(late.front());
         for (const auto& l: late)
-            if (static_cast<int32_t>(l.tick - anchor_tick) < 0) anchor_tick = l.tick;
+            if (static_cast<int32_t>(from(l) - anchor_tick) < 0) anchor_tick = from(l);
         const uint32_t anchor = anchor_tick - 1;
         bool ok = false;
         auto& rd = s.rederive_;
@@ -503,7 +517,7 @@ namespace bmmo::session {
         ++s.sector_rewinds_missed_;
         logf("late sector stamp for tick %u is outside the rollback history at local tick %u: stamped live, resync",
              anchor_tick, now);
-        if (!s.resync_pending_) request_resync("a late Sector event beyond the reach", true);
+        if (!s.resync_pending_) request_resync(resync_why::past_reach, "a late Sector event beyond the reach", true);
     }
 
     // Before each tick a re-deriving replay steps (core_world_hooks::
@@ -713,6 +727,12 @@ namespace bmmo::session {
         // before this frame's own rewinds, which then run on the re-stepped
         // history.
         if (s.have_resync_state_) try_apply_resync("retry");
+        // Step FD3b: a fork heal's state waiting the same way.
+        if (auto& waiting = s.world_check_.heal_waiting; waiting) {
+            auto msg = std::move(*waiting);
+            waiting.reset();
+            apply_heal(std::move(msg));
+        }
         // Step B1: the Sector stamps that arrived late inside the reach, and
         // the own ones the server moved, re-derived from the tick before the
         // lowest of them - after the drain's lifecycle rewinds, before the
@@ -895,9 +915,11 @@ namespace bmmo::session {
         // for the replays that re-run it (host-local).
         if (platform_.record_script_order) platform_.record_script_order(frame_tick);
         const uint32_t tick = current_tick();
-        // Step FD1: the airship zone's status at the step of a sample tick,
-        // before any drive, beam or correction moves a body (as a replay
-        // reads it, through after_replayed_step).
+        // Step FD3b's test switch (--inject-fork), then step FD1: the airship
+        // zone's status at the step of a sample tick, before any drive, beam
+        // or correction moves a body (as a replay reads it, through
+        // after_replayed_step).
+        inject_fork(tick, true);
         world_check_zone(tick);
 
         if (platform_.discover_navigation(tick)) {

@@ -4,8 +4,15 @@
 // 5.2, 6.1, 14.4): per session, the runner's terms and rows of its last
 // sample ticks (every T % 66 == 0), the compare of each member's
 // SessionWorldReport of T against them, and per member the episode of a
-// world that differs - opened, decided ("would heal": FD1 heals nothing),
-// closed - and the stretches a member is not compared (blind).
+// world that differs - opened, decided, closed - and the stretches a member
+// is not compared (blind).  Step FD3b (5.3-5.5, 7.1-7.6, 15.4), with the
+// heal on (set_heal: physics.fork_heal with snapshots off): a decided
+// episode's member is queued at its heal tick, the runner captures its state
+// of one tick X for it (next_heal / heal_sent), the next compared report
+// after X verifies it (healed / re_fork / heal_failed), a heal that did not
+// hold is retried in place at the fixed 10 s gap, and a member whose heals
+// did not hold 6 times in a row, alone, is taken out of the session (kick).
+// Off, it decides and journals exactly as FD1 ("would heal").
 //
 // Pure: no CK, no clock, no journal.  Every time is a session tick the
 // runner passes in (`now`: the tick it simulates next), so what it decides
@@ -43,6 +50,10 @@ namespace bmmo::sim {
         std::vector<std::pair<uint32_t, uint32_t>> folds;
         std::vector<bmmo::session_world_report_msg::rewind_entry> rewinds;
         uint16_t resyncs = 0;
+        // Schema 2 (step FD3b).
+        uint32_t heal_x = 0, last_full = 0, missed_x = 0;
+        bmmo::session::resync_ref_id held;
+        uint8_t k = 0, missed = 0;
 
         static world_report_in from(uint32_t player, const bmmo::session_world_report_msg& m);
     };
@@ -72,6 +83,10 @@ namespace bmmo::sim {
             float worst_m = 0.0f, own_m = 0.0f;
             std::string worst;
             std::string line;
+            // Step FD3b, for the server: take the member out of the physics
+            // session (the kick; `reason` its SessionEnd's).
+            bool kick = false;
+            std::string reason;
         };
         struct sink {
             std::function<void(bmmo::session::stat_kind, std::initializer_list<bmmo::session::journal_value>)> record;
@@ -80,10 +95,18 @@ namespace bmmo::sim {
             // The member's calm moment in the server's world now: 0 none,
             // 1 its ball absent (a death, a trafo pass), 2 finished.
             std::function<int(uint32_t player)> calm;
+            // Step FD3b, the fallback heal (7.6): re-assign the member now
+            // (`last_full` its last full snapshot) and return the base, or 0
+            // when 7.2's guard holds it back (`guard`: its own birth known
+            // past the reach of the base it would get).
+            std::function<uint32_t(uint32_t player, uint32_t episode, uint32_t last_full, bool guard)> reassign;
         };
 
         explicit world_watch(sink s = {}) : sink_(std::move(s)) {}
         void set_sink(sink s) { sink_ = std::move(s); }
+        // Step FD3b: heal (physics.fork_heal with snapshots off).
+        void set_heal(bool on) { heal_ = on; }
+        bool heal() const { return heal_; }
 
         // Sampled only while a member declares CAP_WORLD_CHECK.
         bool active() const { return capable_ > 0; }
@@ -104,6 +127,25 @@ namespace bmmo::sim {
         // The session's end: open episodes close `ended`, the counters.
         void end(uint32_t now);
 
+        // Step FD3b.  A player's lifecycle in the server's world (a birth, an
+        // airship release, a zone entry) at `tick`: a difference of its ball
+        // after a heal is a re-fork, not a heal that did not hold.
+        void life(uint32_t player, uint32_t tick);
+        // After the runner stepped `tick` (`now` = tick + 1): the queued
+        // member whose in-place heal is captured now (X = tick, a whole
+        // record's tick there: tick % k == 0); none when `other_state` (a
+        // resync state went out at this tick) and none for a member with a
+        // resync pending in the runner (`pending`).  At most one a tick (the
+        // stagger, 7.3).
+        struct heal_order {
+            uint32_t player = 0, episode = 0, base = 0, due = 0;
+            bmmo::session::resync_ref_id held;
+        };
+        bool heal_queued() const { return !queue_.empty(); }
+        std::optional<heal_order> next_heal(uint32_t tick, bool other_state, const std::function<bool(uint32_t)>& pending);
+        // The state of X went out: fork_heal, the `healing` notice and line.
+        void heal_sent(const heal_order& order, uint32_t x, size_t bytes, bool coded, uint32_t now);
+
         static constexpr uint32_t kTerms = 16;        // samples whose terms are kept
         static constexpr uint32_t kRowSamples = 4;    // samples whose rows are kept
         static constexpr uint32_t kHeld = 4;          // reports per member held for an unstepped T
@@ -113,6 +155,9 @@ namespace bmmo::sim {
         static constexpr uint32_t kGapTicks = 10 * bmmo::session::TICK_RATE;     // the user's fixed gap
         static constexpr uint32_t kExpectedTicks = 10 * bmmo::session::TICK_RATE;
         static constexpr uint32_t kBlindTicks = 10 * bmmo::session::TICK_RATE;
+        static constexpr uint32_t kReopenTicks = 60 * bmmo::session::TICK_RATE;   // 3960: a close's keys reopen it
+        static constexpr uint32_t kKickAfter = 6;                                  // heals in a row that did not hold
+        static constexpr uint32_t kVerifyWaitTicks = bmmo::session::TICK_RATE;   // the other members' reports of T
 
     private:
         using rows_ptr = std::shared_ptr<const std::vector<bmmo::session::body_state>>;
@@ -137,6 +182,34 @@ namespace bmmo::sim {
             wc_rule rule = wc_rule::none;
             uint32_t would_heal = 0;
             uint32_t samples = 1, own_samples = 0;
+            // Step FD3b: the heals of this episode (X each; a re-assign's
+            // base - 1), in place and re-assigned.
+            std::vector<uint32_t> heals;
+            uint32_t in_place = 0, reassigned = 0, drops = 0;   // drops: in-place states the client dropped
+            bool reopened = false;
+        };
+        // Step FD3b: the member's outstanding heal.  in_place: the state of
+        // X sent; asked: the fallback re-assign held back by 7.2's guard
+        // (asked again every tick); reassign: re-assigned at x + 1.
+        // Verified by the first compared report after X (an in-place one
+        // carrying heal_x >= X); `seen` once such a report came.
+        struct heal_state {
+            enum class kind : uint8_t { none, in_place, asked, reassign } k = kind::none;
+            uint32_t x = 0, sent_at = 0;
+            bool seen = false;
+        };
+        // A differing sample after a heal, decided once every other member
+        // reported T or kVerifyWaitTicks passed (the Q9 grouping needs them).
+        struct verify_wait {
+            uint32_t tick = 0, deadline = 0;
+            std::vector<uint32_t> owners;
+            uint8_t buckets = 0;
+        };
+        struct closed_episode {
+            uint32_t id = 0, at = 0;
+            std::vector<uint32_t> owners;
+            uint8_t buckets = 0;
+            bool healed = false;
         };
         struct member_state {
             uint32_t id = 0;
@@ -155,6 +228,17 @@ namespace bmmo::sim {
             bool healed_once = false;
             uint32_t last_would_heal = 0;
             std::vector<world_report_in> held;
+            // Step FD3b.
+            heal_state heal;
+            std::optional<verify_wait> verify;
+            std::optional<closed_episode> last_closed;
+            bool queued = false, kicked = false;
+            uint32_t failed_in_row = 0;          // definition B: heal_failed alone, reset by healed / re_fork
+            std::vector<uint32_t> failed_heals;  // the X of each counted one
+            std::string last_keys, last_shared;  // the last heal_failed's
+            uint8_t k = 0;                       // from its reports
+            bmmo::session::resync_ref_id held_ref;
+            uint32_t last_full = 0;
         };
         struct assessment {
             bool rows = false;
@@ -187,6 +271,15 @@ namespace bmmo::sim {
         void hold(member_state& m, uint32_t player, wc_rule rule);
         void deadline(member_state& m, uint32_t player, uint32_t now);
         void close(member_state& m, uint32_t tick, wc_outcome outcome, uint32_t now);
+        // Step FD3b.
+        void kick(member_state& m, uint32_t now);
+        void missed(member_state& m, const world_report_in& r, uint32_t now);
+        void fallback(member_state& m, const std::string& why, uint32_t now);
+        void requeue(member_state& m, uint32_t now);
+        void begin_verify(member_state& m, const sample_entry& sample, const world_report_in& r,
+                          const bmmo::session::world_check::world_diff& diff, uint32_t now);
+        bool try_verify(member_state& m, uint32_t now);
+        bool verifying(const member_state& m, const world_report_in& r) const;
         void blind_end(member_state& m, uint32_t now, bool say);
         assessment assess(uint32_t player, const std::vector<bmmo::session::body_state>* server,
                           const std::vector<bmmo::session::body_state>& client, uint8_t buckets,
@@ -208,5 +301,10 @@ namespace bmmo::sim {
         uint32_t blind_max_ = 0;
         std::vector<uint32_t> forked_;    // per closed episode (not leads)
         bool ended_ = false;
+        // Step FD3b.
+        bool heal_ = false;
+        std::deque<uint32_t> queue_;                 // members due a heal, in decision order
+        std::map<uint32_t, std::vector<uint32_t>> lives_;   // player -> its lifecycle ticks in the server's world (the last 16)
+        uint64_t heals_in_place_ = 0, heals_reassign_ = 0, heals_failed_ = 0, heals_shared_ = 0, kicks_ = 0;
     };
 }

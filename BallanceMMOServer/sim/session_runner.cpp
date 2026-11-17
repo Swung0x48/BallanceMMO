@@ -461,11 +461,15 @@ namespace bmmo::sim {
                     if (callbacks_.on_world_fork) callbacks_.on_world_fork(session, n);
                     else if (!n.line.empty()) log("[session " + std::to_string(session) + "] world check: " + n.line);
                 };
+                sink.reassign = [this, session](uint32_t player, uint32_t episode, uint32_t last_full, bool guard) {
+                    return callbacks_.on_fork_reassign ? callbacks_.on_fork_reassign(session, player, episode, last_full, guard) : 0u;
+                };
                 sink.calm = [st](uint32_t player) {
                     if (!st->world) return 0;
                     return !st->world->player_physicalized(player) ? 1 : st->world->player_finished(player) ? 2 : 0;
                 };
                 s->watch.set_sink(std::move(sink));
+                s->watch.set_heal(config_.fork_heal);   // step FD3b: fork_heal with snapshots off
             }
             {
                 std::lock_guard lk(view_mutex_);
@@ -1335,14 +1339,14 @@ namespace bmmo::sim {
 
     void session_runner::request_resync_state(uint32_t session, uint32_t player, uint32_t base,
                                               bmmo::session::resync_ref_id claim, uint32_t last_full,
-                                              uint32_t counted_through, const char* why) {
-        post([this, session, player, base, claim, last_full, counted_through, why] {
+                                              uint32_t counted_through, const char* why, std::string reason) {
+        post([this, session, player, base, claim, last_full, counted_through, why, reason = std::move(reason)] {
             auto it = sessions_.find(session);
             if (it == sessions_.end() || !it->second->world) return;
             auto& s = *it->second;
             const uint32_t next = s.world->tick_index();
             s.journal.stat(next, bmmo::session::stat_kind::resync_request,
-                           {player, base, last_full, counted_through, why, 1});
+                           {player, base, last_full, counted_through, why, 1, reason});
             // base - 1 stepped already (next = tick_index(), the tick the
             // runner steps next, is past it: next >= base): nothing is sent
             // for a base the runner has passed - the client's check
@@ -1411,7 +1415,8 @@ namespace bmmo::sim {
                 std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - started).count());
     }
 
-    void session_runner::emit_resync_states(session_state& s, uint32_t tick, bool recording) {
+    bool session_runner::emit_resync_states(session_state& s, uint32_t tick, bool recording) {
+        bool emitted = false;
         for (auto r = s.resync_requests.begin(); r != s.resync_requests.end();) {
             if (r->second.base - 1 != tick) {
                 ++r;
@@ -1445,8 +1450,42 @@ namespace bmmo::sim {
                 s.journal.stat(tick, bmmo::session::stat_kind::resync_cost, {out.player, tick, out.emit_us, out.encode_us});
             }
             r = s.resync_requests.erase(r);
+            emitted = true;
             if (callbacks_.on_resync_state) callbacks_.on_resync_state(out);
         }
+        return emitted;
+    }
+
+    // Step FD3b (fork detection 7.1, 7.3): the state of X = `tick` for the
+    // first member world_watch has due a heal whose X this can be (a tick it
+    // records whole), unless another state went out at `tick` or the member
+    // has a resync pending here.  Captured and coded as every resync state
+    // (against the reference its reports say it holds), its `healing` notice
+    // first, then the state on the same reliable channel.  Nothing else: no
+    // assignment, buffer reset or lead reset - the member's frames before and
+    // after X are applied as they arrive.
+    void session_runner::emit_fork_heal(session_state& s, uint32_t tick, bool other_state, bool recording) {
+        const auto order = s.watch.next_heal(tick, other_state, [&s](uint32_t player) {
+            return s.resync_requests.count(player) != 0;
+        });
+        if (!order) return;
+        const auto started = clock::now();
+        resync_state_out out;
+        out.session = s.id;
+        out.player = order->player;
+        out.tick = tick;
+        out.base = order->base;
+        out.flags = bmmo::session_resync_state_msg::FLAG_IN_PLACE;
+        out.episode = order->episode;
+        s.world->capture_resync_state(out.player, out.state);
+        out.emit_us = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - started).count());
+        encode_resync_state(s, order->held, out);
+        if (recording)
+            s.journal.stat(tick, bmmo::session::stat_kind::resync_cost, {out.player, tick, out.emit_us, out.encode_us});
+        s.watch.heal_sent(*order, tick, out.frame.size(), out.ref_kind == bmmo::session::RESYNC_REF_PREVIOUS,
+                          s.world->tick_index());
+        if (callbacks_.on_resync_state) callbacks_.on_resync_state(out);
     }
 
     void session_runner::journal_note(uint32_t session, const std::string& text) {
@@ -1795,6 +1834,9 @@ namespace bmmo::sim {
                 warn("[session " + std::to_string(s.id) + "] event from " + std::to_string(e.player)
                     + " stamped " + std::to_string(e.origin) + " at tick " + std::to_string(tick) + " failed: " + error);
                 if (recording) s.journal.note(tick, "event failed: " + error);
+            } else if (e.event.type == bmmo::session::event_type::Physicalize
+                       || e.event.type == bmmo::session::event_type::AirshipRelease) {
+                s.watch.life(e.player, tick);   // step FD3b: a difference of this ball after a heal is a re-fork
             }
         }
         // After the events: a Physicalize due this tick has made its ball.
@@ -1818,10 +1860,12 @@ namespace bmmo::sim {
         // (ghosts from here, out of the sync) - in the journal.
         for (const auto& g: s.world->take_spawn_ghost_changes())   // step JNL
             s.journal.stat(tick, bmmo::session::stat_kind::ghost, {g.player, g.tick, g.solid ? 1 : 0});
-        for (const auto& [player, zone_tick]: s.world->take_airship_entries())
+        for (const auto& [player, zone_tick]: s.world->take_airship_entries()) {
+            s.watch.life(player, zone_tick);   // step FD3b
             if (recording)
                 s.journal.note(tick, "airship: p" + std::to_string(player) + " in the airship zone at tick "
                                      + std::to_string(zone_tick) + ", a ghost from here");
+        }
         if (recording) {
             bmmo::physics::world_hash hash;
             std::string hash_error;
@@ -1848,7 +1892,7 @@ namespace bmmo::sim {
         if (decision != 0) emit_snapshot(s, decision >= 2, decision == 3);
         // Step A3: the resync states due after this step (base - 1 == tick),
         // after the snapshot so its numbering of new bodies comes first.
-        if (!s.resync_requests.empty()) emit_resync_states(s, tick, recording);
+        const bool state_sent = !s.resync_requests.empty() && emit_resync_states(s, tick, recording);
         // The box's own checkpoint, last and through the read-only path:
         // snapshot() would recompute body_set_changed_ against its own call and
         // number mechanisms the server has not numbered yet, and the journal
@@ -1866,6 +1910,7 @@ namespace bmmo::sim {
             if (sample_due) s.watch.sample(tick, std::move(bodies), s.world->latched_players(), full_due, s.world->tick_index());
         }
         s.watch.step(s.world->tick_index());
+        if (s.watch.heal_queued()) emit_fork_heal(s, tick, state_sent, recording);   // step FD3b
     }
 
     // Late-player design 2.1, observe only (plan step 7): every stepped tick

@@ -318,7 +318,16 @@ namespace bmmo::session {
     //      its own rows and sends SessionWorldFork notices of an episode
     //      that differs.  Report only: no world changes.  A 41 peer would
     //      log each as an invalid opcode, so the handshake refuses it.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 42;
+    //  43  Fork heal, step FD3b (the fork detection design 15.4): the
+    //      server heals a member whose world differs with its state of one
+    //      tick X applied in place (SessionResyncState flags IN_PLACE and
+    //      the episode), verifies it from the next reports (schema 2: the
+    //      heal's X, the held reference, k, HEAL_MISSED), retries in place
+    //      every 10 s and takes a member whose heals do not hold out of the
+    //      physics session (SessionWorldFork healing / kick); SessionResync
+    //      carries a reason byte.  A 42 peer reads neither, so the handshake
+    //      refuses it.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 43;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
     // The protocol whose SessionStart carries `mechanism_slots` (step Q7).

@@ -201,6 +201,10 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 
 **协议 39（2026-11-10）：爆炸种子按加入顺序。** 世界选项 bit 5 `WORLD_TRAFO_SEED_JOIN_ORDER`，服务端在每个会话都置位；置位时，每个世界给一次爆炸的种子 `trafo_seed(会话种子, m, 生效 tick, 碎片类型)` 里的 m 取该生命的加入顺序，不再取玩家 id。玩家 id 是 GNS 的连接句柄，每次连接随机，所以以前同一份配方的两次会话碎片必然不同；加入顺序按进房先后分配，两次会话相同。服务端世界取 `add_player` 收到的 join_order（按 (id, 生命) 记，不是被占用时退而求其次的槽位）。线上两处：`session_event_msg` 的 Trafo 载荷在 position 之后加 join_order u8，由服务端在转发时填（运行器接受时从世界读出，客户端发送 255），中继数据报里的紧凑形式（协议 33）的 Trafo 也在 position 之后带上它，客户端收到别人的爆炸时用它——Trafo 事件从不按“生命未宣布”停放，迟到加入者也可能收到一个它从没被告知生命的离开者的爆炸；`SessionResyncState` 的状态体在账本各条目的生命之后加每条目一个 u8：该生命的加入顺序（总是写），重同步重建碎片时用它。客户端自己的爆炸取 SessionStart 里自己的条目。Trafo 事件因此从 38 字节变成 39 字节。journal 头部的 world_options 带这一位，没有它的旧 journal（包括公测的）在 SimTool `--replay-session` 里仍按玩家 id 重放；journal 布局不变。已知限制：客户端 journal 的 EVENT 记录不带 join_order，SimTool 重放一个迟到加入者的 journal 时，对一个只在重同步账本里出现过的离开者生命，用的是 SimTool 自己猜的加入顺序（只影响离线诊断）。设计见 `docs/trafo-replication-design.md` 2.6。
 
+**协议 40-42** 见 `entity/session.hpp` 中 `PHYSICS_PROTOCOL_VERSION` 的注释（40：savestate 格式 4；41：SessionIntent；42：世界核对 SessionWorldReport / SessionWorldFork，只报告，docs/realtime-design.md「Built (fork detection, report only, step FD1, 2026-11-16)」）。
+
+**协议 43（步骤 FD3，2026-11-16）：分叉修复。** 世界核对发现某个成员的世界与服务端不同时，服务端用自己某一 tick X 的状态原地修复它（不重新分配编号、不冻结、不重置该成员的 lead），修不住就每 10 秒原地再修一次，连续 6 次修不住（只有这个成员自己的分叉才算）就把它移出物理会话（仍在房间里，按 Ready 迟到加入，计数从 0 开始）。线上四处：`SessionResyncState` 在 raw_size 之后、frame 之前加 flags u8（bit 0 `FLAG_IN_PLACE`：原地修复的状态，tick = X，base = 成员当前编号的起点）和 episode u32；`SessionResync` 末尾加 why u8（请求的原因类别：other、past_reach、own_life、state_refused、physics_fault、corrections、schedule、unreplayable、starved，服务端写进 journal 的 resync_request.reason）；`SessionWorldReport` schema 2 在 latched 之后加 heal_x u32（最近一次已应用的原地修复的 X）、held（u8 有无、u32 tick、u32 check：成员持有的重同步状态，修复状态按它做差分编码）、last_full u32、k u8（稀疏记录：每 k 个 tick 一条完整记录，X 取 k 的倍数），flag 16 `HEAL_MISSED` 带 missed_x u32 与 missed u8（left_history、light、resync_pending、other_epoch、waiting、refused、undecodable），flag 32 `PRE_HEAL`（T ≤ heal_x：修复前分叉世界的样本，不比较）；`SessionWorldFork` 新增动作 healing 3（tick2 = X，状态随后在同一可靠通道到达）、kick 4、verified 5（一次没修住：outcome re_fork / heal_failed，tick2 = 下一次修复的最早 tick，differing = 计数），新增结局 healed、re_fork、heal_failed、superseded。服务端配置 `physics.fork_heal`（默认开）；只在快照关闭（snapshot_interval ≥ 255）时修复，快照开着时只报告。42 的对端两边都读不懂这些字段，握手时拒绝。设计见 `.local-tools` 的 fork_detection.md 第 5、7、15 节，实现见 docs/realtime-design.md「Built (the fork heal, step FD3, 2026-11-16)」。
+
 ## 3. 服务端配置
 
 ```yaml
@@ -220,6 +224,7 @@ physics:
   trafo_inputs: true                  # 协议 11：世界选项 WORLD_TRAFO_INPUTS（变球作为输入）；会话拒绝没有 CAP_TRAFO_INPUTS 的成员；B9DX 起默认开，写过的 config.yml 保留原值，要开需手改
   placement_clones: true              # 协议 12：世界选项 WORLD_PLACEMENT_CLONES（小节摆放）；会话拒绝没有 CAP_PLACEMENT 的成员；写过的 config.yml 保留原值，要开需手改
   # proximity_union：步骤 UOFF 起取消（邻近并集总是开；旧配置里的 false 被忽略并记一条 Note，键从文件删除）
+  fork_heal: true                     # 协议 43：分叉修复（世界核对发现分叉时原地修复，10 秒间隔重试，连续 6 次修不住移出物理会话）；只在快照关闭时生效，快照开着只报告
   player_mechanisms: true             # 协议 19：世界选项 WORLD_PLAYER_MECHANISMS（每个玩家一份机关逻辑，K = maximum_members 夹在 [1, 64]，加入顺序限于 K 以下）；关 = 反向对照
   allowed_mods:                       # 物理会话 Mod 白名单（id: 版本）；为空则不检查
     BallanceMMOClient: "3.6.8-beta18"

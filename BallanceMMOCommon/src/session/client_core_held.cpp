@@ -117,7 +117,7 @@ namespace bmmo::session {
                 if (s.subst_unresolved_logs_++ < 8)
                     logf("held notice for own tick %u names source %u, which the sent ring no longer holds", tick,
                          record.source);
-                request_resync("a substituted own frame could not be resolved", true);
+                request_resync(resync_why::unreplayable, "a substituted own frame could not be resolved", true);
                 continue;
             }
             settle_held_tick(tick, frame);
@@ -152,7 +152,7 @@ namespace bmmo::session {
         const uint32_t run = s.starved_run_;
         s.starved_run_ = 0;
         const std::string reason = "input starved on " + std::to_string(run) + " reports in a row";
-        request_resync(reason.c_str(), false);
+        request_resync(resync_why::starved, reason.c_str(), false);
         if (s.resyncs_sent_ != before) {
             ++s.starved_resyncs_;
             logf("starved: %u server ticks in a row without our frame (the server substituted each); resync %llu "
@@ -214,7 +214,7 @@ namespace bmmo::session {
             if (s.subst_late_logs_++ < 8)
                 logf("held notice for own tick %u arrived at tick %u, past the reach of %u ticks", tick,
                      current_tick(), reach);
-            request_resync("a substituted own frame arrived past the reach", true);
+            request_resync(resync_why::past_reach, "a substituted own frame arrived past the reach", true);
             return;
         }
         ++s.subst_recv_;
@@ -562,7 +562,7 @@ namespace bmmo::session {
                 // below the floor names only ticks a resync's snapshot
                 // covered.
                 if (!s.resync_pending_ && config.rollback && static_cast<int32_t>(it->first - s.held_floor_) > 0)
-                    request_resync("substituted own frames whose every notice was lost", true);
+                    request_resync(resync_why::unreplayable, "substituted own frames whose every notice was lost", true);
             }
             it = s.held_gap_watch_.erase(it);
         }

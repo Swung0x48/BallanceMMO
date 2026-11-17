@@ -532,7 +532,8 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
                 || rest.rfind("hold", 0) == 0       // FULL step AHN (and R6H's hold-event)
                 || rest.rfind("force-own-move", 0) == 0     // FULL step R6H
                 || rest.rfind("own-births", 0) == 0         // FULL step R6B
-                || rest.rfind("cadence", 0) == 0)           // step A2
+                || rest.rfind("cadence", 0) == 0            // step A2
+                || rest.rfind("inject-fork", 0) == 0)       // step FD3b (test only)
             return core_host_session_verb(rest);
         // The core host answers trace / rollback (its own settings, read at a core session's start; FULL step
         // LGM); FULL step LGD: the legacy session's copies are gone.

@@ -122,8 +122,11 @@ namespace bmmo::session {
             if (pending) {
                 ++s.resync_states_refused_;
                 s.resync_in_flight_ = false;
-                request_resync("the resync state does not decode", true);
+                request_resync(resync_why::state_refused, "the resync state does not decode", true);
             }
+            // Step FD3b: a fork heal's, said to the server (HEAL_MISSED): it re-assigns.
+            if (msg.flags & bmmo::session_resync_state_msg::FLAG_IN_PLACE)
+                heal_result(msg.episode, msg.tick, current_tick(), bmmo::session_world_report_msg::missed_reason::undecodable);
             return;
         }
         if (against) ++s.resync_states_coded_;
@@ -136,6 +139,11 @@ namespace bmmo::session {
                                                                         | bmmo::session::JOURNAL_CHECKPOINT_FULL
                                                                         | bmmo::session::JOURNAL_CHECKPOINT_RESYNC),
                                          msg.rows);
+        // Step FD3b: a fork heal's state, applied in place (no re-assign).
+        if (msg.flags & bmmo::session_resync_state_msg::FLAG_IN_PLACE) {
+            apply_heal(std::move(msg));
+            return;
+        }
         // Only the state of the pending exact resync's anchor: a stale one is
         // for a base this client has left (a newer assignment came).
         if (!s.resync_pending_ || !s.resync_exact_ || msg.base != s.resync_base_ || msg.tick + 1 != msg.base) {
@@ -246,7 +254,7 @@ namespace bmmo::session {
             s.have_resync_state_ = false;
             s.resync_state_ = bmmo::session_resync_state_msg{};
             s.resync_in_flight_ = false;
-            request_resync("the resync state's anchor left the history", true);
+            request_resync(resync_why::state_refused, "the resync state's anchor left the history", true);
             return true;
         }
         // Step RSO: the synthetic anchor can have today's own body before
@@ -254,27 +262,16 @@ namespace bmmo::session {
         // the host's birth log).  Let the new numbering reach it first:
         // the ordinary restore's take-out/remake then stays in the re-step,
         // rather than settle_own_due making a future birth early.
-        uint32_t own_birth = 0;
-        if (caps_.own_body_control && !config.own_births_parked && !own_out_of_sync_at(anchor)
-                && std::none_of(st.rows.begin(), st.rows.end(), [this](const auto& body) {
-                       return body.kind == body_kind::Ball && body.owner == s.own_id_;
-                   }))
-            for (const auto& life: s.own_life_)
-                if (life.what == own_life::kind::birth && life.made && !life.retired
-                        && (life.state == own_life::verdict::acked || life.state == own_life::verdict::moved)
-                        && life.entity == platform_.own_driven_entity() && own_life_current(life, now, true)
-                        && static_cast<int32_t>(life.applied - anchor) > 0) {
-                    if (static_cast<int32_t>(life.applied - now) > 0) return false;
-                    own_birth = life.applied;
-                    break;
-                }
+        bool future = false;
+        const uint32_t own_birth = own_birth_after(st, anchor, now, future);
+        if (future) return false;
         switch (apply_server_state(st, anchor, now, own_birth, apply_mode::reassign, why)) {
         case apply_result::waiting: return false;
         case apply_result::refused:
             s.have_resync_state_ = false;
             s.resync_state_ = bmmo::session_resync_state_msg{};
             s.resync_in_flight_ = false;
-            request_resync("the resync state could not be applied", true);
+            request_resync(resync_why::state_refused, "the resync state could not be applied", true);
             return true;
         case apply_result::applied: break;
         }
@@ -291,6 +288,105 @@ namespace bmmo::session {
             if (platform_.hooks.resync_hold_ended) platform_.hooks.resync_hold_ended(held);
         }
         return true;
+    }
+
+    uint32_t session_client_core::own_birth_after(const bmmo::session_resync_state_msg& st, uint32_t anchor, uint32_t now,
+                                                  bool& future) const {
+        future = false;
+        if (!caps_.own_body_control || config.own_births_parked || own_out_of_sync_at(anchor)
+                || std::any_of(st.rows.begin(), st.rows.end(), [this](const auto& body) {
+                       return body.kind == body_kind::Ball && body.owner == s.own_id_;
+                   }))
+            return 0;
+        for (const auto& life: s.own_life_)
+            if (life.what == own_life::kind::birth && life.made && !life.retired
+                    && (life.state == own_life::verdict::acked || life.state == own_life::verdict::moved)
+                    && life.entity == platform_.own_driven_entity() && own_life_current(life, now, true)
+                    && static_cast<int32_t>(life.applied - anchor) > 0) {
+                future = static_cast<int32_t>(life.applied - now) > 0;
+                return future ? 0 : life.applied;
+            }
+        return 0;
+    }
+
+    // Step FD3b (fork detection 7.1, 15.4): the server's state of X for a
+    // world that differs, applied in place - no re-assign: the numbering,
+    // the sent ring, the input history and the registry stay, and nothing
+    // holds (a healthy client is never frozen for a heal it did not ask
+    // for).  Taken only in the current epoch, with no resync of its own
+    // pending, X recorded whole and the re-step within the reach; else
+    // missed (or dropped: another epoch, a resync pending) and said on the
+    // next report, for the server's fallback re-assign.  After the apply
+    // nothing rewinds below X (the records before it hold the forked world:
+    // retired, their samples reported PRE_HEAL), and an event or frame
+    // stamped at or before X is the state's (state_anchored_, resync_base_ =
+    // X + 1).
+    void session_client_core::apply_heal(bmmo::session_resync_state_msg&& msg) {
+        using report = bmmo::session_world_report_msg;
+        auto& w = s.world_check_;
+        const uint32_t x = msg.tick, now = current_tick(), reach = s.rollback_.resync_reach();
+        auto reason = report::missed_reason::count;
+        if (msg.base != s.last_assign_first_tick_) reason = report::missed_reason::other_epoch;
+        else if (s.resync_pending_ || s.resync_in_flight_) reason = report::missed_reason::resync_pending;
+        else if (config.heal_miss || !s.rollback_.knows_tick(x) || now - x > reach) reason = report::missed_reason::left_history;
+        else if (!s.rollback_.restorable(x)) reason = report::missed_reason::light;
+        if (reason != report::missed_reason::count) return heal_result(msg.episode, x, now, reason);
+        // The members the apply reads (2.6.4's steps), set as a resync of
+        // base X + 1 with no delta, wait or join; put back if not applied.
+        // A state waiting for bodies is tried again next frame (the wait's
+        // frame count kept for its bound).
+        const uint32_t base_was = s.resync_base_;
+        s.resync_base_ = x + 1;
+        s.resync_delta_ = 0;
+        s.resync_wait_frames_ = w.heal_wait_frames;
+        s.resync_walk_frames_ = 0;
+        bool future = false;
+        const uint32_t own_birth = own_birth_after(msg, x, now, future);   // 7.2: no wait in place
+        const auto result = apply_server_state(msg, x, now, own_birth, apply_mode::in_place, "fork heal");
+        w.heal_wait_frames = result == apply_result::waiting ? s.resync_wait_frames_ : 0;
+        s.resync_wait_frames_ = 0;
+        if (result != apply_result::applied) s.resync_base_ = base_was;
+        if (result == apply_result::waiting) {
+            w.heal_waiting = std::move(msg);
+            return;
+        }
+        if (result == apply_result::refused) return heal_result(msg.episode, x, now, report::missed_reason::refused);
+        // 7.1 step 3: no rewind below X.  The samples before it retire now,
+        // flagged PRE_HEAL; FD2's records of the forked world go with them.
+        w.heal_x = x;
+        s.rollback_.retire_before(x);
+        w.whole.reset();
+        w.ring.clear();
+        s.held_floor_ = x;
+        s.state_anchored_ = true;
+        ++w.heals;
+        heal_result(msg.episode, x, now, report::missed_reason::count);
+        logf("world check: episode %u: the server's state of tick %u applied in place at tick %u (re-stepped %u ticks)",
+             msg.episode, x, now, now - x);
+    }
+
+    // `reason` count: applied.  Dropped (another epoch, a resync pending)
+    // or missed, the server hears it on the next report and heals again or
+    // re-assigns.
+    void session_client_core::heal_result(uint32_t episode, uint32_t x, uint32_t now,
+                                          bmmo::session_world_report_msg::missed_reason reason) {
+        using report = bmmo::session_world_report_msg;
+        auto& w = s.world_check_;
+        const bool applied = reason == report::missed_reason::count;
+        const bool dropped = reason == report::missed_reason::other_epoch || reason == report::missed_reason::resync_pending;
+        const uint32_t reach = s.rollback_.resync_reach();
+        if (journal_.journalling())
+            journal_.writer().stat(now, stat_kind::heal_apply,
+                                   {episode, x, now, applied ? "applied" : dropped ? "dropped" : "missed",
+                                    applied ? "" : report::missed_name(static_cast<uint8_t>(reason)), now - x, reach});
+        if (applied) return;
+        ++w.heals_missed;
+        w.missed = true;
+        w.missed_x = x;
+        w.missed_reason = static_cast<uint8_t>(reason);
+        logf("world check: episode %u: the server's state of tick %u could not be applied at tick %u (%s: depth %u, "
+             "reach %u); the server heals again or re-assigns", episode, x, now, report::missed_name(static_cast<uint8_t>(reason)),
+             now - x, reach);
     }
 
     // Steps 1b-7 of the apply (2.6.4): the server's state of `anchor` onto
@@ -1042,7 +1138,7 @@ namespace bmmo::session {
             state.timed_out = true;
             logf("resync hold timed out after %.0f ms at tick %u: running on, asking again", ms, current_tick());
             journal_.note("resync hold timed out after " + std::to_string(static_cast<long long>(ms)) + " ms");
-            request_resync(s.have_resync_state_ ? "the resync state came but was not applied within the hold"
+            request_resync(resync_why::state_refused, s.have_resync_state_ ? "the resync state came but was not applied within the hold"
                                                 : "the resync state did not come within the hold", true);
         } else {
             logf("resync hold released after %.0f ms", ms);

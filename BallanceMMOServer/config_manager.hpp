@@ -105,11 +105,13 @@ public:
     // above; off, the server does exactly what it did before the flag
     // existed.
     bool physics_lead_adjust = true;
-    // Fork detection 15.3 (step FD3a): heal a member whose world the world
-    // check found forked from the server's (FD3b's in-place heal).  Off by
-    // default; heals run only with snapshots off (snapshot_interval >= 255).
-    // Nothing reads it yet.
-    bool physics_fork_heal = false;
+    // Fork detection 15.3-15.4 (steps FD3a, FD3b): heal a member whose world
+    // the world check found forked from the server's - the in-place heal,
+    // retried every 10 s, the member out of the physics session after 6 in a
+    // row that did not hold.  On by default since FD3b's re-baseline; heals
+    // run only with snapshots off (snapshot_interval >= 255), else the
+    // world check only reports.
+    bool physics_fork_heal = true;
     // Protocol 37 (session/input_relay.hpp, the hints): every relay datagram
     // also carries what the other members' frames queued at the server hold
     // for the ticks not stepped yet, so a client's rewind for a key change

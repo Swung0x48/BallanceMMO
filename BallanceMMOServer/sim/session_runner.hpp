@@ -198,6 +198,10 @@ namespace bmmo::sim {
     // alone.  `emit_us`: what capturing it cost the step.
     struct resync_state_out {
         uint32_t session = 0, player = 0, tick = 0, base = 0;
+        // Step FD3b: a fork heal's state of X (`tick`), applied in place
+        // (session_resync_state_msg::FLAG_IN_PLACE), and its episode.
+        uint8_t flags = 0;
+        uint32_t episode = 0;
         physics_world::resync_state state;   // the sections, raw (the log line's sizes)
         uint64_t emit_us = 0;
         // Protocol 34: the body as one zstd frame (session_resync_state_msg),
@@ -297,6 +301,11 @@ namespace bmmo::sim {
         // send (`send`, to `player`) and/or a world-check log line to print
         // at the default level (sim/world_watch.hpp).
         std::function<void(uint32_t session, const world_watch::notice&)> on_world_fork;
+        // Step FD3b, simulation thread: the fallback heal's re-assign of
+        // `player` (world_watch's sink.reassign): the base, or 0 when 7.2's
+        // guard holds it back.
+        std::function<uint32_t(uint32_t session, uint32_t player, uint32_t episode, uint32_t last_full, bool guard)>
+                on_fork_reassign;
         // A tick failed or the world died; the server ends the session.
         std::function<void(uint32_t session, const std::string& reason)> on_failed;
         // Step K4b: the runner needs the handover mark (session_runner::mark)
@@ -474,7 +483,7 @@ namespace bmmo::sim {
         // journal's resync_request record.
         void request_resync_state(uint32_t session, uint32_t player, uint32_t base,
                                   bmmo::session::resync_ref_id claim = {}, uint32_t last_full = 0,
-                                  uint32_t counted_through = 0, const char* why = "join");
+                                  uint32_t counted_through = 0, const char* why = "join", std::string reason = {});
         // Diagnostics through `out` (from the runner's thread; the log
         // callback when unset): the server's sessions command.
         void describe(uint32_t session, std::function<void(const std::string&)> out = {});
@@ -837,7 +846,12 @@ namespace bmmo::sim {
         void step_session(session_state& s);
         void step(session_state& s);
         void emit_snapshot(session_state& s, bool full, bool body_set = false);
-        void emit_resync_states(session_state& s, uint32_t tick, bool recording);
+        // True when a state went out at this tick.
+        bool emit_resync_states(session_state& s, uint32_t tick, bool recording);
+        // Step FD3b (fork detection 7.1, 7.3): after the step of `tick`, the
+        // state of tick X = `tick` for the first member due a fork heal, to it
+        // alone, applied in place - at most one a tick.
+        void emit_fork_heal(session_state& s, uint32_t tick, bool other_state, bool recording);
         void log(const std::string& text);
         void warn(const std::string& text);   // step SLQ: callbacks_.warn, else log
         void encode_resync_state(session_state& s, const bmmo::session::resync_ref_id& claim, resync_state_out& out);

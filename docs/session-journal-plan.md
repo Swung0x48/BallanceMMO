@@ -170,6 +170,28 @@ tag. `journal_trace.py` reads it (summary mode keeps the sizes only); SimTool `-
 --savestate-map A.map --savestate-map B.map` against a server replay's `--dump-savestate-at TICKS DIR` (docs/realtime-design.md
 'Built (fork detection blobs, step FD2, 2026-11-16)').
 
+### The heals (step FD3, protocol 43, 2026-11-16; version 10 unchanged)
+
+New kinds at the end of the list. Server, class 1 (written at the runner's tick): `fork_heal` (a heal sent: player,
+episode, `kind` in_place / reassign, `x` the state's tick - a re-assign's base - 1 -, `due` the tick it was due,
+`wait` the ticks from due to the capture - the stagger, or the fallback's wait for 7.2's guard -, the state's
+`bytes`, `coded` 1 when coded against the member's held state, `count` the member's heals in a row that did not hold,
+before it), `fork_verify` (the first compared report after X: `outcome` healed / re_fork / heal_failed, or `missed`
+for a HEAL_MISSED report - `cause` its reason, `stale: ...` for one that names no outstanding heal -; `keys` the
+episode's keys still differing, `shared` per key `same/others` (the other members that reported the same term at that
+sample: the user's Q9 data), `counted` 1 when the heal_failed counted toward the removal, `count` after it, `cause` a
+re-fork's `p<owner>@<tick>`), `fork_kick` (the six X, the keys, the grouping, the count), `fork_reopen` (a difference
+within 3960 ticks of a close with a key in common: the episode's id again). `world_check_end` gains
+`heals_in_place`, `heals_reassign`, `heals_failed`, `heals_shared`, `kicks`; `resync_request` gains `reason` (the
+request's reason byte's name for `why` resync, `episode N` for `why` fork - the fallback heal -, empty for a join and
+the re-answers). Client, logical: `heal_apply` (episode, x, the tick `at`, `result` applied / missed / dropped,
+`reason` - left_history, light, resync_pending, other_epoch, waiting, refused, undecodable -, `depth` at - x, the
+resync `reach` then); `fork_notice` takes the actions healing, verified and kick and the outcomes healed, re_fork,
+heal_failed and superseded (a verified notice's `worst` is the keys and whether they were shared). A headless client
+journals each session of one run beside the first (`<stem>.rejoin<N>`), a Ready after a kick included. The
+`server_config` record does not carry `physics.fork_heal` (the server's startup line does; a decided episode with no
+`fork_heal` record after its final decision is a server with the heal off).
+
 The resync note keeps its rows and bytes; its capture and coding times (raw reads that differed between any two
 runs) moved to `resync_cost`.
 

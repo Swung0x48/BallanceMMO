@@ -3,6 +3,7 @@
 #include "message.hpp"
 #include "message_utils.hpp"
 #include "../entity/session.hpp"
+#include "../session/resync_state_codec.hpp"
 
 #include <algorithm>
 #include <string>
@@ -20,6 +21,8 @@ namespace bmmo {
     //   schema u8, session u32, epoch u32, tick u32, flags u8, why u8, rows u16,
     //   unkeyed u8, dup u8, u8 n x (owner u32, term u64), 8 x bucket u64,
     //   u8 n x latched owner u32,
+    //   (schema 2, protocol 43, fork heal) heal_x u32, held (u8 has, u32 tick,
+    //   u32 check), last_full u32, k u8, HEAL_MISSED: missed_x u32, missed u8,
     //   ROWS:   u16 n x row (the journal's row layout: kind u8, owner u32,
     //           name str16, position 3 f64, rotation 4 f64, linear 3 f32,
     //           angular 3 f32, flags u8),
@@ -29,11 +32,22 @@ namespace bmmo {
     // A DETAIL answer repeats T's terms; one whose sample had left the ring
     // has rows 0, no balls and no ROWS section.
     struct session_world_report_msg : public serializable_message {
-        static constexpr uint8_t kSchema = 1;
+        static constexpr uint8_t kSchema = 2;
         static constexpr uint8_t FLAG_UNCONFIRMED = 1;   // the observer's verdict was not CONFIRMED (why != 0)
         static constexpr uint8_t FLAG_PENDING = 2;       // sent while a resync is pending, past the 660-tick hold
         static constexpr uint8_t FLAG_DETAIL = 4;        // the answer to `opened`: the DETAIL section follows
         static constexpr uint8_t FLAG_ROWS = 8;          // the rows section follows
+        static constexpr uint8_t FLAG_HEAL_MISSED = 16;  // a fork heal's state could not be applied (missed_x, missed)
+        static constexpr uint8_t FLAG_PRE_HEAL = 32;     // T <= heal_x: a record the in-place heal retired, not compared
+        // Why a fork heal's state was not applied (HEAL_MISSED).
+        enum class missed_reason : uint8_t {
+            left_history = 0, light, resync_pending, other_epoch, waiting, refused, undecodable, count
+        };
+        static const char* missed_name(uint8_t r) {
+            static constexpr const char* names[] = {"left_history", "light", "resync_pending", "other_epoch", "waiting", "refused",
+                                                    "undecodable"};
+            return r < static_cast<uint8_t>(missed_reason::count) ? names[r] : "?";
+        }
         static constexpr size_t kMaxRows = 4096;
         static constexpr size_t kMaxName = 256;
 
@@ -54,6 +68,12 @@ namespace bmmo {
         std::vector<std::pair<uint32_t, uint64_t>> balls;   // by owner
         uint64_t buckets[8] = {};
         std::vector<uint32_t> latched;                      // the owners latched in the airship zone at T
+        uint32_t heal_x = 0;                                // the X of the last in-place heal applied (0 none)
+        session::resync_ref_id held;                        // the resync state the member holds (the heal's reference)
+        uint32_t last_full = 0;                             // the last full snapshot it had (a fallback's)
+        uint8_t k = 0;                                      // its sparse capture: a whole record every k-th tick
+        uint32_t missed_x = 0;                              // HEAL_MISSED: the X that could not be applied
+        uint8_t missed = 0;                                 // HEAL_MISSED: missed_reason
         std::vector<session::body_state> body_rows;         // ROWS
         uint32_t episode = 0;                               // DETAIL
         uint32_t fold_first = 0;                            // DETAIL: the tick of folds[0]
@@ -80,6 +100,9 @@ namespace bmmo {
             const uint8_t nl = count8(latched.size());
             put(nl);
             for (size_t i = 0; i < nl; ++i) put(latched[i]);
+            const uint8_t has = held.held ? 1 : 0;
+            put(heal_x); put(has); put(held.tick); put(held.check); put(last_full); put(k);
+            if (f & FLAG_HEAL_MISSED) { put(missed_x); put(missed); }
             if (f & FLAG_ROWS) {
                 const auto nr = static_cast<uint16_t>(std::min(body_rows.size(), kMaxRows));
                 put(nr);
@@ -132,6 +155,11 @@ namespace bmmo {
             if (!get(nl) || !fits(nl, 4)) return false;
             latched.resize(nl);
             for (uint32_t& o: latched) if (!get(o)) return false;
+            uint8_t has = 0;
+            if (!(get(heal_x) && get(has) && has <= 1 && get(held.tick) && get(held.check) && get(last_full) && get(k)))
+                return false;
+            held.held = has != 0;
+            if ((flags & FLAG_HEAL_MISSED) && !(get(missed_x) && get(missed))) return false;
             body_rows.clear();
             if (flags & FLAG_ROWS) {
                 uint16_t nr = 0;

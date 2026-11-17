@@ -222,7 +222,10 @@ namespace bmmo::session {
         world_hooks_.before_replayed_births = [this](uint32_t tick) { forget_spawn_groups_replayed(tick); };
         // Step FD1: a replayed sample tick's airship zone status, read where
         // the live one is (right after the step, before any correction).
-        world_hooks_.after_replayed_step = [this](uint32_t tick) { world_check_zone(tick); };
+        world_hooks_.after_replayed_step = [this](uint32_t tick) {
+            inject_fork(tick, false);   // step FD3b's test switch, before the zone read
+            world_check_zone(tick);
+        };
         // Every decision the engine takes about a snapshot, straight into
         // the box: no log parsing needed to know what this client did.
         world_hooks_.on_correction = [this](const bmmo::session::rollback_correction& c) { journal_.rollback_correction(c); };
@@ -1596,10 +1599,10 @@ namespace bmmo::session {
                    {now, restored ? *restored : restored_at, s.rollback_.stats().resim_ticks - resim_before});
             world_check_rewind(anchor, now, cause, s.rollback_.stats().resim_ticks - resim_before, body);
         }
-        if (s.rollback_.stats().frozen != frozen_before) request_resync("local physics clock frozen", true);
+        if (s.rollback_.stats().frozen != frozen_before) request_resync(resync_why::physics_fault, "local physics clock frozen", true);
         // C3 (record-format-gaps design 2.3 step 6, step RK1): a refused
         // write of the physics globals dropped the history the same way.
-        else if (s.rollback_.stats().globals_failures != globals_before) request_resync("physics globals refused", true);
+        else if (s.rollback_.stats().globals_failures != globals_before) request_resync(resync_why::physics_fault, "physics globals refused", true);
         // Step EL7: what the reconcile queued and no replay applied.
         settle_unreplayed_lives(now);
         settle_own_due();   // step EL8: the own ball's
@@ -1615,7 +1618,7 @@ namespace bmmo::session {
     // renumbers and its full snapshot replaces the world, which covers
     // every reason found meanwhile (a blackout can hold the answer past
     // the limiter's 2 s; 10 s is the give-up for an answer never coming).
-    void session_client_core::request_resync(const char* reason, bool owed) {
+    void session_client_core::request_resync(resync_why why, const char* reason, bool owed) {
         if (s.phase_ != client_core_state::phase::running || !s.assigned_) return;
         const auto now = platform_.now(clock_site::resync_limiter);
         if (s.resync_in_flight_ && now - s.last_resync_request_ < std::chrono::seconds(10)) return;
@@ -1623,6 +1626,7 @@ namespace bmmo::session {
             if (owed && !s.resync_owed_) {
                 s.resync_owed_ = true;
                 s.resync_owed_reason_ = reason;
+                s.resync_owed_why_ = why;
                 logf("resync owed (%s) at tick %u: the limiter holds it back", reason, current_tick());
             }
             return;
@@ -1648,6 +1652,7 @@ namespace bmmo::session {
         msg.session = s.session_;
         msg.last_full_tick = s.last_snapshot_tick_;
         msg.held = s.resync_ref_;   // protocol 34: the answer may be coded against it
+        msg.why = static_cast<uint8_t>(why);   // protocol 43
         msg.serialize();
         platform_.send(msg.raw.str(), send_mode::reliable);
         ++s.resyncs_sent_;
@@ -1672,7 +1677,7 @@ namespace bmmo::session {
             return;
         }
         const std::string reason = s.resync_owed_reason_ + " (owed)";
-        request_resync(reason.c_str(), true);
+        request_resync(s.resync_owed_why_, reason.c_str(), true);
     }
 
     // ---------------------------------------------------------- sending

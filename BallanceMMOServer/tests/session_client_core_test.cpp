@@ -1349,12 +1349,12 @@ namespace {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
         run_to_anchor(core, fake);
-        core.request_resync("before the base");
+        core.request_resync(bmmo::session_resync_msg::reason::other, "before the base");
         EXPECT_EQ(state_of(core).resyncs_sent_, 0u);
         core.on_session_assign(assign_message(9, 120));
         state_of(core).last_snapshot_tick_ = 115;
         size_t from = fake.calls.size();
-        core.request_resync("first");
+        core.request_resync(bmmo::session_resync_msg::reason::other, "first");
         EXPECT_EQ(state_of(core).resyncs_sent_, 1u);
         EXPECT_TRUE(state_of(core).resync_in_flight_);
         {
@@ -1368,7 +1368,7 @@ namespace {
         // In flight: nothing for 10 s, not even an owed note.
         fake.advance(std::chrono::milliseconds(5000));
         from = fake.calls.size();
-        core.request_resync("in flight", true);
+        core.request_resync(bmmo::session_resync_msg::reason::other, "in flight", true);
         EXPECT_FALSE(state_of(core).resync_owed_);
         EXPECT_EQ(since(fake.calls, from), std::vector<std::string>{"now:resync_limiter"});
         // Answered (a newer base), then asked again within 2 s: owed.
@@ -1376,9 +1376,9 @@ namespace {
         state_of(core).resync_pending_ = false;
         fake.advance(std::chrono::milliseconds(-4000));   // 1 s after the first request
         from = fake.calls.size();
-        core.request_resync("not owed");
+        core.request_resync(bmmo::session_resync_msg::reason::other, "not owed");
         EXPECT_FALSE(state_of(core).resync_owed_);
-        core.request_resync("owed", true);
+        core.request_resync(bmmo::session_resync_msg::reason::other, "owed", true);
         EXPECT_TRUE(state_of(core).resync_owed_);
         EXPECT_EQ(state_of(core).resync_owed_reason_, "owed");
         {
@@ -1764,7 +1764,7 @@ namespace {
         for (uint32_t t = 0; t < 5; ++t) core.on_session_snapshot(snapshot_message(9, 160 + t, false, {}));
         EXPECT_EQ(core.unmatched_run(), 5);
         fake.advance(std::chrono::seconds(11));   // past the limiter and the in-flight give-up
-        core.request_resync("test");
+        core.request_resync(bmmo::session_resync_msg::reason::other, "test");
         EXPECT_EQ(state_of(core).resyncs_sent_, 2u);
         EXPECT_EQ(core.unmatched_run(), 0);
         // The rollback off (the legacy ladder): not counted.

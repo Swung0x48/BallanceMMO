@@ -3063,6 +3063,7 @@ namespace bmmo::session {
             sparse_every_ = std::min(every, kSparseCaptureMax);
             sparse_verify_ = verify && sparse_every_ > 1;
         }
+        uint32_t sparse_every() const { return sparse_every_; }
         // Step RLL: the replay's last tick under the same rule as the others
         // (light unless a multiple of `every`, a birth record, rows or no
         // record before it make it whole), where SRT4 recorded it whole.
